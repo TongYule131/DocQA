@@ -15,6 +15,8 @@ dependencies = [
   "python-multipart>=0.0.18,<1",
   "pydantic>=2.9,<3",
   "pypdf>=5,<7",
+  "openai>=1.66,<3",
+  "python-dotenv>=1,<2",
 ]
 
 [project.optional-dependencies]

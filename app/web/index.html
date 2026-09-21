@@ -12,7 +12,12 @@
   <header><a class="brand" href="/">D<span>DocQA</span></a><a href="/docs" target="_blank" rel="noopener">接口文档 ↗</a></header>
   <main>
     <section class="intro"><div class="eyebrow">文档知识工作台 / FRAMEWORK 0.1</div><h1>让知识，从文档开始。</h1><p>集中管理资料，解析文档内容，为智能分析和有据可循的问答做好准备。</p></section>
-    <div class="notice">当前已支持 PDF 文本层和 UTF-8 TXT 解析。OCR、摘要、问答及信息提取等待接入模型。</div>
+    <div class="notice">当前支持 PDF 文本层和 UTF-8 TXT 解析。DeepSeek 可单独测试连接；文档问答、摘要、提取与 OCR 尚待实现。</div>
+    <!-- 配置由服务端读取；页面不收集或显示 API Key。连接测试只发送固定短消息。 -->
+    <section class="model-panel" aria-label="模型连接">
+      <div><strong>DeepSeek 模型连接</strong><p id="model-status" class="muted">正在读取配置…</p></div>
+      <div><button id="test-model" type="button" class="secondary" disabled>测试连接</button><p class="muted">测试将调用 API，可能产生少量费用。</p></div>
+    </section>
     <!-- 统一状态提示区；aria-live 让辅助阅读工具感知提示更新。 -->
     <div id="message" role="status" aria-live="polite"></div>
     <div class="workspace">

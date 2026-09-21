@@ -5,6 +5,7 @@ const statusLabels = { uploaded: '待解析', parsing: '解析中', parsed: '已
 let selectedId = null;
 let documents = [];
 let busy = false;
+let modelConfigured = false;
 
 async function api(path, options = {}) {
   // 统一 API 前缀与错误转换，让操作入口只处理成功数据或错误提示。
@@ -21,6 +22,7 @@ function controls() {
   for (const id of ['summary', 'extract', 'question', 'ask']) $(id).disabled = busy || doc?.status !== 'parsed';
   $('upload-form').querySelector('button').disabled = busy;
   $('refresh').disabled = busy;
+  $('test-model').disabled = busy || !modelConfigured;
   for (const button of $('documents').querySelectorAll('button')) button.disabled = busy;
 }
 
@@ -78,6 +80,9 @@ async function select(id) {
 
 async function refresh() {
   // 重新获取服务端状态；当前选择仍有效时，同时刷新详情。
+  const model = await api('/model/status');
+  modelConfigured = model.configured;
+  $('model-status').textContent = `${model.model} · ${model.configured ? '已配置，尚未测试连接' : '未配置密钥，请填写本地 .env 并重启服务'}`;
   documents = await api('/documents');
   renderDocuments();
   if (selectedId && documents.some((doc) => doc.id === selectedId)) await select(selectedId);
@@ -97,6 +102,18 @@ $('upload-form').onsubmit = (event) => {
   });
 };
 $('refresh').onclick = () => run(refresh);
+// 不在页面加载时自动调用模型；仅点击后发送固定测试消息。
+$('test-model').onclick = () => run(async () => {
+  $('model-status').textContent = '正在连接 DeepSeek，请稍候…';
+  try {
+    const result = await api('/model/test', { method: 'POST' });
+    $('model-status').textContent = `${result.model} · 连接成功`;
+    $('message').textContent = `模型回复：${result.answer}`;
+  } catch (error) {
+    $('model-status').textContent = '连接测试失败';
+    throw error;
+  }
+});
 $('parse').onclick = () => run(async () => {
   // 即使解析失败也重新读取状态，确保页面能显示服务端记录的错误。
   try { await api(`/documents/${selectedId}/parse`, { method: 'POST' }); }

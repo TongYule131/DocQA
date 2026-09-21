@@ -13,6 +13,9 @@ h1{font-size:36px;margin:16px 0;font-weight:650}
 p{line-height:1.7}
 .intro p{color:#77837b;margin-bottom:28px}
 .notice{border:1px solid #d7e3d4;background:#ecf2e7;color:#556e4b;padding:14px 18px;border-radius:8px;font-size:13px}
+/* 模型状态和测试按钮；窄屏允许自动换行。 */
+.model-panel{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;padding:16px 18px;margin-top:16px;border:1px solid #dce3db;border-radius:8px;background:white}
+.model-panel p{margin:6px 0 0}
 /* 桌面双栏工作区：文档库与内容详情 */
 .workspace{display:grid;grid-template-columns:310px minmax(0,1fr);gap:22px;margin-top:20px}
 .panel{background:#fff;border:1px solid #e0e5dd;border-radius:12px;padding:24px;min-width:0}

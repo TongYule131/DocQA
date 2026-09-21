@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import Settings
+from app.deepseek import DeepSeekModel, ModelError
 from app.parsing import ParseError, chunk_pages, parse_document
 from app.repository import Repository
 from app.schemas import Answer, Chunk, Document, Extraction, Question, Summary
@@ -19,7 +20,8 @@ logger = logging.getLogger(__name__)
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     # 应用工厂支持注入配置，测试可使用独立临时目录而不污染实际资料。
-    settings = settings or Settings()
+    settings = settings or Settings.from_env()
+    model = DeepSeekModel(settings)
     repository = Repository(settings.data_dir / "docqa.db")
     upload_dir = settings.data_dir / "uploads"
     web_dir = Path(__file__).parent / "web"
@@ -46,7 +48,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         document = require_document(document_id)
         if document.status != "parsed":
             raise HTTPException(409, "请先成功解析文档")
-        raise HTTPException(503, "智能能力尚未接入：需配置大模型、Embedding 和向量检索适配器")
+        raise HTTPException(503, "文档智能功能尚未实现：需接入 Embedding、检索与分析流程；模型连接测试请使用页面上方入口")
 
     @app.get("/", include_in_schema=False)
     def home():
@@ -58,12 +60,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # 仅报告应用可响应，不代表外部模型或检索服务可用。
         return {"status": "ok", "version": "0.1.0"}
 
+    @app.get("/api/model/status")
+    def model_status():
+        # 配置状态不等于连通性；读取此接口不会调用模型，也不返回密钥。
+        return {"provider": "deepseek", "model": settings.deepseek_model,
+                "configured": bool(settings.deepseek_api_key.strip()),
+                "thinking": settings.deepseek_thinking,
+                "reasoning_effort": settings.deepseek_reasoning_effort}
+
+    @app.post("/api/model/test")
+    def test_model():
+        # 用户主动触发时才发送固定测试消息，不携带任何已上传的文档内容。
+        try:
+            answer = model.generate("你是一个连接测试助手，请简短回复。", "请回复：连接成功")
+        except ModelError as exc:
+            raise HTTPException(exc.status_code, str(exc)) from None
+        return {"provider": "deepseek", "model": settings.deepseek_model, "answer": answer}
+
     @app.get("/api/capabilities")
     def capabilities():
         # 能力清单反映当前实现状态；协议接口存在不等于能力已经接入。
         return {"upload": True, "text_pdf_parsing": True, "utf8_txt_parsing": True,
                 "ocr": False, "embedding": False, "rag": False, "summary": False,
-                "extraction": False, "model_adapters": {"qwen": False, "chatglm": False, "llama": False}}
+                "extraction": False, "model_adapters": {"deepseek": True, "qwen": False, "chatglm": False, "llama": False},
+                "model_configured": bool(settings.deepseek_api_key.strip())}
 
     @app.get("/api/documents", response_model=list[Document])
     def list_documents():
