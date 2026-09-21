@@ -1,0 +1,63 @@
+/* 全局字体、配色和基础布局 */
+:root{font-family:Inter,"Segoe UI","Microsoft YaHei",sans-serif;color:#243c35;background:#f5f6f2;font-synthesis:none}
+*{box-sizing:border-box}
+body{margin:0}
+header{height:82px;max-width:1320px;margin:auto;padding:0 40px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #dce3db}
+a{color:#426453;text-decoration:none;font-size:14px}
+.brand{display:flex;align-items:center;gap:12px;font-size:22px;font-weight:750}
+.brand:first-letter{color:#377c59}
+.brand span{font-size:19px}
+main{max-width:1320px;margin:auto;padding:44px 40px}
+.eyebrow{font-size:11px;letter-spacing:2px;color:#758378}
+h1{font-size:36px;margin:16px 0;font-weight:650}
+p{line-height:1.7}
+.intro p{color:#77837b;margin-bottom:28px}
+.notice{border:1px solid #d7e3d4;background:#ecf2e7;color:#556e4b;padding:14px 18px;border-radius:8px;font-size:13px}
+/* 桌面双栏工作区：文档库与内容详情 */
+.workspace{display:grid;grid-template-columns:310px minmax(0,1fr);gap:22px;margin-top:20px}
+.panel{background:#fff;border:1px solid #e0e5dd;border-radius:12px;padding:24px;min-width:0}
+.panel-title{display:flex;align-items:center;justify-content:space-between;gap:12px}
+h2{font-size:18px;overflow-wrap:anywhere}
+button{font:inherit;font-size:13px;border:0;border-radius:6px;background:#32644c;color:white;padding:11px 16px;cursor:pointer;white-space:nowrap}
+button:hover{filter:brightness(.93)}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.subtle{background:transparent;color:#657e6c;padding:6px}
+.secondary{background:#eff3ed;color:#45694f}
+label{display:block;font-size:13px;margin:12px 0}
+input{font:inherit;border:1px solid #d9e2d8;border-radius:6px;padding:12px;max-width:100%;min-width:0}
+input[type=file]{width:100%;font-size:12px;padding:12px 8px;background:#f8faf6}
+#upload-form>button{width:100%;margin-top:12px}
+/* 文档列表与选中状态 */
+.document-list{margin-top:26px}
+.document-item{display:block;width:100%;text-align:left;color:#455e4d;background:#f7f9f5;border:1px solid transparent;margin:8px 0;white-space:normal;overflow-wrap:anywhere}
+.document-item.active{border-color:#7ba082;background:#edf4eb}
+.document-item small{display:block;color:#7a877c;margin-top:7px}
+.muted{color:#7e877f;font-size:12px}
+.actions{display:flex;flex-wrap:wrap;gap:10px;margin:24px 0}
+/* 固定高度的原文分块区，长内容在区域内滚动 */
+.chunks{height:330px;overflow:auto;background:#fafbf8;border:1px solid #e6ebe2;border-radius:8px;padding:18px}
+.chunk{border-bottom:1px solid #e4e9df;padding:6px 0 18px;margin-bottom:12px}
+.chunk p{white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px}
+.chunk small{color:#6a886c}
+.empty{padding:65px 20px;text-align:center;color:#8a968b}
+.empty span{font-size:11px;letter-spacing:2px}
+.empty h3{font-size:19px;color:#657969}
+.empty p{font-size:13px}
+/* 问答输入、操作提示和智能结果 */
+.question-row{display:flex;gap:10px}
+.question-row input{flex:1;width:100%}
+#question-form{margin-top:26px}
+#message:empty{display:none}
+#message{padding:12px 16px;margin-top:14px;background:#fff3df;border-radius:6px;color:#795722;font-size:13px}
+#result{white-space:pre-wrap;overflow-wrap:anywhere;background:#f0f5eb;padding:16px;font-family:inherit}
+footer{text-align:center;color:#98a092;font-size:11px;padding:12px 0 32px}
+:focus-visible{outline:2px solid #5b9373;outline-offset:3px}
+/* 窄屏适配：双栏改为单栏，缩小外边距和字号 */
+@media(max-width:760px){header{padding:0 20px}
+main{padding:28px 18px}
+.workspace{grid-template-columns:1fr}
+h1{font-size:28px}
+.panel{padding:18px}
+.chunks{height:300px}
+.panel-title{flex-wrap:wrap}
+}

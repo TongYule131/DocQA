@@ -1,0 +1,34 @@
+[build-system]
+# 使用 setuptools 构建并支持开发环境的可编辑安装。
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# 项目元数据与运行依赖；具体已验证版本见 requirements.lock.txt。
+name = "docqa"
+version = "0.1.0"
+description = "智能文档分析与知识问答系统基础框架"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.30,<1",
+  "python-multipart>=0.0.18,<1",
+  "pydantic>=2.9,<3",
+  "pypdf>=5,<7",
+]
+
+[project.optional-dependencies]
+# 开发依赖用于运行 API 回归测试，不参与智能模型推理。
+dev = ["pytest>=7,<9", "httpx>=0.27,<1"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.setuptools.package-data]
+# 将工作台静态资源一并打包，确保安装后仍可访问页面。
+app = ["web/*"]
+
+[tool.pytest.ini_options]
+# 统一测试发现目录，并让项目根目录中的 app 包可被导入。
+testpaths = ["tests"]
+pythonpath = ["."]
