@@ -1,0 +1,11 @@
+services:
+  parser:
+    image: docqa/docling-ocr-gpu:1.34.0-ort1.30.0
+    environment:
+      # ONNX Runtime 的 CUDA provider 是独立动态库（libonnxruntime_providers_cuda.so），
+      # 需要链接 pip 安装的 CUDA/cuDNN 库。这些库位于 site-packages/nvidia/*/lib，
+      # 显式提供搜索路径，使独立 ORT 进程也能加载依赖，减少对导入顺序的依赖。
+      # Docling 2.128.0 的设备选择函数会导入 torch；不能据此配置反推历史任务曾回退 CPU。
+      # 实际是否使用 GPU，应检查真实会话的执行记录，而不是仅观察显存或插件警告。
+      LD_LIBRARY_PATH: >-
+        /opt/app-root/lib/python3.12/site-packages/nvidia/cu13/lib:/opt/app-root/lib/python3.12/site-packages/nvidia/cudnn/lib:/opt/app-root/lib/python3.12/site-packages/nvidia/cusparselt/lib:/opt/app-root/lib/python3.12/site-packages/nvidia/nccl/lib:/opt/app-root/lib/python3.12/site-packages/nvidia/nvshmem/lib

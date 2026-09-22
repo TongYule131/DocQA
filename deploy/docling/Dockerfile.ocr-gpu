@@ -1,0 +1,11 @@
+﻿FROM quay.io/docling-project/docling-serve-cu130:v1.34.0
+
+USER 0
+
+# 移除 CPU 版本，避免两个包同时提供 onnxruntime 模块。
+# 保留基础镜像已有依赖，只替换同版本 GPU 推理包。
+RUN /opt/app-root/bin/python -m pip uninstall -y onnxruntime onnxruntime-gpu \
+    && /opt/app-root/bin/python -m pip install --no-cache-dir --no-deps onnxruntime-gpu==1.30.0
+
+# 恢复官方镜像使用的非 root 用户。
+USER 1001

@@ -1,0 +1,46 @@
+# 独立验证环境：不读取项目 .env，不挂载业务数据库和 API 密钥。
+name: docqa-parser-lab
+services:
+  parser:
+    image: quay.io/docling-project/docling-serve-cu130:v1.34.0
+    ports:
+      - "127.0.0.1:5001:5001"
+    environment:
+      # 默认启用 GPU；OCR 的 GPU 包和库路径由 compose.ocr-gpu.yaml 补充。
+      DOCLING_DEVICE: ${PARSER_DEVICE:-cuda}
+      DOCLING_NUM_THREADS: "4"
+      DOCLING_SERVE_ENG_LOC_NUM_WORKERS: "1"
+      DOCLING_SERVE_OPTIONS_CACHE_SIZE: "1"
+      # 默认模型不一定是 RapidOCR；通过首个明确指定 OCR 的请求预热。
+      DOCLING_SERVE_LOAD_MODELS_AT_BOOT: "false"
+      DOCLING_SERVE_ENABLE_REMOTE_SERVICES: "false"
+      DOCLING_SERVE_ENABLE_UI: "false"
+      DOCLING_SERVE_SINGLE_USE_RESULTS: "false"
+      DOCLING_SERVE_MAX_DOCUMENT_TIMEOUT: "1800"
+      DOCLING_SERVE_MAX_NUM_PAGES: "100"
+      DOCLING_SERVE_MAX_FILE_SIZE: "52428800"
+      DOCLING_SERVE_OCR_BATCH_SIZE: "1"
+      DOCLING_SERVE_LAYOUT_BATCH_SIZE: "1"
+      DOCLING_SERVE_TABLE_BATCH_SIZE: "1"
+      DOCLING_SERVE_ARTIFACTS_PATH: /opt/app-root/src/.cache/docling/models
+    volumes:
+      # 首次创建命名卷时复制镜像已有缓存；不要改为空目录的 bind mount。
+      - models:/opt/app-root/src/.cache
+    cpus: 4
+    mem_limit: 12g
+    shm_size: 1g
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5001/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 60s
+volumes:
+  models:

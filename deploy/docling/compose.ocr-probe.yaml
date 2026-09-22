@@ -1,0 +1,9 @@
+# 仅用于一次验收；与基础配置、GPU 覆盖配置共同使用。完成后去掉此文件重建服务。
+services:
+  parser:
+    command: ["python", "/opt/docqa-probe/serve_with_ocr_probe.py"]
+    environment:
+      DOCQA_OCR_PROBE_DIR: /tmp/docqa-ocr-probe
+    volumes:
+      - ../../scripts/serve_with_ocr_probe.py:/opt/docqa-probe/serve_with_ocr_probe.py:ro
+      - ../../data/docling-validation/ocr-probe:/tmp/docqa-ocr-probe
