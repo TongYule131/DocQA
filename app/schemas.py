@@ -36,6 +36,12 @@ class Question(BaseModel):
     question: str = Field(min_length=1, max_length=4000, pattern=r"\S")
 
 
+class SearchRequest(BaseModel):
+    # 只检索当前文档，限制返回数量，避免一次请求取回过多原文。
+    query: str = Field(min_length=1, max_length=4000, pattern=r"\S")
+    top_k: int = Field(default=5, ge=1, le=20)
+
+
 class Citation(BaseModel):
     # 来源包含文档、分块、页码及引用文本；真实性需由后续业务层校验。
     document_id: str

@@ -6,14 +6,16 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import Settings
 from app.deepseek import DeepSeekModel, ModelError
+from app.embedding import APIEmbedding, EmbeddingError
+from app.vector_index import DocumentIndex
 from app.parsing import ParseError, chunk_pages, parse_document
 from app.repository import Repository
-from app.schemas import Answer, Chunk, Document, Extraction, Question, Summary
+from app.schemas import Answer, Chunk, Document, Extraction, Question, SearchRequest, Summary
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     model = DeepSeekModel(settings)
     repository = Repository(settings.data_dir / "docqa.db")
+    embedding = APIEmbedding(settings)
+    index = DocumentIndex(repository, embedding)
     upload_dir = settings.data_dir / "uploads"
     web_dir = Path(__file__).parent / "web"
 
@@ -36,6 +40,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="智能文档分析与知识问答系统", version="0.1.0", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=web_dir), name="static")
 
+    @app.exception_handler(EmbeddingError)
+    async def embedding_error_handler(request, exc: EmbeddingError):
+        # 统一转换适配器与索引服务中的安全错误，不返回上游原始响应。
+        return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
+
     def require_document(document_id: str) -> Document:
         # 各文档接口共用存在性校验，统一返回 404。
         document = repository.get(document_id)
@@ -48,7 +57,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         document = require_document(document_id)
         if document.status != "parsed":
             raise HTTPException(409, "请先成功解析文档")
-        raise HTTPException(503, "文档智能功能尚未实现：需接入 Embedding、检索与分析流程；模型连接测试请使用页面上方入口")
+        raise HTTPException(503, "文档答案生成、摘要与提取尚未接入；当前可建立向量索引并检索原文")
 
     @app.get("/", include_in_schema=False)
     def home():
@@ -81,9 +90,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def capabilities():
         # 能力清单反映当前实现状态；协议接口存在不等于能力已经接入。
         return {"upload": True, "text_pdf_parsing": True, "utf8_txt_parsing": True,
-                "ocr": False, "embedding": False, "rag": False, "summary": False,
+                "ocr": False, "embedding": True, "retrieval": True, "rag": False, "summary": False,
                 "extraction": False, "model_adapters": {"deepseek": True, "qwen": False, "chatglm": False, "llama": False},
-                "model_configured": bool(settings.deepseek_api_key.strip())}
+                "model_configured": bool(settings.deepseek_api_key.strip()),
+                "embedding_configured": bool(settings.embedding_api_key.strip())}
+
+    @app.get("/api/embedding/status")
+    def embedding_status():
+        # 仅查看配置，不发起收费请求；维度以实际向量化结果为准。
+        return {"model": settings.embedding_model, "base_url": settings.embedding_base_url,
+                "configured": bool(settings.embedding_api_key.strip()),
+                "batch_size": settings.embedding_batch_size}
+
+    @app.post("/api/embedding/test")
+    def test_embedding():
+        # 固定短文本不含任何用户文档，展示维度和少量向量值用于确认响应格式。
+        vector = embedding.embed(["这是一条文档检索连接测试文本。"])[0]
+        return {"model": settings.embedding_model, "dimension": len(vector), "preview": vector[:5]}
+
+    @app.get("/api/documents/{document_id}/index")
+    def index_status(document_id: str):
+        require_document(document_id)
+        return index.status(document_id)
+
+    @app.post("/api/documents/{document_id}/index")
+    def build_index(document_id: str, rebuild: bool = False):
+        # 索引创建由用户主动触发，会将当前文档分块发送到配置的网关。
+        if require_document(document_id).status != 'parsed':
+            raise HTTPException(409, "请先成功解析文档")
+        return index.build(document_id, rebuild=rebuild)
+
+    @app.post("/api/documents/{document_id}/search")
+    def search_document(document_id: str, payload: SearchRequest):
+        require_document(document_id)
+        return {"results": index.search(document_id, payload.query, payload.top_k)}
 
     @app.get("/api/documents", response_model=list[Document])
     def list_documents():

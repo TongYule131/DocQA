@@ -6,6 +6,9 @@ let selectedId = null;
 let documents = [];
 let busy = false;
 let modelConfigured = false;
+let embeddingConfigured = false;
+let indexState = 'pending';
+const indexLabels = { pending: '未建立索引', indexing: '正在建立索引', indexed: '索引可用', failed: '索引失败', stale: '模型或原文已变更，请重建索引' };
 
 async function api(path, options = {}) {
   // 统一 API 前缀与错误转换，让操作入口只处理成功数据或错误提示。
@@ -23,6 +26,10 @@ function controls() {
   $('upload-form').querySelector('button').disabled = busy;
   $('refresh').disabled = busy;
   $('test-model').disabled = busy || !modelConfigured;
+  $('test-embedding').disabled = busy || !embeddingConfigured;
+  $('build-index').disabled = busy || !embeddingConfigured || doc?.status !== 'parsed' || ['indexed', 'indexing'].includes(indexState);
+  $('rebuild-index').disabled = busy || !embeddingConfigured || doc?.status !== 'parsed' || indexState === 'indexing';
+  for (const id of ['search-query', 'search']) $(id).disabled = busy || !embeddingConfigured || indexState !== 'indexed';
   for (const button of $('documents').querySelectorAll('button')) button.disabled = busy;
 }
 
@@ -61,12 +68,15 @@ function renderDocuments() {
 async function select(id) {
   // 切换时清空旧结果，随后加载该文档的来源片段。
   selectedId = id;
+  indexState = 'pending';
+  $('search-results').replaceChildren();
   renderDocuments();
   const doc = documents.find((item) => item.id === id);
   $('document-title').textContent = doc.filename;
   $('document-meta').textContent = `${statusLabels[doc.status]} · ${doc.page_count} 页 · ${doc.chunk_count} 个分块${doc.error ? ` · ${doc.error}` : ''}`;
   $('result').hidden = true;
   $('chunks').replaceChildren();
+  await refreshIndex();
   const chunks = await api(`/documents/${id}/chunks`);
   if (!chunks.length) $('chunks').textContent = '尚无解析内容。点击“解析文档”生成文本分块。';
   for (const chunk of chunks) {
@@ -83,6 +93,10 @@ async function refresh() {
   const model = await api('/model/status');
   modelConfigured = model.configured;
   $('model-status').textContent = `${model.model} · ${model.configured ? '已配置，尚未测试连接' : '未配置密钥，请填写本地 .env 并重启服务'}`;
+  const embedding = await api('/embedding/status');
+  embeddingConfigured = embedding.configured;
+  $('embedding-status').textContent = `${embedding.model} · ${embedding.configured ? '已配置，尚未测试连接' : '请填写 EMBEDDING_API_KEY 并重启服务'}`;
+  $('embedding-gateway').textContent = `网关：${embedding.base_url}`;
   documents = await api('/documents');
   renderDocuments();
   if (selectedId && documents.some((doc) => doc.id === selectedId)) await select(selectedId);
@@ -102,6 +116,54 @@ $('upload-form').onsubmit = (event) => {
   });
 };
 $('refresh').onclick = () => run(refresh);
+
+async function refreshIndex() {
+  const state = await api(`/documents/${selectedId}/index`);
+  indexState = state.status;
+  $('index-status').textContent = `${indexLabels[state.status]}${state.dimension ? ` · ${state.dimension} 维 · ${state.chunk_count} 个分块` : ''}${state.error ? ` · ${state.error}` : ''}`;
+}
+
+$('test-embedding').onclick = () => run(async () => {
+  $('embedding-status').textContent = '正在测试向量连接…';
+  try {
+    const result = await api('/embedding/test', { method: 'POST' });
+    $('embedding-status').textContent = `${result.model} · 连接成功 · ${result.dimension} 维`;
+  } catch (error) {
+    $('embedding-status').textContent = '向量连接测试失败';
+    throw error;
+  }
+});
+
+async function buildIndex(rebuild = false) {
+  $('index-status').textContent = '正在向量化文档，请稍候…';
+  $('search-results').replaceChildren();
+  try {
+    await api(`/documents/${selectedId}/index?rebuild=${rebuild}`, { method: 'POST' });
+  } finally {
+    await refreshIndex();
+  }
+}
+$('build-index').onclick = () => run(() => buildIndex());
+$('rebuild-index').onclick = () => run(() => buildIndex(true));
+
+$('search-form').onsubmit = (event) => {
+  event.preventDefault();
+  run(async () => {
+    $('search-results').replaceChildren();
+    const data = await api(`/documents/${selectedId}/search`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: $('search-query').value.trim(), top_k: 5 }),
+    });
+    // 相似度只用于排序，不显示为“可信度”；所有原文均使用纯文本渲染。
+    for (const hit of data.results) {
+      const article = document.createElement('article'); article.className = 'chunk';
+      const label = document.createElement('small'); label.textContent = `第 ${hit.page} 页 · 相似度 ${hit.score.toFixed(3)}`;
+      const text = document.createElement('p'); text.textContent = hit.text;
+      article.append(label, text); $('search-results').append(article);
+    }
+    if (!data.results.length) $('search-results').textContent = '没有可用的检索片段。';
+  });
+};
 // 不在页面加载时自动调用模型；仅点击后发送固定测试消息。
 $('test-model').onclick = () => run(async () => {
   $('model-status').textContent = '正在连接 DeepSeek，请稍候…';

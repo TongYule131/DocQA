@@ -12,11 +12,16 @@
   <header><a class="brand" href="/">D<span>DocQA</span></a><a href="/docs" target="_blank" rel="noopener">接口文档 ↗</a></header>
   <main>
     <section class="intro"><div class="eyebrow">文档知识工作台 / FRAMEWORK 0.1</div><h1>让知识，从文档开始。</h1><p>集中管理资料，解析文档内容，为智能分析和有据可循的问答做好准备。</p></section>
-    <div class="notice">当前支持 PDF 文本层和 UTF-8 TXT 解析。DeepSeek 可单独测试连接；文档问答、摘要、提取与 OCR 尚待实现。</div>
+    <div class="notice">当前支持文档解析、向量索引和原文检索。答案生成、摘要、信息提取与 OCR 尚待实现。</div>
     <!-- 配置由服务端读取；页面不收集或显示 API Key。连接测试只发送固定短消息。 -->
     <section class="model-panel" aria-label="模型连接">
       <div><strong>DeepSeek 模型连接</strong><p id="model-status" class="muted">正在读取配置…</p></div>
       <div><button id="test-model" type="button" class="secondary" disabled>测试连接</button><p class="muted">测试将调用 API，可能产生少量费用。</p></div>
+    </section>
+    <!-- Embedding 与回答模型分别配置，不在浏览器保存密钥。 -->
+    <section class="model-panel" aria-label="向量模型连接">
+      <div><strong>Embedding 向量模型</strong><p id="embedding-status" class="muted">正在读取配置…</p><p id="embedding-gateway" class="muted"></p></div>
+      <div><button id="test-embedding" type="button" class="secondary" disabled>测试向量连接</button><p class="muted">建立索引时会发送当前文档的文本分块到该网关。</p></div>
     </section>
     <!-- 统一状态提示区；aria-live 让辅助阅读工具感知提示更新。 -->
     <div id="message" role="status" aria-live="polite"></div>
@@ -29,6 +34,10 @@
       <!-- 右侧详情：控件默认禁用，选中文档后由脚本按解析状态启用。 -->
       <section class="panel detail"><div class="panel-title"><div><div class="eyebrow">文档内容</div><h2 id="document-title">选择一份文档</h2></div><button id="parse" disabled>解析文档</button></div>
         <p id="document-meta" class="muted">上传后选择文档，即可解析和查看文本分块。</p>
+        <div class="actions"><button id="build-index" class="secondary" disabled>建立向量索引</button><button id="rebuild-index" class="secondary" disabled>重建索引</button><span id="index-status" class="muted">尚未选择文档</span></div>
+        <!-- 索引建好后可先检查检索质量，再在下一阶段接入答案生成。 -->
+        <form id="search-form"><label for="search-query">检索当前文档原文</label><div class="question-row"><input id="search-query" placeholder="输入要查找的内容" maxlength="4000" required disabled><button id="search" disabled>检索原文</button></div></form>
+        <div id="search-results" aria-live="polite"></div>
         <div class="actions"><button id="summary" class="secondary" disabled>生成摘要</button><button id="extract" class="secondary" disabled>提取数据 / 结论 / 观点</button></div>
         <div id="chunks" class="chunks"><div class="empty"><span>01 / 导入资料</span><h3>建立你的文档知识库</h3><p>从左侧上传 PDF 或 TXT 文档，开始整理知识。</p></div></div>
         <form id="question-form"><label for="question">基于当前文档提问</label><div class="question-row"><input id="question" placeholder="这份文档的核心结论是什么？" maxlength="4000" required disabled><button id="ask" disabled>提问</button></div><p class="muted">模型接入后，回答将附带文档页码和来源片段。</p></form>

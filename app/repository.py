@@ -37,9 +37,20 @@ class Repository:
                     page INTEGER NOT NULL, text TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS ix_chunks_document ON chunks(document_id);
+                CREATE TABLE IF NOT EXISTS embedding_indexes (
+                    document_id TEXT PRIMARY KEY, status TEXT NOT NULL,
+                    provider_signature TEXT, source_signature TEXT,
+                    dimension INTEGER, chunk_count INTEGER NOT NULL DEFAULT 0, error TEXT
+                );
+                CREATE TABLE IF NOT EXISTS embedding_vectors (
+                    document_id TEXT NOT NULL, chunk_id TEXT PRIMARY KEY, vector TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ix_vectors_document ON embedding_vectors(document_id);
             """)
             # 框架使用同步解析；上次进程被中断的任务允许用户重新解析。
             db.execute("UPDATE documents SET status='failed', error='解析被中断，请重试' WHERE status='parsing'")
+            # 单进程模式下恢复上次被中断的索引任务；不删除已有文档或分块。
+            db.execute("UPDATE embedding_indexes SET status='failed', error='索引任务被中断，请重试' WHERE status='indexing'")
 
     def create(self, document: Document):
         # 参数绑定将数据与 SQL 分开；这里只保存元数据，不保存文件内容。
@@ -70,6 +81,9 @@ class Repository:
     def finish_parse(self, document_id: str, pages: int, chunks: list[Chunk]):
         # 替换分块与更新文档状态处于同一事务，避免只写入部分结果。
         with self.connect() as db:
+            # 重写原文时同步清理旧向量，避免引用已经失效的块 ID。
+            db.execute("DELETE FROM embedding_vectors WHERE document_id=?", (document_id,))
+            db.execute("DELETE FROM embedding_indexes WHERE document_id=?", (document_id,))
             db.execute("DELETE FROM chunks WHERE document_id=?", (document_id,))
             db.executemany("INSERT INTO chunks VALUES (:id,:document_id,:page,:text)", [c.model_dump() for c in chunks])
             db.execute("UPDATE documents SET status='parsed', page_count=?, chunk_count=?, error=NULL WHERE id=?", (pages, len(chunks), document_id))
