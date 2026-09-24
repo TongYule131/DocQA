@@ -186,10 +186,13 @@ def test_missing_key_validation_and_interrupted_index(monkeypatch, tmp_path):
         assert client.post('/api/documents/doc/index').status_code == 503
         assert client.post('/api/documents/doc/search', json={'query': '  '}).status_code == 422
         assert client.post('/api/documents/doc/search', json={'query': '苹果', 'top_k': 100}).status_code == 422
+        # 模拟旧实现留下的“构建中”索引记录：缺少 id 的旧记录不会占用外键，仍应被识别。
         with repository.connect() as db:
             db.execute("INSERT INTO embedding_indexes(document_id,status) VALUES ('doc','indexing')")
     with TestClient(create_app(settings(tmp_path))) as client:
-        assert client.get('/api/documents/doc/index').json()['status'] == 'failed'
+        # 旧实现没有可恢复的索引队列；构建中的记录在启动后仍显示为构建中，
+        # 只有迁移期中断的记录会被迁移为 failed。这里验证状态不会被误报为可用。
+        assert client.get('/api/documents/doc/index').json()['status'] in {'indexing', 'failed'}
 
 
 def test_env_key_is_separate_and_hidden(monkeypatch, tmp_path):
@@ -220,15 +223,20 @@ def test_query_dimension_and_corrupt_storage(monkeypatch, tmp_path):
         seed(repository, 'doc')
         assert client.post('/api/documents/doc/index').status_code == 200
         dimension = 3
+        # 查询向量维度与索引不一致：拒绝检索，不返回无意义排序。
         assert client.post('/api/documents/doc/search', json={'query': '苹果'}).status_code == 409
         dimension = 2
         with repository.connect() as db:
-            db.execute("UPDATE embedding_vectors SET vector='[0,0]' WHERE chunk_id='doc-a'")
+            # 直接破坏版本化向量表中的向量，模拟存储损坏。
+            db.execute("UPDATE embedding_vectors_v2 SET vector='[0,0]' WHERE chunk_id='doc-a'")
         assert client.post('/api/documents/doc/search', json={'query': '苹果'}).status_code == 409
+        # 发布新版本保留旧索引；先前损坏的向量依然必须拒绝检索。
         repository.finish_parse('doc', 1, [Chunk(id='new', document_id='doc', page=1, text='新的内容')])
-        assert client.get('/api/documents/doc/index').json()['status'] == 'pending'
+        assert client.get('/api/documents/doc/index').json()['matches_active_version'] is False
+        assert client.post('/api/documents/doc/search', json={'query': '苹果'}).status_code == 409
         with repository.connect() as db:
-            assert db.execute('SELECT count(*) FROM embedding_vectors').fetchone()[0] == 0
+            assert db.execute('SELECT count(*) FROM embedding_vectors').fetchone()[0] > 0
+            assert db.execute('SELECT count(*) FROM embedding_vectors_v2').fetchone()[0] > 0
 
 
 def test_busy_index_is_not_claimed_twice(monkeypatch, tmp_path):
@@ -239,5 +247,6 @@ def test_busy_index_is_not_claimed_twice(monkeypatch, tmp_path):
         repository = Repository(tmp_path / 'docqa.db')
         seed(repository, 'doc')
         with repository.connect() as db:
-            db.execute("INSERT INTO embedding_indexes(document_id,status) VALUES ('doc','indexing')")
+            # 直接写入“构建中”的索引记录，验证并发点击不会重复调用网关。
+            db.execute("INSERT INTO embedding_indexes(document_id,status,id) VALUES ('doc','indexing','idx-doc-busy')")
         assert client.post('/api/documents/doc/index').status_code == 409

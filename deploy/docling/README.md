@@ -1,6 +1,6 @@
 # Docling + RapidOCR GPU 验证环境
 
-仅用于独立解析验证，尚未接入 app/，不加载业务 .env、不调用在线模型。输出位于 Git 忽略目录 data/docling-validation/。按用户要求跳过 CPU 基线。
+这里维护独立的 GPU 解析服务与验证脚本；业务 app/ 已通过 HTTP 客户端接入该服务。独立验证脚本不加载业务 .env、不调用在线模型，输出位于 Git 忽略目录 data/docling-validation/。按用户要求跳过 CPU 基线。业务 Web 与 worker 的启动方式见项目根目录 README。
 
 ## 构建和启动
 
@@ -66,6 +66,8 @@ docker @dc up -d --force-recreate --pull never --wait --wait-timeout 180
 No registered plugin EP device 警告不能独立证明 CPU 回退。总显存包含其他模型与程序；整条流水线设备切换的耗时比不能归因于 OCR 单独加速。
 
 ## 验收边界
+
+2026-09-23 已完成 7 份样本转换和首轮内容对照，详见 [全样本解析质量验收](../../docs/Docling全样本解析质量验收.md)。全部接口成功，但公式缺失、中文条款错序、扫描目录页码错误及 Excel 无缓存公式静默为空仍需处理。该报告同时给出格式支持边界与下一阶段接入顺序。
 
 当前实际样本 7 份。合成扫描件不能证明真实扫描件准确率。还需核对姓名、数字、表头、阅读顺序与来源位置，以及重连和重启恢复。Excel 缺公式缓存要与解析漏字区分；PDF 空白页不应拒绝整份文档。
 
