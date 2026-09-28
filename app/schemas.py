@@ -7,7 +7,7 @@
 # 任何一组状态都不再用 documents.status 一个枚举表达。
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # 支持的输入格式：TXT 在本地解析，其余交给 Docling。
 DocumentFormat = Literal["txt", "pdf", "docx", "xlsx"]
@@ -308,6 +308,13 @@ class Citation(BaseModel):
 
 
 class Question(BaseModel):
+    """问答请求：只接受问题文本，明确拒绝额外字段。
+
+    调用方不能通过请求提交自定义 system prompt、上下文、chunk、模型端点或文档路径；
+    top_k 与预算均由服务端配置，不作为本次请求参数。
+    """
+    model_config = ConfigDict(extra="forbid")
+
     # 限制问题长度，并要求至少包含一个非空白字符。
     question: str = Field(min_length=1, max_length=4000, pattern=r"\S")
 
@@ -316,6 +323,74 @@ class Answer(BaseModel):
     # 问答响应契约：正文和支撑答案的来源列表。
     answer: str
     citations: list[Citation]
+
+
+# ----------------------------------------------------------------------
+# RAG 问答契约（第一版：单文档、单轮、非流式）
+# ----------------------------------------------------------------------
+RagStatus = Literal["answered", "clarification_needed", "insufficient_evidence"]
+
+
+class RagFact(BaseModel):
+    """一条已通过校验的简短事实；refs 由后端从已校验结构复制，编号由服务端分配。"""
+    text: str
+    refs: list[int]
+
+
+class RagCitation(BaseModel):
+    """引用卡片：引述来自通过校验的模型引述，定位信息全部来自本次证据映射。
+
+    sources 完整保留已有来源结构（含 bbox、章节/表号、工作表/单元格、TXT 行号），
+    不把 Office 或 TXT 的来源一律精简成 PDF 页码。
+    """
+    reference_id: int
+    document_id: str
+    chunk_id: str
+    parse_version_id: str | None = None
+    page: int | None = None
+    quote: str
+    sources: list[SourceLocation] = Field(default_factory=list)
+
+
+class RagRetrievalStats(BaseModel):
+    """本次检索统计：字符预算不是 token 预算，不在此宣称精确 token 限制。"""
+    candidate_count: int
+    selected_count: int
+    context_chars: int
+    truncated: bool
+
+
+class RagTimings(BaseModel):
+    """真实非负耗时；没有调用生成时 generation 为 0，不编造 token 用量。"""
+    retrieval: int
+    generation: int
+    total: int
+
+
+class RagAnswer(BaseModel):
+    """RAG 问答响应。
+
+    保留顶层 answer 与 citations，并补充状态、版本、检索统计、告警与耗时。
+    conclusion/explanation 是已通过校验的展示结构，与 answer 的 Markdown 内容一致；
+    不返回未经校验的原始模型 JSON。
+    """
+    answer_id: str
+    status: RagStatus
+    answer: str
+    clarification_questions: list[str] = Field(default_factory=list)
+    citations: list[RagCitation] = Field(default_factory=list)
+    conclusion: list[RagFact] = Field(default_factory=list)
+    explanation: list[RagFact] = Field(default_factory=list)
+    document_id: str
+    index_id: str | None = None
+    parse_version_id: str | None = None
+    is_old_version: bool = False
+    is_current_index: bool = False
+    prompt_version: str
+    retrieval: RagRetrievalStats
+    quality_warnings: list[QualityWarning] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    timings_ms: RagTimings
 
 
 class Summary(BaseModel):

@@ -23,6 +23,8 @@ from app.docling_client import DoclingClient
 from app.embedding import APIEmbedding, EmbeddingError
 from app.file_detect import FORMAT_MIME, UploadFormatError, detect_format, sanitize_filename
 from app.parsing import ParseError, chunk_pages, parse_document
+from app.rag import RagError, RagService
+from app.rag_prompts import PROMPT_VERSION
 from app.repository import Repository, TaskConflict, now_iso
 from app.schemas import (
     Answer,
@@ -35,6 +37,7 @@ from app.schemas import (
     ParseTask,
     ParseVersion,
     Question,
+    RagAnswer,
     SearchRequest,
     Summary,
     UploadResponse,
@@ -54,6 +57,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     repository = Repository(settings.data_dir / "docqa.db")
     embedding = APIEmbedding(settings)
     index = DocumentIndex(repository, embedding)
+    # RAG 服务在应用装配阶段构造一次；每次提问只调用一次查询 embedding 与一次生成。
+    rag = RagService(settings, repository, index, model)
     upload_dir = settings.data_dir / "uploads"
     web_dir = Path(__file__).parent / "web"
 
@@ -87,6 +92,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.exception_handler(TaskConflict)
     async def task_conflict_handler(request, exc):
         return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(RagError)
+    async def rag_error_handler(request, exc: RagError):
+        """RAG 业务错误：保留字符串 detail，并附带稳定错误码。
+
+        不返回上游响应正文、异常堆栈、密钥或完整 Prompt。
+        """
+        return JSONResponse(status_code=exc.status_code,
+                            content={"detail": str(exc), "code": exc.code})
+
+    @app.exception_handler(ModelError)
+    async def model_error_handler(request, exc: ModelError):
+        """生成阶段的上游错误：沿用现有安全 ModelError 映射并补稳定错误码。
+
+        超时映射为 504，限流映射为 503，其余上游错误为 502；响应不含上游正文。
+        """
+        code = {504: "model_timeout", 503: "model_unavailable"}.get(exc.status_code,
+                                                                   "model_error")
+        return JSONResponse(status_code=exc.status_code,
+                            content={"detail": str(exc), "code": code})
 
     def require_document(document_id: str) -> Document:
         # 各文档接口共用存在性校验，统一返回 404。
@@ -154,11 +179,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                  "xlsx_sheet_cell": True, "txt_line_range": True},
             "quality_warnings": True,
             "versioned_parse": True,
-            "embedding": True, "retrieval": True, "rag": False, "summary": False,
+            "embedding": True, "retrieval": True, "rag": True, "summary": False,
             "extraction": False, "web_crawl": False, "browser_extension": False,
             "model_adapters": {"deepseek": True, "qwen": False, "chatglm": False, "llama": False},
             "model_configured": bool(settings.deepseek_api_key.strip()),
             "embedding_configured": bool(settings.embedding_api_key.strip()),
+            # 问答与会话边界：单文档、单轮、非流式，不保存会话历史。
+            "rag_mode": "single-document-single-turn-non-streaming",
+            "rag_prompt_version": PROMPT_VERSION,
+            "rag_configured": rag.ready()[0],
         }
 
     @app.get("/api/parsing/status")
@@ -470,10 +499,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def extract(document_id: str):
         require_intelligence(document_id)
 
-    @app.post("/api/documents/{document_id}/questions", response_model=Answer)
+    @app.get("/api/rag/status")
+    def rag_status():
+        """问答能力状态：只报告配置与预算，不调用任何收费接口。"""
+        return {
+            "prompt_version": PROMPT_VERSION,
+            "mode": "single-document-single-turn-non-streaming",
+            "configured": rag.ready()[0],
+            "note": rag.ready()[1],
+            "retrieval_k": settings.rag_retrieval_k,
+            "context_k": settings.rag_context_k,
+            "context_max_chars": settings.rag_context_max_chars,
+            "input_max_chars": settings.rag_input_max_chars,
+            "min_score": settings.rag_min_score,
+            # 字符预算不是 token 预算；真正的模型上下文限制仍需供应商实测。
+            "budget_unit": "characters",
+            # 本阶段没有持久化幂等保证：两个独立合法 POST 会产生两次费用。
+            "idempotent": False,
+            "persists_history": False,
+        }
+
+    @app.post("/api/documents/{document_id}/questions", response_model=RagAnswer)
     def ask(document_id: str, payload: Question):
-        # FastAPI 自动校验问题；后续由 RAG 服务检索上下文并生成带引用回答。
-        require_intelligence(document_id)
+        """问答接口：单文档、单轮、非流式，回答带逐事实引用。
+
+        前置检查顺序：请求结构（FastAPI + Question 模型）→ 文档存在 →
+        成功解析版本 → 与当前 embedding 配置兼容的可用索引 → 两个在线模型已配置 →
+        检索 → 生成。任何前置条件失败都不会调用生成，也不会调用查询 embedding。
+        """
+        return rag.answer(document_id, payload.question.strip()).answer
 
     return app
 

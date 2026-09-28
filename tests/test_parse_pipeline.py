@@ -1197,8 +1197,11 @@ def test_upload_submits_sanitized_name_and_matching_mime(tmp_path):
 def test_capabilities_and_parsing_status_are_honest(tmp_path):
     with TestClient(create_app(Settings(data_dir=tmp_path))) as client:
         capabilities = client.get('/api/capabilities').json()
-        assert capabilities['rag'] is False
+        # 问答已按新契约接入；摘要与提取仍未接入，不能因为协议接口存在就报告可用。
+        assert capabilities['rag'] is True
         assert capabilities['summary'] is False and capabilities['extraction'] is False
+        # 未配置密钥时问答只是“能力已接入但不可用”，能力清单如实区分两者。
+        assert capabilities['rag_configured'] is False
         assert capabilities['async_parse_tasks'] is True
         assert capabilities['formats'] == {'txt': True, 'pdf': True, 'docx': True, 'xlsx': True,
                                            'doc': False, 'xls': False, 'pptx': False, 'image': False}

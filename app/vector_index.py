@@ -300,12 +300,19 @@ class DocumentIndex:
                     "page": chunk.page, "text": chunk.text, "score": score,
                     "parse_version_id": version_id, "chunk_type": chunk.chunk_type,
                     "heading_path": chunk.heading_path,
+                    # order_index 用于稳定排序：同分时按它和 chunk_id 决定先后，结果可复现。
+                    "order_index": chunk.order_index,
+                    "block_id": chunk.block_id,
                     "sources": [source.model_dump() for source in chunk.sources],
                 })
         except (ValueError, TypeError, EmbeddingError):
             raise EmbeddingError(409, "索引向量损坏，请重新建立索引") from None
         # 相似度表示排序分值，不代表回答正确概率；此接口只检索原文，不生成答案。
-        results.sort(key=lambda item: item["score"], reverse=True)
+        # 排序键与 RAG 证据排序保持一致，同分时用显式顺序与块 ID 消解。
+        results.sort(key=lambda item: (-item["score"],
+                                       item["order_index"] if item["order_index"] is not None else 1 << 30,
+                                       item["chunk_id"]))
+        # RAG 阈值只由问答证据构建器应用，原文检索接口保持原有排序语义。
         active_version = self.repository.get(document_id)
         is_old_version = bool(active_version and active_version.active_parse_version_id
                               and active_version.active_parse_version_id != version_id)

@@ -1,12 +1,12 @@
-// 工作台交互：集中管理当前文档、解析任务轮询、预览与检索状态。
+// 工作台交互：集中管理当前文档、解析任务轮询、预览与检索状态，以及单文档问答。
 //
-// 本阶段要点（对应任务书工程包 F）：
-// - “解析文档”与“重新解析”明确区分；提交后显示排队/执行阶段/完成/失败，不阻塞整页；
-// - 每 2—3 秒查询任务，终态停止；断网显示连接状态并有限退避，不显示虚构百分比；
-// - 刷新页面后从服务端恢复任务；切换文档时清理旧定时器，过期响应不得覆盖新选中文档；
-// - 重新解析期间继续显示旧内容与检索；失败时同时显示新任务错误与“原有版本仍可用”；
-// - 当前预览版本与检索版本不同时明确提示，并可查看命中的旧版本来源；
-// - 所有用户内容与上游错误一律用 textContent 渲染，不使用 innerHTML。
+// RAG 问答阶段要点（对应任务书工程包 E）：
+// - 问答框只在“文档可用 + 有效索引 + 两个模型已配置 + 当前没有问答请求”时启用；
+// - 提问后显示“正在检索资料并生成回答”，非流式不伪造 token 输出或进度百分比；
+// - 成功与失败分支都校验请求序号与当前选中文档，迟到响应不得覆盖新状态；
+// - 答案、澄清问题、依据不足提示与引用卡片全部用 createElement/textContent 渲染，
+//   只支持有限 Markdown（标题/列表/加粗），不解析任意 HTML、图片或外链；
+// - 问答期间禁用重复点击和 Enter 重复提交，错误后可手动重试；不会自动重发请求。
 const $ = (id) => document.getElementById(id);
 
 // 文档状态：status 表示“内容是否可用”，task_status 表示“本次任务进展”，两者分开显示。
@@ -32,6 +32,7 @@ let documents = [];
 let busy = false;
 let modelConfigured = false;
 let embeddingConfigured = false;
+let ragConfigured = false;      // 两个在线模型是否都已配置（只代表配置存在）。
 let indexState = 'pending';
 let currentTaskId = null;
 let pollTimer = null;
@@ -41,6 +42,13 @@ let activeVersionId = null;    // 当前预览使用的解析版本。
 let indexVersionId = null;     // 当前可用索引绑定的解析版本。
 let searchMeta = null;
 let requestSeq = 0;            // 请求序号：用于丢弃切换文档后才返回的过期响应。
+let answerBusy = false;        // 问答进行中：用于禁用重复提交与 Enter 重复触发。
+let answerWaitTimer = null;    // 等待计时器：只显示真实等待时间，不伪造进度。
+let answerStartedAt = 0;
+let answerPayload = null;      // 最近一次问答结果（仅存于内存，刷新后清空）。
+// 验收记录：每次真正发出的问答请求及其结果，用于证明“每个有效提交只对应一次请求”。
+let askRequestCount = 0;
+const askRequests = [];
 
 async function api(path, options = {}) {
   // 统一 API 前缀与错误转换，让操作入口只处理成功数据或错误提示。
@@ -70,8 +78,8 @@ function controls() {
   const hasVersion = Boolean(doc && doc.active_parse_version_id);
   $('parse').disabled = busy || !doc || taskActive || hasVersion;
   $('reparse').disabled = busy || !doc || taskActive;
-  // 本阶段尚未提供生成能力，不能因解析完成就让占位按钮变成可用。
-  for (const id of ['summary', 'extract', 'question', 'ask']) $(id).disabled = true;
+  // 摘要与信息提取仍未接入，继续禁用；问答按真实前置条件启用。
+  for (const id of ['summary', 'extract']) $(id).disabled = true;
   $('upload-form').querySelector('button').disabled = busy;
   $('refresh').disabled = busy;
   $('test-model').disabled = busy || !modelConfigured;
@@ -80,8 +88,12 @@ function controls() {
     || ['indexed', 'indexing'].includes(indexState);
   $('rebuild-index').disabled = busy || !embeddingConfigured || !hasVersion || indexState === 'indexing';
   for (const id of ['search-query', 'search']) $(id).disabled = busy || !embeddingConfigured || indexState !== 'indexed';
+  // 问答需要：有效索引 + 两个模型已配置 + 没有正在进行的问答请求。
+  for (const id of ['question', 'ask']) {
+    $(id).disabled = busy || answerBusy || !hasVersion || indexState !== 'indexed' || !ragConfigured;
+  }
   $('stop-task').disabled = busy || !currentTaskId || !taskActive;
-  for (const button of $('documents').querySelectorAll('button')) button.disabled = busy;
+  for (const button of $('documents').querySelectorAll('button')) button.disabled = busy || answerBusy;
 }
 
 async function run(action) {
@@ -127,7 +139,7 @@ function stopPolling() {
   }
 }
 
-async function select(id) {
+async function select(id, preserveAnswer = false) {
   // 切换文档：先停止旧轮询并清空旧结果，再加载该文档的版本与内容。
   stopPolling();
   selectedId = id;
@@ -145,6 +157,8 @@ async function select(id) {
   $('task-status').textContent = '';
   $('version-status').textContent = '';
   $('quality-panel').replaceChildren();
+  // 问答结果不持久化：切换文档时清空答案区，避免显示上一份文档的回答。
+  if (!preserveAnswer) resetAnswer();
   renderDocuments();
   const doc = documents.find((item) => item.id === id);
   $('document-title').textContent = doc.filename;
@@ -364,12 +378,27 @@ async function refresh() {
   embeddingConfigured = embedding.configured;
   $('embedding-status').textContent = `${embedding.model} · ${embedding.configured ? '已配置，尚未测试连接' : '请填写 EMBEDDING_API_KEY 并重启服务'}`;
   $('embedding-gateway').textContent = `网关：${embedding.base_url}`;
+  // 问答能力状态只读配置与预算，不会触发任何收费调用。
+  try {
+    const rag = await api('/rag/status');
+    ragConfigured = rag.configured;
+    if (!$('question').disabled) $('question').placeholder = '这份文档的核心结论是什么？';
+    if (!ragConfigured && !embedding.configured) {
+      $('question').placeholder = '请先配置检索与回答模型后重启服务';
+    }
+  } catch (error) {
+    ragConfigured = false;
+  }
   await refreshParsingStatus();
   const latestDocuments = await api('/documents');
   if (refreshToken !== requestSeq) return;
   documents = latestDocuments;
   renderDocuments();
-  if (selectedId && documents.some((doc) => doc.id === selectedId)) await select(selectedId);
+  if (selectedId && documents.some((doc) => doc.id === selectedId)) {
+    // 解析终态的后台刷新不能使当前提问的请求序号失效，也不能清空其等待状态。
+    if (answerBusy) { await refreshIndex(); controls(); return; }
+    await select(selectedId, true);
+  }
 }
 
 async function refreshParsingStatus() {
@@ -651,21 +680,380 @@ $('stop-task').onclick = () => run(async () => {
   await refresh();
 });
 
+// ---------------------------------------------------------------------------
+// 单文档 RAG 问答：安全渲染、引用卡片、状态与竞态处理
+// ---------------------------------------------------------------------------
+const answerStatusLabels = {
+  answered: '已根据引用片段回答',
+  clarification_needed: '需要补充条件后才能回答',
+  insufficient_evidence: '当前片段依据不足',
+};
+
+function resetAnswer() {
+  // 切换文档或开始新提问时清理旧结果，绝不让上一份文档的答案残留。
+  answerPayload = null;
+  $('answer-body').replaceChildren();
+  $('answer-questions').replaceChildren();
+  $('answer-warnings').replaceChildren();
+  $('answer-limitations').replaceChildren();
+  $('answer-citations').replaceChildren();
+  $('answer-status').textContent = '等待提问';
+  $('answer-meta').textContent = '';
+  $('answer-panel').hidden = true;
+  $('answer-waiting').hidden = true;
+}
+
+function stopAnswerTimer() {
+  if (answerWaitTimer !== null) {
+    clearInterval(answerWaitTimer);
+    answerWaitTimer = null;
+  }
+}
+
+function startAnswerTimer() {
+  // 只显示真实等待时间；非流式回答没有可展示的进度百分比。
+  stopAnswerTimer();
+  answerStartedAt = Date.now();
+  $('answer-waiting').hidden = false;
+  $('answer-waiting').textContent = '正在检索资料并生成回答…已等待 0 秒';
+  answerWaitTimer = setInterval(() => {
+    const seconds = Math.floor((Date.now() - answerStartedAt) / 1000);
+    $('answer-waiting').textContent = `正在检索资料并生成回答…已等待 ${seconds} 秒`;
+  }, 1000);
+}
+
+// 有限 Markdown 渲染：只识别标题、无序/有序列表与 **加粗**，其余一律作为纯文本。
+// 不使用 innerHTML，因此模型或资料里的 <script>、<img onerror>、javascript: 只能以文字出现。
+// 行尾的 [n] / [n][m] 是后端按已校验 refs 生成的引用标记，必须渲染成可点击按钮。
+const REF_MARKER = /(?:\[(\d+)\])+\s*$/;
+
+function splitRefs(text) {
+  // 拆出结尾的引用标记；正文中其他位置的方括号一律按文字保留。
+  const match = REF_MARKER.exec(text);
+  if (!match) return { text: text, refs: [] };
+  const refs = [...match[0].matchAll(/\[(\d+)\]/g)].map((item) => Number(item[1]));
+  return { text: text.slice(0, match.index).replace(/\s+$/, ''), refs: refs };
+}
+
+function appendRefButtons(container, refs) {
+  for (const ref of refs) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'ref';
+    button.textContent = `[${ref}]`;
+    button.title = `查看第 ${ref} 条引用`;
+    button.onclick = () => focusCitation(ref);
+    container.append(button);
+  }
+}
+
+function appendInline(container, text) {
+  // 行内渲染：先分离引用标记，再在正文部分识别 **加粗**。
+  const parts = splitRefs(text);
+  const pattern = /\*\*([^*]+)\*\*/g;
+  let cursor = 0;
+  let match = pattern.exec(parts.text);
+  while (match !== null) {
+    if (match.index > cursor) {
+      container.append(document.createTextNode(parts.text.slice(cursor, match.index)));
+    }
+    const strong = document.createElement('strong');
+    strong.textContent = match[1];
+    container.append(strong);
+    cursor = match.index + match[0].length;
+    match = pattern.exec(parts.text);
+  }
+  if (cursor < parts.text.length) {
+    container.append(document.createTextNode(parts.text.slice(cursor)));
+  }
+  appendRefButtons(container, parts.refs);
+}
+
+function appendFact(container, fact) {
+  // 事实后紧跟引用标记按钮，编号来自后端已校验的 refs（不是模型自写文本）。
+  const item = document.createElement('li');
+  appendInline(item, fact.text);
+  appendRefButtons(item, fact.refs);
+  container.append(item);
+}
+
+function renderAnswerMarkdown(markdown) {
+  // 逐行解析受限 Markdown；不支持的语法按原文显示，不做任何 HTML 解释。
+  const body = $('answer-body');
+  body.replaceChildren();
+  const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n');
+  let list = null;
+  let listKind = null;
+  const flush = () => { list = null; listKind = null; };
+  for (const raw of lines) {
+    const line = raw.replace(/\s+$/, '');
+    if (!line.trim()) { flush(); continue; }
+    const heading = /^(#{1,4})\s+(.*)$/.exec(line);
+    const bullet = /^[-*]\s+(.*)$/.exec(line);
+    const ordered = /^(\d+)[.、]\s*(.*)$/.exec(line);
+    if (heading) {
+      flush();
+      const element = document.createElement('h4');
+      appendInline(element, heading[2]);
+      body.append(element);
+    } else if (bullet) {
+      if (listKind !== 'ul') { list = document.createElement('ul'); listKind = 'ul'; body.append(list); }
+      const item = document.createElement('li');
+      appendInline(item, bullet[1]);
+      list.append(item);
+    } else if (ordered) {
+      if (listKind !== 'ol') { list = document.createElement('ol'); listKind = 'ol'; body.append(list); }
+      const item = document.createElement('li');
+      appendInline(item, ordered[2]);
+      list.append(item);
+    } else {
+      flush();
+      const paragraph = document.createElement('p');
+      appendInline(paragraph, line);
+      body.append(paragraph);
+    }
+  }
+}
+
+function sourceText(source) {
+  // 来源标签由后端契约生成（含单位与“无真实页码”说明），前端不自行编造页码。
+  const parts = [];
+  if (source.format === 'pdf' && source.page) parts.push(`第 ${source.page} 页`);
+  if (source.format === 'pdf' && source.bbox) parts.push('含坐标框');
+  if (source.format === 'docx') {
+    if (source.section_path) parts.push(`章节 ${source.section_path}`);
+    if (source.table_no) parts.push(`表格 ${source.table_no}`);
+    parts.push('DOCX 无真实页码');
+  }
+  if (source.format === 'xlsx') {
+    parts.push(source.sheet_name ? `工作表 ${source.sheet_name}` : '工作表未知');
+    if (source.cell_range) parts.push(`单元格 ${source.cell_range}`);
+  }
+  if (source.format === 'txt') {
+    parts.push(source.page ? `逻辑页 ${source.page}` : '逻辑页未知');
+    if (source.line_start) parts.push(`第 ${source.line_start}-${source.line_end} 行`);
+  }
+  if (!parts.length) parts.push('来源定位信息有限');
+  return parts.join(' · ');
+}
+
+function renderCitations(citations, meta) {
+  const container = $('answer-citations');
+  container.replaceChildren();
+  if (!citations.length) return;
+  const title = document.createElement('h4');
+  title.textContent = '引用与来源';
+  container.append(title);
+  for (const citation of citations) {
+    const card = document.createElement('article');
+    card.className = 'citation';
+    card.id = `citation-${citation.reference_id}`;
+    const head = document.createElement('div');
+    const label = document.createElement('strong');
+    label.textContent = `[${citation.reference_id}]`;
+    head.append(label);
+    const location = document.createElement('span');
+    location.className = 'muted';
+    location.textContent = (citation.sources || []).map(sourceText).join(' / ') || '来源定位信息有限';
+    head.append(document.createTextNode(' '), location);
+    const quote = document.createElement('blockquote');
+    quote.textContent = citation.quote;
+    card.append(head, quote);
+
+    const info = document.createElement('p');
+    info.className = 'muted';
+    info.textContent = `解析版本 ${citation.parse_version_id || '未知'}`
+      + ` · 片段 ${citation.chunk_id}`
+      + (meta && meta.is_old_version ? ' · 本次回答依据历史解析版本' : '');
+    card.append(info);
+
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    // 版本级预览入口：已有接口只支持版本级预览，不声称已精确高亮对应字符。
+    const preview = document.createElement('button');
+    preview.type = 'button';
+    preview.className = 'subtle';
+    preview.textContent = '查看引用版本';
+    preview.onclick = () => run(() => loadContent(citation.document_id, citation.parse_version_id));
+    actions.append(preview);
+    const pages = (citation.sources || [])
+      .filter((source) => source.format === 'pdf' && Number.isInteger(source.page) && source.page > 0)
+      .map((source) => source.page);
+    const link = document.createElement('a');
+    link.href = `/api/documents/${encodeURIComponent(citation.document_id)}/original`
+      + (pages.length ? `#page=${pages[0]}` : '');
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = pages.length ? `查看原件第 ${pages[0]} 页` : '下载原件核对';
+    actions.append(link);
+    card.append(actions);
+    container.append(card);
+  }
+}
+
+function focusCitation(ref) {
+  // 点击 [n] 定位到对应引用卡片；不改变任何后端状态。
+  const card = document.getElementById(`citation-${ref}`);
+  if (!card) return;
+  card.scrollIntoView({ block: 'center' });
+  card.classList.add('citation-active');
+  setTimeout(() => card.classList.remove('citation-active'), 1200);
+}
+
+function renderAnswer(payload) {
+  // 渲染已校验的响应结构；不使用 JSON.stringify 代替产品展示。
+  answerPayload = payload;
+  $('answer-panel').hidden = false;
+  $('answer-waiting').hidden = true;
+  $('answer-status').textContent = answerStatusLabels[payload.status] || payload.status;
+  const retrieval = payload.retrieval || {};
+  const timings = payload.timings_ms || {};
+  $('answer-meta').textContent =
+    `解析版本 ${payload.parse_version_id || '未知'} · 索引 ${payload.index_id || '未知'}`
+    + ` · 候选 ${retrieval.candidate_count} / 送入模型 ${retrieval.selected_count} 段`
+    + (retrieval.truncated ? ' · 证据集合不完整（受字符预算限制）' : '')
+    + ` · 检索 ${timings.retrieval} ms · 生成 ${timings.generation} ms · 合计 ${timings.total} ms`
+    + ` · Prompt ${payload.prompt_version}`;
+
+  renderAnswerMarkdown(payload.answer);
+
+  const questions = $('answer-questions');
+  questions.replaceChildren();
+  if (payload.clarification_questions && payload.clarification_questions.length) {
+    const title = document.createElement('h4');
+    title.textContent = '需要您补充的条件';
+    const hint = document.createElement('p');
+    hint.className = 'muted';
+    // 本阶段不保存多轮历史：下一轮必须提交补全后的完整问题。
+    hint.textContent = '本阶段不保存会话历史。请把条件补进一个完整问题后重新提问，'
+      + '例如“原问题 + 补充条件”；上一轮的回答不会被当作事实再次发送。';
+    const list = document.createElement('ol');
+    for (const question of payload.clarification_questions) {
+      const item = document.createElement('li');
+      item.textContent = question;
+      list.append(item);
+    }
+    const template = document.createElement('button');
+    template.type = 'button';
+    template.className = 'subtle';
+    template.textContent = '填入“原问题 + 补充信息”模板';
+    template.onclick = () => {
+      $('question').value = `${$('question').value.trim()}（补充信息：${payload.clarification_questions.join('；')}）`;
+      $('question').focus();
+    };
+    questions.append(title, hint, list, template);
+  }
+
+  const warnings = $('answer-warnings');
+  warnings.replaceChildren();
+  if (payload.quality_warnings && payload.quality_warnings.length) {
+    const title = document.createElement('h4');
+    title.textContent = '本次回答的质量提示';
+    warnings.append(title);
+    for (const warning of payload.quality_warnings) {
+      const item = document.createElement('div');
+      item.className = `warning warning-${warning.severity}`;
+      const head = document.createElement('strong');
+      head.textContent = `${warning.severity === 'error' ? '错误' : warning.severity === 'warning' ? '告警' : '提示'} · ${warning.code}`;
+      const text = document.createElement('p');
+      text.textContent = warning.message
+        + (warning.page ? `（第 ${warning.page} 页）` : '')
+        + (warning.sheet_name ? `（工作表 ${warning.sheet_name}）` : '')
+        + (warning.detail ? ` · ${warning.detail}` : '');
+      item.append(head, text);
+      warnings.append(item);
+    }
+  }
+
+  const limitations = $('answer-limitations');
+  limitations.replaceChildren();
+  if (payload.limitations && payload.limitations.length) {
+    const title = document.createElement('h4');
+    title.textContent = '本次回答的适用边界';
+    const list = document.createElement('ul');
+    for (const text of payload.limitations) {
+      const item = document.createElement('li');
+      item.textContent = text;
+      list.append(item);
+    }
+    limitations.append(title, list);
+  }
+
+  renderCitations(payload.citations || [], payload);
+}
+
+async function askQuestion() {
+  // 一次提交只产生一次问答请求；失败后只能由用户手动重试。
+  const documentId = selectedId;
+  const question = $('question').value.trim();
+  if (!documentId) { setMessage('请先选择一份文档', 'error'); return; }
+  if (!question) { setMessage('请输入问题后再提问', 'error'); return; }
+  if (busy || answerBusy) return;   // 忙碌期间忽略重复点击与 Enter 重复提交。
+  const token = requestSeq;
+  busy = true;
+  answerBusy = true;
+  setMessage('');
+  $('answer-citations').replaceChildren();
+  $('answer-body').replaceChildren();
+  $('answer-questions').replaceChildren();
+  $('answer-warnings').replaceChildren();
+  $('answer-limitations').replaceChildren();
+  $('answer-status').textContent = '正在生成回答';
+  $('answer-meta').textContent = '';
+  $('answer-panel').hidden = false;
+  startAnswerTimer();
+  controls();
+  askRequestCount += 1;
+  const record = { documentId: documentId, question: question, seq: token, status: 'pending' };
+  askRequests.push(record);
+  try {
+    const payload = await api(`/documents/${documentId}/questions`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: question }),
+    });
+    record.status = 'ok';
+    // 迟到响应校验：文档已切换或已有更新的请求时丢弃，不覆盖新状态。
+    if (token !== requestSeq || documentId !== selectedId) { record.status = 'stale'; return; }
+    renderAnswer(payload);
+  } catch (error) {
+    // 迟到失败同样不得覆盖当前文档的状态。
+    if (token !== requestSeq || documentId !== selectedId) { record.status = 'stale'; return; }
+    record.status = 'error';
+    $('answer-panel').hidden = false;
+    $('answer-status').textContent = '本次提问失败';
+    $('answer-meta').textContent = '可以修改问题后重新点击“提问”；页面不会自动重发请求。';
+    const note = document.createElement('p');
+    note.className = 'error';
+    note.textContent = error.message;
+    $('answer-body').replaceChildren(note);
+    $('answer-citations').replaceChildren();
+    $('answer-questions').replaceChildren();
+    $('answer-warnings').replaceChildren();
+    $('answer-limitations').replaceChildren();
+  } finally {
+    stopAnswerTimer();
+    $('answer-waiting').hidden = true;
+    busy = false;
+    answerBusy = false;
+    controls();
+  }
+}
+
 async function intelligence(action, body) {
-  // 共用摘要、提取和问答调用流程；尚未接入时由 run 显示后端 503 提示。
+  // 摘要与信息提取仍未接入：调用后由后端返回 503 提示，页面不伪造结果。
   const result = await api(`/documents/${selectedId}/${action}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
-  $('result').textContent = JSON.stringify(result, null, 2);
-  $('result').hidden = false;
+  setMessage(JSON.stringify(result), 'info');
 }
+
 $('summary').onclick = () => run(() => intelligence('summary'));
 $('extract').onclick = () => run(() => intelligence('extract'));
 $('question-form').onsubmit = (event) => {
+  // 阻止浏览器默认提交；问答提交期间重复触发会被 askQuestion 直接忽略。
   event.preventDefault();
-  // 去除首尾空白后提交；后端仍会校验空白问题和长度限制。
-  run(() => intelligence('questions', { question: $('question').value.trim() }));
+  askQuestion();
 };
 
 // 页面隐藏时暂停轮询，重新可见时立即补一次查询，避免后台堆积请求。
@@ -677,8 +1065,9 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-// 自动化验收（T21/T22）专用只读钩子：只暴露读取定时器数量与“开始轮询指定任务”的能力，
-// 便于在真实浏览器中断言“终态后停止轮询”和“断网时的连接提示”，不改变页面行为。
+// 自动化验收专用只读钩子：只暴露读取状态与“触发一次真实用户操作”的能力，
+// 便于在真实浏览器中断言“终态停止轮询”“断网提示”“重复提交被忽略”“迟到响应被丢弃”，
+// 不改变正常页面行为，也不允许直接改写内部状态。
 window.__docqaTest = {
   timers: () => (pollTimer === null ? 0 : 1),
   startPolling: (documentId, taskId) => {
@@ -687,6 +1076,37 @@ window.__docqaTest = {
     pollDelay = 2500;
     pollFailures = 0;
     schedulePoll(0);
+    return true;
+  },
+  // 问答相关只读状态：用于断言每个有效提交只对应一次请求、迟到响应被丢弃。
+  state: () => ({
+    selectedId,
+    requestSeq,
+    answerBusy,
+    answerId: answerPayload ? answerPayload.answer_id : null,
+    answerStatus: answerPayload ? answerPayload.status : null,
+    citations: answerPayload ? answerPayload.citations.length : 0,
+    questionDisabled: $('question').disabled,
+    askButtonDisabled: $('ask').disabled,
+    answerPanelHidden: $('answer-panel').hidden,
+    waitingVisible: !$('answer-waiting').hidden,
+    requestCount: askRequestCount,
+    lastRequest: askRequests.length ? askRequests[askRequests.length - 1] : null,
+  }),
+  requests: () => askRequests.map((entry) => ({ documentId: entry.documentId,
+                                                question: entry.question, seq: entry.seq })),
+  // 渲染函数导出：供离线渲染安全回归（tests/web/render_safety.mjs）与浏览器
+  // 验收脚本直接调用**同一份生产渲染代码**，避免测试复制一份实现而失去意义。
+  renderAnswerMarkdown: (markdown) => renderAnswerMarkdown(markdown),
+  renderCitations: (citations, meta) => renderCitations(citations, meta),
+  renderAnswer: (payload) => renderAnswer(payload),
+  // 选择文档必须走与用户点击完全相同的路径，不做任何内部状态注入。
+  selectDocument: (documentId) => run(() => select(documentId)),
+  setQuestion: (value) => { $('question').value = value; return true; },
+  // 触发真实提交（与用户按 Enter / 点击按钮相同的事件路径）。
+  submitQuestion: (value) => {
+    if (value !== undefined) $('question').value = value;
+    $('question-form').dispatchEvent(new Event('submit', { cancelable: true }));
     return true;
   },
 };

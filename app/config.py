@@ -60,6 +60,22 @@ class Settings:
     embedding_model: str = "qwen3.7-text-embedding"
     embedding_timeout_seconds: float = 60
     embedding_batch_size: int = 8
+    # ------------------------------------------------------------------
+    # RAG 问答（第一版：单文档、单轮、非流式）
+    # 预算单位是字符不是 token：真正可容纳的内容仍受供应商上下文限制，
+    # 这里只做本地输入限流，避免一次提问送入过多原文。
+    # ------------------------------------------------------------------
+    # 一次提问最多检索的候选块数（1～20）；它不等于送入模型的证据块数。
+    rag_retrieval_k: int = 8
+    # 最多送入模型的证据块数（1～retrieval_k）。
+    rag_context_k: int = 5
+    # 参考资料序列化后的字符总数上限。
+    rag_context_max_chars: int = 12000
+    # 实际 system + user 消息字符总数上限。
+    rag_input_max_chars: int = 20000
+    # 证据最低排序分值；None 表示禁用阈值（不把相似度当置信度）。
+    # 阈值上线前必须用正负样本校准，不能仅用同一份文档调参。
+    rag_min_score: float | None = None
 
     @classmethod
     def from_env(cls, env_file: Path = Path(".env")):
@@ -99,6 +115,12 @@ class Settings:
             embedding_model=value("EMBEDDING_MODEL", "qwen3.7-text-embedding"),
             embedding_timeout_seconds=float(value("EMBEDDING_TIMEOUT_SECONDS", "60")),
             embedding_batch_size=int(value("EMBEDDING_BATCH_SIZE", "8")),
+            rag_retrieval_k=int(value("DOCQA_RAG_RETRIEVAL_K", "8")),
+            rag_context_k=int(value("DOCQA_RAG_CONTEXT_K", "5")),
+            rag_context_max_chars=int(value("DOCQA_RAG_CONTEXT_MAX_CHARS", "12000")),
+            rag_input_max_chars=int(value("DOCQA_RAG_INPUT_MAX_CHARS", "20000")),
+            # 空值表示禁用分数阈值；只有显式配置才启用过滤。
+            rag_min_score=_optional_float(values.get("DOCQA_RAG_MIN_SCORE")),
         )
 
     def __post_init__(self):
@@ -159,3 +181,25 @@ class Settings:
             raise ValueError("分块长度必须大于 0，且重叠长度必须小于分块长度")
         if self.table_rows_per_chunk <= 0:
             raise ValueError("DOCQA_TABLE_ROWS_PER_CHUNK 必须大于 0")
+        # RAG 预算与阈值：启动即拒绝无效数值，避免每次提问才失败。
+        if not 1 <= self.rag_retrieval_k <= 20:
+            raise ValueError("DOCQA_RAG_RETRIEVAL_K 必须在 1 到 20 之间")
+        if not 1 <= self.rag_context_k <= self.rag_retrieval_k:
+            raise ValueError("DOCQA_RAG_CONTEXT_K 必须在 1 到 DOCQA_RAG_RETRIEVAL_K 之间")
+        if self.rag_context_max_chars <= 0:
+            raise ValueError("DOCQA_RAG_CONTEXT_MAX_CHARS 必须大于 0")
+        if self.rag_input_max_chars <= 0:
+            raise ValueError("DOCQA_RAG_INPUT_MAX_CHARS 必须大于 0")
+        # 上下文预算必须小于总输入预算，否则“缩减证据集合”永远无法救回超限请求。
+        if self.rag_context_max_chars >= self.rag_input_max_chars:
+            raise ValueError("DOCQA_RAG_CONTEXT_MAX_CHARS 必须小于 DOCQA_RAG_INPUT_MAX_CHARS")
+        if self.rag_min_score is not None:
+            if not math.isfinite(self.rag_min_score) or not -1.0 <= self.rag_min_score <= 1.0:
+                raise ValueError("DOCQA_RAG_MIN_SCORE 必须是 [-1,1] 内的有限数值，或留空以禁用阈值")
+
+
+def _optional_float(raw: str | None) -> float | None:
+    """解析可留空的浮点配置；空值表示禁用，非法数值直接拒绝。"""
+    if raw is None or not str(raw).strip():
+        return None
+    return float(str(raw).strip())

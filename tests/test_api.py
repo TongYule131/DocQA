@@ -90,16 +90,29 @@ def test_upload_validation_and_cleanup(client, tmp_path):
 
 
 def test_intelligence_explicitly_unavailable(client, tmp_path):
-    # 区分未解析的前置条件错误与未接模型的能力错误，并校验空白问题。
+    """摘要与提取仍未接入；问答已按新契约接入并保持前置检查顺序。
+
+    业务意图保持不变：
+    - 未解析时先返回 409（前置条件），不暴露“能力未接入”；
+    - 摘要与提取在解析完成后仍是 503（能力未接入）；
+    - 问答在解析完成但没有可用索引时返回 409，并指明需要建立有效索引。
+    """
     document_id = upload(client)
     path = f'/api/documents/{document_id}'
     assert client.post(path + '/summary').status_code == 409
     parse_and_wait(client, tmp_path, document_id)
-    for endpoint in ['summary', 'extract', 'questions']:
+    for endpoint in ['summary', 'extract']:
         assert client.post(path + '/' + endpoint, json={'question': '核心结论？'}).status_code == 503
+    # 问答：解析完成但没有任何索引，属于索引前置条件失败，不能调用在线接口。
+    questions = client.post(path + '/questions', json={'question': '核心结论？'})
+    assert questions.status_code == 409
+    assert '索引' in questions.json()['detail']
+    assert questions.json()['code'] in {'index_missing', 'index_not_compatible'}
     assert client.post(path + '/questions', json={'question': '  '}).status_code == 422
     capabilities = client.get('/api/capabilities').json()
-    assert capabilities['rag'] is False
+    # 问答能力已接入；摘要、提取、抓取与插件仍未接入。
+    assert capabilities['rag'] is True
+    assert capabilities['summary'] is False and capabilities['extraction'] is False
     # 能力清单区分格式支持与服务可达：OCR/解析能力已接入，抓取与插件仍未接入。
     assert capabilities['ocr'] is True and capabilities['docling_parsing'] is True
     assert capabilities['web_crawl'] is False and capabilities['browser_extension'] is False

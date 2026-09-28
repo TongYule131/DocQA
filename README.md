@@ -4,6 +4,8 @@
 
 后续业务 Prompt 优化与验收参考 [Prompt 设计与验收参考](docs/Prompt设计与验收参考.md)。
 
+单文档问答的实现边界、接口契约与验收标准见 [RAG 问答接入工程任务书](docs/RAG问答接入工程任务书.md)；当前修正与验证结果以 [RAG 问答接入独立验收报告](docs/RAG问答接入独立验收报告.md) 为准，初次交付记录保留在 [实施报告](docs/RAG问答接入实施报告.md)。
+
 本阶段的最新修正和验证范围以 [Docling 接入独立验收报告](docs/Docling接入独立验收报告.md) 为准；原实施报告保留为初次交付记录。
 
 ## 当前链路
@@ -17,6 +19,8 @@
   → 网页查看带来源的预览与告警
   → 用户主动建立 embedding 索引（固定目标解析版本）
   → 检索并展示原文与来源
+  → 基于当前文档提问：检索 → 固定证据版本 → DeepSeek 生成 → 后端校验引用
+  → 网页展示答案、逐事实引用与可核对来源
 ```
 
 三个状态彼此独立：**任务状态**（本次解析是否排队/执行/失败/完成）、**内容质量**（结构是否可用、有何告警）、**索引状态**（哪个解析版本的向量可用）。新任务失败不会把已有内容标记为失效。
@@ -116,6 +120,38 @@ EMBEDDING_BATCH_SIZE=8
 
 检索会返回命中分块的来源（PDF 页码与 bbox、DOCX 章节与表格、XLSX 工作表与单元格范围、TXT 行范围）；预览版本与索引版本不同时，页面与响应都会明确提示“检索仍使用旧版本”。
 
+## RAG 问答（单文档、单轮、非流式）
+
+选中文档 → 输入问题 → 检索该文档的有效索引 → DeepSeek 基于片段生成回答 → 后端校验引用 → 页面展示答案与可核对来源。
+
+```dotenv
+# 问答预算：单位是字符，不是 token；真正的模型上下文限制仍需供应商实测。
+DOCQA_RAG_RETRIEVAL_K=8            # 一次提问最多检索的候选块数（1～20）
+DOCQA_RAG_CONTEXT_K=5              # 最多送入模型的证据块数（1～retrieval_k）
+DOCQA_RAG_CONTEXT_MAX_CHARS=12000  # 参考资料序列化后的字符上限
+DOCQA_RAG_INPUT_MAX_CHARS=20000    # system + user 消息字符上限
+DOCQA_RAG_MIN_SCORE=               # 空值表示禁用分数阈值；配置时必须是 [-1,1] 的有限数
+```
+
+| 接口 | 用途 |
+| --- | --- |
+| `POST /api/documents/{id}/questions` | 提问，请求体只有 `{"question": "..."}`；返回答案、状态、逐事实引用与检索统计 |
+| `GET /api/rag/status` | 问答配置、Prompt 版本与预算；不调用任何收费接口 |
+
+**回答状态**：`answered`（至少一个带引用的事实）、`clarification_needed`（1～2 个澄清问题，原因同样带引用）、`insufficient_evidence`（后端固定兜底文本，引用与澄清为空，只说明本次检索片段依据不足，不断言全文没有答案）。
+
+**引用规则**：引用编号由服务端对**本次最终入选证据**分配，模型只能引用确实进入 Prompt 的编号；文档 ID、chunk ID、页码、坐标与文件路径全部由后端从证据映射复制，模型看不到也无法伪造。每个引述必须是对应证据正文的连续子串（只允许统一 CRLF），被使用的每个编号恰好对应一条引述。Markdown 中的引用标记例如 `事实。[1][2]` 由后端按已校验编号生成，不集中堆在末尾。
+
+**上下文与预算**：采用确定性整块装入——块连同必要元数据序列化后计入预算，容纳不下就跳过并继续尝试后续候选；入选块不会被从尾部硬截断，标题、表头、条件与脚注不会为了凑字数被删掉。因字符预算舍弃整块时返回 `retrieval.truncated=true`（表示证据集合不完整，不表示引用文本被截断）。字符预算**不等于** token 预算。
+
+**版本策略**：检索结果返回后，index_id、parse_version_id、chunk 文本与来源作为本次请求快照固定到结束。回答期间发布新解析版本或切换活动索引，都不会把 A 的正文与 B 的来源拼成一次回答：本次仍基于固定快照回答，并通过 `is_old_version` / `is_current_index` 与质量告警提示版本变化，**不会二次生成、不会二次计费**。下次提问才使用新版本（需先为新版本建立索引）。
+
+**错误与降级**：问题空白/超长/含额外字段 → 422；文档不存在 → 404；未解析、无索引或索引与当前 embedding 配置不兼容 → 409（不自动建索引）；缺少模型配置 → 503（不调用任何在线接口）；模型输出结构或引用校验不通过 → 502 + `rag_output_invalid`（不伪装成“资料不足”，不返回未校验内容，不自动重试）；上游超时 → 504。错误响应只含安全提示与稳定错误码，不含上游正文、异常堆栈、密钥或完整 Prompt。
+
+**费用与幂等（如实说明）**：点击“提问”会发生在线调用并可能产生费用——问题会发送给已配置的 Embedding 服务用于检索，入选片段与问题会发送给已配置的 DeepSeek 服务用于生成回答。本阶段**没有持久化幂等保证**：两个独立的合法 POST 会产生两次费用；刷新页面或中断浏览器也不代表上游停止计费；问答结果本身不持久化，刷新后答案区清空。系统不会自动重发生成请求，页面加载、列表刷新、解析轮询与能力探测都不会触发问答。问答为单轮：不保存会话历史，澄清后的下一轮需要提交补全条件的完整问题，上一轮答案不会被当作事实回传。当前仅限本地服务运行，不应扩展为无鉴权公网部署。
+
+**网页交互**：提问期间按钮与输入框禁用、文档切换被锁定（第一版沿用 busy 锁定），因此重复点击与 Enter 连按不会产生第二次请求；即使如此，成功与失败分支都会校验请求序号与当前选中文档，迟到响应不会覆盖新状态。答案、澄清问题、质量提示、适用范围与引用卡片全部用 `createElement`/`textContent` 渲染，只支持有限 Markdown（标题/列表/加粗），不解析任意 HTML、图片或外链；模型文本中的 `<script>`、`img onerror`、`javascript:` 只能作为文字出现。点击引用标记 `[n]` 会定位到对应引用卡片，卡片提供“查看引用版本”（版本级预览，不声称已精确高亮对应字符）与 PDF 原件页码链接；DOCX/XLSX/TXT 按真实来源展示，不伪造 PDF 页码。
+
 ## 质量边界（必须阅读）
 
 接口 `success` 不等于识别无误。本阶段明确记录并展示：
@@ -134,7 +170,7 @@ EMBEDDING_BATCH_SIZE=8
 
 ## 尚未实现
 
-RAG 答案生成、摘要、信息提取、网站抓取、浏览器插件、多用户系统均未接入，相关接口明确返回 503，`/api/capabilities` 中对应项为 `false`。旧 `.doc`/`.xls`、图片、PPTX 等格式未验收，不能因 Docling 支持某格式便直接对外承诺。当前为本地单机部署，未引入 Redis/Celery 或专用向量数据库。
+摘要、信息提取、网站抓取、浏览器插件、多用户系统、多文档知识库、多轮会话记忆、查询改写、重排服务、联网搜索均未接入，相关接口明确返回 503，`/api/capabilities` 中对应项为 `false`（`rag` 已为 `true`）。旧 `.doc`/`.xls`、图片、PPTX 等格式未验收，不能因 Docling 支持某格式便直接对外承诺。当前为本地单机部署，未引入 Redis/Celery 或专用向量数据库。
 
 ## 目录
 
@@ -142,7 +178,7 @@ RAG 答案生成、摘要、信息提取、网站抓取、浏览器插件、多�
 app/
   main.py                 应用工厂、API、页面入口
   config.py               环境配置与校验
-  schemas.py              数据契约（任务/版本/块/来源/告警/索引）
+  schemas.py              数据契约（任务/版本/块/来源/告警/索引/问答）
   migrations.py           带版本号的数据库迁移与一致性备份
   repository.py           SQLite 持久化（任务领取、版本发布、索引切换）
   file_detect.py          上传格式识别（内容判定与安全限制）
@@ -154,15 +190,27 @@ app/
   vector_index.py         版本化向量索引与检索
   embedding.py            Embedding 网关调用、分批与向量校验
   deepseek.py             DeepSeek API 调用与安全错误转换
+  rag.py                  RAG 问答编排（前置检查、快照、生成、降级）
+  rag_context.py          证据构建、字符预算与引用编号分配
+  rag_prompts.py          固定系统规则与内部 JSON 协议（Prompt 版本 rag-qa-v3）
+  rag_validation.py       严格解析、结构与引用校验、Markdown 渲染
   providers.py            OCR / Embedding / 向量库 / 大模型协议
   web/                    工作台页面
 scripts/
   acceptance_e2e.py       真实链路验收（上传→异步解析→预览→来源）
   browser_acceptance.mjs  真实浏览器验收（T21/T22，Chrome + CDP）
+  evaluate_rag.py         RAG 语义评估（默认离线模拟；--allow-online 才真实调用）
+  evaluate_rag_live.py    真实在线最小批次评估（6 类样本，独立数据目录）
+  rag_browser_acceptance.mjs  RAG 网页端到端验收（真实 Chrome + CDP）
+  inspect_scan_page.py    扫描 PDF 页面结构核对（确认无文本层、来源为 OCR）
+  container_ocr_page.py   容器内独立重新 OCR 指定页（核对引文是否来自原件）
+  check_secrets.py        密钥自检（比对本地密钥是否出现在 Git 可见文件，不输出密钥值）
   validate_docling.py     独立解析服务验证（仅本机）
 deploy/docling/           解析服务 GPU 部署与验证
 docs/                     需求、验收与实施报告
 tests/                    离线自动测试（不依赖 Docker、密钥或现有数据）
+  fixtures/rag/           语义评估用例、合成样本知识库
+  web/render_safety.mjs   网页渲染安全回归（加载真实 app.js 的 DOM 桩测试）
 ```
 
 ## 验证
@@ -170,6 +218,18 @@ tests/                    离线自动测试（不依赖 Docker、密钥或现�
 ```powershell
 # 全部离线自动测试（临时目录、临时 SQLite、可注入客户端与模拟 embedding）
 .\.venv\Scripts\python.exe -m pytest -q
+
+# 网页渲染安全回归（离线，无需浏览器）
+node tests/web/render_safety.mjs
+
+# RAG 语义评估：默认离线模拟（不产生任何在线请求）
+.\.venv\Scripts\python.exe scripts/evaluate_rag.py --all-cases --data-dir data/rag-eval
+
+# RAG 语义评估：真实在线（必须显式允许，会产生费用；有病例与请求上限）
+.\.venv\Scripts\python.exe scripts/evaluate_rag.py --allow-online --all-cases --max-requests 30 --data-dir data/rag-eval
+
+# 真实在线最小批次（6 类样本，复用扫描 PDF 的解析版本与索引）
+.\.venv\Scripts\python.exe scripts/evaluate_rag_live.py --allow-online --max-requests 20 --data-dir data/rag-live
 
 # 真实链路验收（需要已启动 Docling、Web 与 worker）
 $env:PYTHONIOENCODING = 'utf-8'
@@ -179,7 +239,7 @@ $env:PYTHONIOENCODING = 'utf-8'
 node scripts/browser_acceptance.mjs --api http://127.0.0.1:8010
 ```
 
-自动测试默认离线，覆盖旧库迁移、任务幂等与租约、上游错误分类、结果幂等发布、空白页、表格去重、多来源、XLSX 坐标与公式缓存、长表分块、索引候选发布与失败保留、格式伪装与越权访问等场景。`tests/test_real_fixtures.py` 使用真实 Docling 结果夹具（位于被 Git 忽略的 `data/` 下），夹具缺失时会跳过并提示，不会把跳过当成通过。
+自动测试默认离线，覆盖旧库迁移、任务幂等与租约、上游错误分类、结果幂等发布、空白页、表格去重、多来源、XLSX 坐标与公式缓存、长表分块、索引候选发布与失败保留、格式伪装与越权访问、RAG 证据范围与字符预算、输出协议与引用校验、HTTP 状态与调用次数、版本竞态与上游错误脱敏等场景。`tests/test_real_fixtures.py` 使用真实 Docling 结果夹具，夹具缺失时会跳过并提示，不会把跳过当成通过。
 
 ## 数据库迁移与恢复
 

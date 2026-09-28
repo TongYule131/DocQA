@@ -12,7 +12,7 @@
   <header><a class="brand" href="/">D<span>DocQA</span></a><a href="/docs" target="_blank" rel="noopener">接口文档 ↗</a></header>
   <main>
     <section class="intro"><div class="eyebrow">文档知识工作台 / DOCLING 0.2</div><h1>让知识，从文档开始。</h1><p>集中管理资料，异步解析文档内容，为智能分析和有据可循的问答做好准备。</p></section>
-    <div class="notice">支持 PDF（含扫描件 OCR）、DOCX、XLSX 与 UTF-8 TXT。解析为异步任务：提交后由独立 worker 执行，页面每 2—3 秒查询任务阶段。答案生成、摘要与信息提取仍未接入。</div>
+    <div class="notice">支持 PDF（含扫描件 OCR）、DOCX、XLSX 与 UTF-8 TXT。解析为异步任务：提交后由独立 worker 执行，页面每 2—3 秒查询任务阶段。问答已接入：选中文档并在建立有效索引后可基于原文提问，回答附逐条引用；摘要与信息提取仍未接入。</div>
     <!-- 配置由服务端读取；页面不收集或显示 API Key。连接测试只发送固定短消息。 -->
     <section class="model-panel" aria-label="模型连接">
       <div><strong>DeepSeek 模型连接</strong><p id="model-status" class="muted">正在读取配置…</p></div>
@@ -61,12 +61,26 @@
         <div id="search-results" aria-live="polite"></div>
         <div class="actions"><button id="summary" class="secondary" disabled>生成摘要</button><button id="extract" class="secondary" disabled>提取数据 / 结论 / 观点</button></div>
         <div id="chunks" class="chunks"><div class="empty"><span>01 / 导入资料</span><h3>建立你的文档知识库</h3><p>从左侧上传 PDF、TXT、DOCX 或 XLSX 文档，提交解析任务后查看带来源的结构化内容。</p></div></div>
-        <form id="question-form"><label for="question">基于当前文档提问</label><div class="question-row"><input id="question" placeholder="这份文档的核心结论是什么？" maxlength="4000" required disabled><button id="ask" disabled>提问</button></div><p class="muted">模型接入后，回答将附带文档页码和来源片段。</p></form>
-        <!-- 预留智能结果展示区；当前未接入模型时只显示错误提示。 -->
-        <pre id="result" hidden></pre>
+        <form id="question-form"><label for="question">基于当前文档提问</label><div class="question-row"><input id="question" placeholder="这份文档的核心结论是什么？" maxlength="4000" required disabled><button id="ask" disabled>提问</button></div>
+          <!-- 首次使用必须说明哪些内容会离开本机：问题发给 Embedding 网关，入选片段与问题发给 DeepSeek。 -->
+          <p class="muted">首次使用提示：提问时，您的问题会发送给已配置的 Embedding 服务用于检索；本次入选的文档片段与问题会发送给已配置的 DeepSeek 服务用于生成回答，因此点击“提问”会发生在线调用并可能产生费用。答案只依据本次检索到的片段，并附逐条引用。本阶段为单文档、单轮问答：不保存会话历史，刷新页面后答案会清空。</p>
+        </form>
+        <!-- 问答结果区：由脚本按已校验结构渲染，全部使用 textContent 等安全 API。 -->
+        <section id="answer-panel" class="answer" hidden>
+          <div class="answer-head">
+            <strong id="answer-status">等待提问</strong>
+            <span id="answer-meta" class="muted"></span>
+          </div>
+          <p id="answer-waiting" class="muted" hidden>正在检索资料并生成回答…</p>
+          <div id="answer-body"></div>
+          <div id="answer-questions"></div>
+          <div id="answer-warnings"></div>
+          <div id="answer-limitations"></div>
+          <div id="answer-citations" class="citations"></div>
+        </section>
       </section>
     </div>
   </main>
-  <footer>智能文档分析与知识问答系统 · Docling 接入阶段</footer>
+  <footer>智能文档分析与知识问答系统 · RAG 问答阶段（单文档 / 单轮 / 非流式）</footer>
 </body>
 </html>

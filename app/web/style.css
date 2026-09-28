@@ -72,6 +72,25 @@ input[type=file]{width:100%;font-size:12px;padding:12px 8px;background:#f8faf6}
 .table-wrap th{background:#f1f5ee;font-weight:600}
 .formula-list{margin:8px 0 0;padding-left:18px;font-size:12px;color:#6b6350}
 .formula-list li{line-height:1.6}
+/* 问答结果区：答案、澄清问题、质量提示、适用边界与引用卡片。 */
+.answer{margin-top:18px;border:1px solid #dbe4d8;border-radius:10px;padding:18px;background:#fbfcfa}
+.answer-head{display:flex;flex-wrap:wrap;gap:10px;align-items:baseline;justify-content:space-between}
+.answer-head strong{font-size:15px;color:#2f5a44}
+#answer-meta{overflow-wrap:anywhere}
+.answer h4{font-size:14px;margin:14px 0 6px;color:#3c6a50}
+#answer-body ul,#answer-body ol{margin:6px 0;padding-left:22px}
+#answer-body li{margin:4px 0;line-height:1.75;overflow-wrap:anywhere}
+#answer-body p{margin:6px 0;line-height:1.75;overflow-wrap:anywhere}
+#answer-waiting{color:#6d8a72}
+/* 逐事实引用标记：可点击定位到对应引用卡片。 */
+button.ref{background:#e8f1e6;color:#2f5a44;padding:1px 6px;margin-left:3px;font-size:12px;border-radius:4px;vertical-align:baseline}
+.citations{margin-top:14px}
+.citation{border:1px solid #e2e8de;border-radius:8px;padding:12px 14px;margin:10px 0;background:#fff}
+.citation blockquote{margin:8px 0;padding-left:12px;border-left:3px solid #a9c4ac;color:#3f5747;font-size:13px;line-height:1.7;overflow-wrap:anywhere}
+.citation-active{box-shadow:0 0 0 2px #7ba082}
+.citation .actions{margin:8px 0 0}
+.citation a{font-size:12px;align-self:center}
+.error{color:#8d3733;background:#fbeaea;border-radius:6px;padding:10px 12px;font-size:13px;line-height:1.7}
 #result{white-space:pre-wrap;overflow-wrap:anywhere;background:#f0f5eb;padding:16px;font-family:inherit}
 footer{text-align:center;color:#98a092;font-size:11px;padding:12px 0 32px}
 :focus-visible{outline:2px solid #5b9373;outline-offset:3px}
