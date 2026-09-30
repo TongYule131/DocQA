@@ -33,6 +33,8 @@ let busy = false;
 let modelConfigured = false;
 let embeddingConfigured = false;
 let ragConfigured = false;      // 两个在线模型是否都已配置（只代表配置存在）。
+let analysisConfigured = false; // 生成模型是否已配置（分析任务只需要这一个）。
+let analysisJobState = null;    // 最近一次查询到的分析任务状态（不伪造进度）。
 let indexState = 'pending';
 let currentTaskId = null;
 let pollTimer = null;
@@ -49,6 +51,25 @@ let answerPayload = null;      // 最近一次问答结果（仅存于内存，�
 // 验收记录：每次真正发出的问答请求及其结果，用于证明“每个有效提交只对应一次请求”。
 let askRequestCount = 0;
 const askRequests = [];
+
+// ---------------------------------------------------------------------------
+// 分析任务（摘要 / 信息提取）页面状态
+//
+// 关键约束（对应任务书 §8）：
+// - 用户先看到分析范围、解析版本与请求数上界，再明确发起生成；
+// - 刷新、轮询、查看历史与导出都不得触发生成；
+// - 任务状态与结果历史来自服务端持久化数据，页面不伪造进度或 token 流。
+// ---------------------------------------------------------------------------
+let analysisKind = 'extraction';   // 当前查看／发起的分析类型。
+let analysisPlan = null;           // 最近一次“查看分析范围”的结果（零外部调用）。
+let analysisJobId = null;
+let analysisPollTimer = null;
+let analysisPollDelay = 2500;
+let analysisPollFailures = 0;
+let analysisResults = [];          // 结果历史（不含正文）。
+let activeResultId = null;         // 当前展示的结果。
+let lastResultKind = null;         // 最近一次结果类型，供“重新生成”使用。
+let analysisRequestCount = 0;      // 页面发起的生成提交次数（用于断言不重复提交）。
 
 async function api(path, options = {}) {
   // 统一 API 前缀与错误转换，让操作入口只处理成功数据或错误提示。
@@ -78,8 +99,18 @@ function controls() {
   const hasVersion = Boolean(doc && doc.active_parse_version_id);
   $('parse').disabled = busy || !doc || taskActive || hasVersion;
   $('reparse').disabled = busy || !doc || taskActive;
-  // 摘要与信息提取仍未接入，继续禁用；问答按真实前置条件启用。
-  for (const id of ['summary', 'extract']) $(id).disabled = true;
+  // 分析能力只需要“有合格解析版本 + 生成模型已配置”，不依赖 embedding 索引。
+  const analysisActive = analysisJobId && analysisJobState
+    && ['queued', 'running'].includes(analysisJobState.status);
+  for (const id of ['summary', 'extract', 'analysis-plan']) {
+    $(id).disabled = busy || !hasVersion || !analysisConfigured;
+  }
+  $('analysis-stop').disabled = busy || !analysisActive;
+  $('analysis-retry').hidden = !(analysisJobState
+    && ['failed', 'needs_attention'].includes(analysisJobState.status));
+  $('analysis-retry').disabled = busy || !analysisJobState
+    || analysisJobState.requests_used >= analysisJobState.max_requests;
+  $('analysis-regenerate').hidden = !hasVersion || !analysisConfigured;
   $('upload-form').querySelector('button').disabled = busy;
   $('refresh').disabled = busy;
   $('test-model').disabled = busy || !modelConfigured;
@@ -142,6 +173,7 @@ function stopPolling() {
 async function select(id, preserveAnswer = false) {
   // 切换文档：先停止旧轮询并清空旧结果，再加载该文档的版本与内容。
   stopPolling();
+  stopAnalysisPolling();
   selectedId = id;
   sessionStorage.setItem('docqa.selectedDocument', id);
   currentTaskId = null;
@@ -150,6 +182,14 @@ async function select(id, preserveAnswer = false) {
   searchMeta = null;
   pollFailures = 0;
   pollDelay = 2500;
+  // 分析状态属于单份文档：切换文档时不沿用上一份的范围、任务与结果。
+  analysisPlan = null;
+  analysisJobId = null;
+  analysisJobState = null;
+  analysisResults = [];
+  activeResultId = null;
+  analysisPollFailures = 0;
+  analysisPollDelay = 2500;
   const token = ++requestSeq;
   // 连接错误属于此前选中的任务，不能带到另一份已成功的文档上。
   $('connection-status').textContent = '';
@@ -157,6 +197,9 @@ async function select(id, preserveAnswer = false) {
   $('task-status').textContent = '';
   $('version-status').textContent = '';
   $('quality-panel').replaceChildren();
+  $('analysis-plan-panel').replaceChildren();
+  $('analysis-results').replaceChildren();
+  $('analysis-job').replaceChildren();
   // 问答结果不持久化：切换文档时清空答案区，避免显示上一份文档的回答。
   if (!preserveAnswer) resetAnswer();
   renderDocuments();
@@ -183,6 +226,24 @@ async function select(id, preserveAnswer = false) {
   } else if (doc.latest_task_id) {
     currentTaskId = doc.latest_task_id;
     await renderTask(await api(`/parse-tasks/${doc.latest_task_id}`), token);
+  }
+  // 刷新后从服务端恢复分析历史与仍在进行的分析任务（普通刷新不清空正在查看的结果）。
+  if (token !== requestSeq) return;
+  await loadAnalysisResults();
+  if (token !== requestSeq) return;
+  const jobs = await api(`/documents/${id}/analysis-jobs`);
+  if (token !== requestSeq) return;
+  const activeJob = jobs.find((job) => ['queued', 'running'].includes(job.status));
+  if (activeJob) {
+    analysisJobId = activeJob.id;
+    renderAnalysisJob(activeJob);
+    analysisPollDelay = 2500;
+    scheduleAnalysisPoll(0);
+  } else if (jobs.length) {
+    analysisJobId = jobs[0].id;
+    renderAnalysisJob(jobs[0]);
+  } else {
+    $('analysis-job').replaceChildren();
   }
 }
 
@@ -389,6 +450,16 @@ async function refresh() {
   } catch (error) {
     ragConfigured = false;
   }
+  // 分析能力状态：只报告配置与预算，不调用任何收费接口。
+  try {
+    const analysis = await api('/analysis/status');
+    analysisConfigured = analysis.configured;
+    $('analysis-status').textContent = analysis.configured
+      ? '分析能力已配置；点击“查看分析范围”先确认范围与请求上界。'
+      : `尚未配置生成模型：${analysis.note}`;
+  } catch (error) {
+    analysisConfigured = false;
+  }
   await refreshParsingStatus();
   const latestDocuments = await api('/documents');
   if (refreshToken !== requestSeq) return;
@@ -401,8 +472,515 @@ async function refresh() {
   }
 }
 
-async function refreshParsingStatus() {
-  // 解析服务可达性单独探测：可达不代表模型已预热或内容质量合格。
+// ---------------------------------------------------------------------------
+// 分析任务：规划、提交、轮询、结果历史与导出
+// ---------------------------------------------------------------------------
+const analysisKindLabels = { extraction: '信息提取', summary: '文档摘要' };
+const analysisStatusLabels = {
+  queued: '已排队，等待分析 worker 领取', running: '正在执行', succeeded: '已完成',
+  failed: '执行失败', cancelled: '已取消', needs_attention: '需要人工确认',
+};
+const analysisStageLabels = {
+  queued: '排队中', planning: '规划输入', generating: '按批次生成与校验',
+  reducing: '汇总中间结果', validating: '校验输出', saving: '保存结果', done: '已完成',
+};
+
+function stopAnalysisPolling() {
+  if (analysisPollTimer !== null) {
+    clearTimeout(analysisPollTimer);
+    analysisPollTimer = null;
+  }
+}
+
+function scheduleAnalysisPoll(delay) {
+  // 与解析轮询同样只在任务处于活动状态时调度；终态立即停止。
+  stopAnalysisPolling();
+  analysisPollTimer = setTimeout(pollAnalysisJob, delay === undefined ? analysisPollDelay : delay);
+}
+
+const pendingAnalysisKeys = new Map();
+function pendingAnalysisSlot(action, body, documentId = selectedId) {
+  return `docqa-analysis:${documentId}:${action}:${body.plan_fingerprint}:${Boolean(body.regenerate)}`;
+}
+function analysisPlanPayload(regenerate = false) {
+  // 提交时固定解析版本与计划指纹：计划变化时后端会返回 409 并要求重新查看范围。
+  if (!analysisPlan) return {};
+  const body = {
+    parse_version_id: analysisPlan.parse_version_id,
+    plan_fingerprint: analysisPlan.plan_fingerprint,
+    regenerate,
+  };
+  const slot = pendingAnalysisSlot(analysisPlan.kind === 'summary' ? 'summary' : 'extract', body);
+  let key = pendingAnalysisKeys.get(slot);
+  try { key = key || sessionStorage.getItem(slot); } catch (_) { /* 禁用存储时保留本页幂等键。 */ }
+  key = key || `ui-${crypto.randomUUID()}`;
+  pendingAnalysisKeys.set(slot, key);
+  try { sessionStorage.setItem(slot, key); } catch (_) { /* 存储不可用不触发重发。 */ }
+  // 收到服务端确认前（包括断网/刷新），同一次操作始终重用原键。
+  return { ...body, idempotency_key: key };
+}
+
+async function loadAnalysisPlan(kind) {
+  // 只做本地输入规划：零外部调用；展示版本、范围、批次与请求数上界。
+  analysisKind = kind || analysisKind;
+  const documentId = selectedId;
+  const token = requestSeq;
+  const plan = await api(`/documents/${documentId}/analysis-plan?kind=${analysisKind}`,
+    { method: 'POST' });
+  if (token !== requestSeq || documentId !== selectedId) return;
+  analysisPlan = plan;
+  renderAnalysisPlan(plan);
+}
+
+function renderAnalysisPlan(plan) {
+  const container = $('analysis-plan-panel');
+  container.replaceChildren();
+  const head = document.createElement('p');
+  head.className = 'muted';
+  head.textContent = `${analysisKindLabels[plan.kind]} · 解析版本 ${plan.parse_version_id}`
+    + (plan.is_active_version ? '（当前预览版本）' : '（历史解析版本）')
+    + ` · Prompt ${plan.prompt_version}`;
+  container.append(head);
+
+  const limits = plan.limits || {};
+  $('analysis-status').textContent =
+    `可分析单元 ${plan.coverage.planned_units}/${plan.coverage.total_units}`
+    + ` · 共 ${plan.coverage.batch_count} 个输入批次`
+    + (plan.reduce_required ? ' · 需要 1 次汇总调用' : ' · 单批直接完成')
+    + ` · 预计最多 ${plan.request_upper_bound} 次生成调用`
+    + `（任务上限 ${limits.max_requests} 次）`
+    + (plan.executable ? '' : ' · 本次不可执行');
+
+  const list = document.createElement('ul');
+  list.className = 'plan-batches';
+  for (const batch of plan.batches) {
+    const item = document.createElement('li');
+    item.textContent = `批次 ${batch.order_index + 1}：${batch.unit_count} 个单元 · `
+      + `${batch.chars} 字符 · 消息 ${batch.message_chars} 字符`;
+    list.append(item);
+  }
+  container.append(list);
+
+  if (plan.coverage.excluded_units) {
+    const excluded = document.createElement('p');
+    excluded.className = 'muted';
+    const reasons = Object.entries(plan.coverage.excluded_reasons || {})
+      .map(([reason, count]) => `${reason} ×${count}`).join('；');
+    excluded.textContent = `未参与分析的非正文单元 ${plan.coverage.excluded_units} 个：${reasons}`;
+    container.append(excluded);
+  }
+  const limitsNote = document.createElement('p');
+  limitsNote.className = 'muted';
+  limitsNote.textContent = `预算口径：单批 ${limits.batch_max_chars} 字符 · 汇总 ${limits.reduce_max_chars} 字符`
+    + ` · 输入上限 ${limits.input_max_chars} 字符 · 全文上限 ${limits.max_document_chars} 字符`
+    + '（字符不是 token）';
+  container.append(limitsNote);
+  for (const text of plan.limitations || []) {
+    const note = document.createElement('p');
+    note.className = 'muted';
+    note.textContent = `说明：${text}`;
+    container.append(note);
+  }
+}
+
+function renderAnalysisJob(job) {
+  // 任务状态、阶段与预算；失败或待确认时明确说明旧结果仍然可读。
+  analysisJobState = job || null;
+  const container = $('analysis-job');
+  container.replaceChildren();
+  if (!job) return;
+  const line = document.createElement('p');
+  line.textContent = `${analysisKindLabels[job.kind] || job.kind} · `
+    + `${analysisStatusLabels[job.status] || job.status} · `
+    + `${analysisStageLabels[job.stage] || job.stage}`
+    + ` · 已用 ${job.requests_used}/${job.max_requests} 次生成调用`
+    + ` · 已完成步骤 ${job.steps_completed}/${job.steps_total}`;
+  container.append(line);
+  if (job.error_message) {
+    const error = document.createElement('p');
+    error.className = job.status === 'succeeded' ? 'muted' : 'error';
+    error.textContent = `${job.error_code || ''} · ${job.error_message}`;
+    container.append(error);
+  }
+  const coverage = job.coverage;
+  if (coverage) {
+    const note = document.createElement('p');
+    note.className = 'muted';
+    note.textContent = `覆盖：已处理 ${coverage.processed_units}/${coverage.total_units} 个输入单元`
+      + ` · 完成批次 ${coverage.batch_completed}/${coverage.batch_total}`
+      + (coverage.reduce_completed ? ' · 已执行汇总' : '')
+      + (coverage.complete ? ' · 覆盖完整' : ' · 覆盖不完整（未处理内容不会被包装成全文结果）');
+    container.append(note);
+  }
+  if (job.status === 'needs_attention') {
+    const note = document.createElement('p');
+    note.className = 'error';
+    note.textContent = '存在未确认的生成调用：系统不会自动重发；请核实后明确重试，重试可能重复计费。';
+    container.append(note);
+  }
+  controls();
+}
+
+async function pollAnalysisJob() {
+  // 轮询只查询状态；迟到的响应不得覆盖新选中的文档。
+  if (!analysisJobId || !selectedId) { stopAnalysisPolling(); return; }
+  const jobId = analysisJobId;
+  const documentId = selectedId;
+  const token = requestSeq;
+  try {
+    const job = await api(`/analysis-jobs/${jobId}`);
+    if (token !== requestSeq || documentId !== selectedId || jobId !== analysisJobId) return;
+    analysisPollFailures = 0;
+    analysisPollDelay = 2500;
+    renderAnalysisJob(job);
+    if (['queued', 'running'].includes(job.status)) {
+      scheduleAnalysisPoll();
+      return;
+    }
+    stopAnalysisPolling();
+    await loadAnalysisResults();
+  } catch (error) {
+    if (token !== requestSeq || documentId !== selectedId || jobId !== analysisJobId) return;
+    analysisPollFailures += 1;
+    if (analysisPollFailures > 6) {
+      stopAnalysisPolling();
+      $('connection-status').textContent =
+        '多次无法读取分析任务状态，已停止自动刷新；请点击“刷新”恢复。';
+      return;
+    }
+    analysisPollDelay = Math.min(15000, analysisPollDelay * 2);
+    scheduleAnalysisPoll();
+  }
+}
+
+async function loadAnalysisResults() {
+  // 结果历史只读；不会重新生成，也不会清空当前正在查看的结果。
+  const documentId = selectedId;
+  const token = requestSeq;
+  const results = await api(`/documents/${documentId}/analysis-results`);
+  if (token !== requestSeq || documentId !== selectedId) return;
+  analysisResults = results;
+  renderAnalysisResultList();
+}
+
+function renderAnalysisResultList() {
+  const container = $('analysis-results');
+  container.replaceChildren();
+  if (!analysisResults.length) {
+    const empty = document.createElement('p');
+    empty.className = 'muted';
+    empty.textContent = '该文档还没有持久化的分析结果。';
+    container.append(empty);
+    return;
+  }
+  const title = document.createElement('h4');
+  title.textContent = '历史结果';
+  container.append(title);
+  for (const item of analysisResults) {
+    const row = document.createElement('div');
+    row.className = 'result-row';
+    const label = document.createElement('span');
+    label.textContent = `${analysisKindLabels[item.kind] || item.kind} · `
+      + `${item.created_at.slice(0, 19).replace('T', ' ')} · 版本 ${item.parse_version_id}`
+      + (item.is_active_version ? '（当前预览版本）' : '（历史解析版本）')
+      + (item.complete ? ' · 覆盖完整' : ' · 覆盖不完整')
+      + ` · ${item.requests_used} 次调用`;
+    row.append(label);
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'subtle';
+    open.textContent = '查看结果';
+    // 查看已存结果不会重新生成，也不弹出计费步骤。
+    open.onclick = () => run(() => openResult(item.id));
+    row.append(open);
+    container.append(row);
+  }
+}
+
+async function openResult(resultId) {
+  const documentId = selectedId;
+  const token = requestSeq;
+  const result = await api(`/analysis-results/${resultId}`);
+  if (token !== requestSeq || documentId !== selectedId) return;
+  activeResultId = result.id;
+  lastResultKind = result.kind;
+  analysisKind = result.kind;
+  renderAnalysisResult(result);
+}
+
+function renderAnalysisResult(result) {
+  // 由已校验结构渲染；全部使用 textContent，模型或文件名里的 HTML 只作为文字。
+  const container = $('analysis-results');
+  const panel = document.createElement('section');
+  panel.className = 'analysis-result';
+
+  const head = document.createElement('h4');
+  head.textContent = `${analysisKindLabels[result.kind] || result.kind}结果 · ${result.created_at.slice(0, 19).replace('T', ' ')}`;
+  panel.append(head);
+
+  const meta = document.createElement('p');
+  meta.className = 'muted';
+  meta.textContent = `解析版本 ${result.parse_version_id}`
+    + (result.is_active_version ? '（当前预览版本）' : '（历史解析版本）')
+    + ` · Prompt ${result.prompt_version} · 协议 ${result.protocol_version}`
+    + ` · 本次生成调用 ${result.requests_used} 次`
+    + (result.parse_parser_name ? ` · 解析器 ${result.parse_parser_name}` : '');
+  panel.append(meta);
+
+  const coverage = result.coverage || {};
+  const coverageNote = document.createElement('p');
+  coverageNote.className = 'muted';
+  coverageNote.textContent = `覆盖：已处理 ${coverage.processed_units}/${coverage.total_units} 个输入单元`
+    + ` · 完成批次 ${coverage.batch_completed}/${coverage.batch_total}`
+    + (coverage.reduce_completed ? ' · 已执行汇总' : '')
+    + (coverage.complete ? ' · 本次声明覆盖该解析版本的完整合格输入' : ' · 覆盖不完整')
+    + (coverage.excluded_units ? ` · 另有 ${coverage.excluded_units} 个非正文单元未参与分析` : '')
+    + ` · 最终引用回落原文 ${coverage.resolved_original_refs} 条`;
+  panel.append(coverageNote);
+
+  if (result.summary) {
+    const topic = document.createElement('div');
+    const topicTitle = document.createElement('strong');
+    topicTitle.textContent = '主题概述';
+    const topicText = document.createElement('p');
+    topicText.textContent = result.summary.topic_overview || '（无）';
+    topic.append(topicTitle, topicText);
+    panel.append(topic);
+    panel.append(renderPointSection('主要内容与结论', result.summary.main_points));
+    if (result.summary.exceptions.length) {
+      panel.append(renderPointSection('例外、冲突与限制', result.summary.exceptions));
+    } else {
+      const note = document.createElement('p');
+      note.className = 'muted';
+      note.textContent = '本次结果没有单列的例外条目。';
+      panel.append(note);
+    }
+  }
+  if (result.extraction) {
+    const labels = { data: '数据', conclusion: '结论', viewpoint: '观点' };
+    for (const kind of ['data', 'conclusion', 'viewpoint']) {
+      const group = result.extraction.items.filter((item) => item.kind === kind);
+      const section = document.createElement('div');
+      const title = document.createElement('strong');
+      title.textContent = labels[kind];
+      section.append(title);
+      if (!group.length) {
+        const note = document.createElement('p');
+        note.className = 'muted';
+        const status = result.extraction.sections[kind];
+        note.textContent = status === 'none'
+          ? '已覆盖本次输入，但没有该类可提取内容（不是模型失败）。'
+          : '该类内容未处理。';
+        section.append(note);
+      }
+      for (const item of group) {
+        section.append(renderExtractionItem(item));
+      }
+      panel.append(section);
+    }
+  }
+
+  if (result.limitations && result.limitations.length) {
+    const title = document.createElement('strong');
+    title.textContent = '适用边界与限制';
+    const list = document.createElement('ul');
+    for (const text of result.limitations) {
+      const item = document.createElement('li');
+      item.textContent = text;
+      list.append(item);
+    }
+    panel.append(title, list);
+  }
+  if (result.quality_warnings && result.quality_warnings.length) {
+    const title = document.createElement('strong');
+    title.textContent = '解析质量提示（继续生效）';
+    const list = document.createElement('ul');
+    for (const warning of result.quality_warnings) {
+      const item = document.createElement('li');
+      item.textContent = `${warning.severity === 'error' ? '错误' : warning.severity === 'warning' ? '告警' : '提示'}`
+        + ` · ${warning.code} · ${warning.message}`;
+      list.append(item);
+    }
+    panel.append(title, list);
+  }
+
+  panel.append(renderResultCitations(result));
+
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+  const copy = document.createElement('button');
+  copy.type = 'button';
+  copy.className = 'subtle';
+  copy.textContent = '复制可读内容';
+  // 复制内容由同一份已校验结构生成，不包含原始模型响应或模型思考。
+  copy.onclick = () => run(async () => {
+    const text = resultToText(result);
+    try {
+      await navigator.clipboard.writeText(text);
+      setMessage('已复制结果文本（含引用与限制）。', 'ok');
+    } catch (error) {
+      setMessage(`浏览器拒绝写入剪贴板：${error.message}；可改用导出文件。`, 'error');
+    }
+  });
+  actions.append(copy);
+  for (const [format, label] of [['markdown', '导出 Markdown'], ['json', '导出 JSON']]) {
+    const link = document.createElement('a');
+    link.href = `/api/analysis-results/${encodeURIComponent(result.id)}/export?format=${format}`;
+    link.textContent = label;
+    actions.append(link);
+  }
+  panel.append(actions);
+  container.replaceChildren(panel);
+}
+
+function renderExtractionItem(item) {
+  const row = document.createElement('div');
+  row.className = 'extraction-item';
+  const content = document.createElement('p');
+  const text = document.createElement('span');
+  text.textContent = item.content;
+  content.append(text);
+  appendRefButtons(content, item.refs);
+  row.append(content);
+  const details = [];
+  if (item.name) details.push(`对象：${item.name}`);
+  if (item.value_text) details.push(`数值：${item.value_text}`);
+  if (item.unit) details.push(`单位：${item.unit}`);
+  if (item.period) details.push(`时间：${item.period}`);
+  if (item.subject) details.push(`主体：${item.subject}`);
+  if (item.scope) details.push(`口径/条件：${item.scope}`);
+  if (details.length) {
+    const note = document.createElement('small');
+    note.className = 'muted';
+    note.textContent = details.join(' · ');
+    row.append(note);
+  }
+  return row;
+}
+
+function renderPointSection(title, points) {
+  const section = document.createElement('div');
+  const head = document.createElement('strong');
+  head.textContent = title;
+  section.append(head);
+  const list = document.createElement('ul');
+  for (const point of points) {
+    const item = document.createElement('li');
+    const text = document.createElement('span');
+    text.textContent = point.text;
+    item.append(text);
+    appendRefButtons(item, point.refs);
+    list.append(item);
+  }
+  section.append(list);
+  return section;
+}
+
+function renderResultCitations(result) {
+  const container = document.createElement('div');
+  container.className = 'citations';
+  const citations = (result.summary && result.summary.citations)
+    || (result.extraction && result.extraction.citations) || [];
+  if (!citations.length) return container;
+  const title = document.createElement('h4');
+  title.textContent = '引用与来源（回到原文）';
+  container.append(title);
+  for (const citation of citations) {
+    const card = document.createElement('article');
+    card.className = 'citation';
+    card.id = `result-citation-${citation.reference_id}`;
+    const head = document.createElement('div');
+    const label = document.createElement('strong');
+    label.textContent = `[${citation.reference_id}]`;
+    const location = document.createElement('span');
+    location.className = 'muted';
+    location.textContent = (citation.sources || []).map(sourceText).join(' / ')
+      || '来源定位信息有限';
+    head.append(label, document.createTextNode(' '), location);
+    const quote = document.createElement('blockquote');
+    quote.textContent = citation.quote;
+    card.append(head, quote);
+    const info = document.createElement('p');
+    info.className = 'muted';
+    info.textContent = `解析版本 ${result.parse_version_id}`
+      + (citation.block_type ? ` · 块类型 ${citation.block_type}` : '')
+      + (citation.char_start !== null && citation.char_start !== undefined
+        ? ` · 引述位于该单元第 ${citation.char_start}-${citation.char_end} 字符` : '')
+      + ' · 仅声明连续子串位置，不声称已实现字符级高亮';
+    card.append(info);
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    const preview = document.createElement('button');
+    preview.type = 'button';
+    preview.className = 'subtle';
+    preview.textContent = '查看引用版本原文';
+    preview.onclick = () => run(() => loadContent(result.document_id, result.parse_version_id));
+    actions.append(preview);
+    const pages = (citation.sources || [])
+      .filter((source) => source.format === 'pdf' && Number.isInteger(source.page) && source.page > 0)
+      .map((source) => source.page);
+    const link = document.createElement('a');
+    link.href = `/api/documents/${encodeURIComponent(result.document_id)}/original`
+      + (pages.length ? `#page=${pages[0]}` : '');
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = pages.length ? `查看原件第 ${pages[0]} 页` : '下载原件核对';
+    actions.append(link);
+    card.append(actions);
+    container.append(card);
+  }
+  return container;
+}
+
+function resultToText(result) {
+  // 复制用文本：只含已校验结构与限制，便于粘贴到文档或邮件中核对。
+  const lines = [];
+  lines.push(`${analysisKindLabels[result.kind] || result.kind}（解析版本 ${result.parse_version_id}，`
+    + `生成时间 ${result.created_at}）`);
+  if (result.summary) {
+    lines.push(`主题概述：${result.summary.topic_overview}`);
+    lines.push('主要内容与结论：');
+    for (const point of result.summary.main_points) {
+      lines.push(`- ${point.text}${point.refs.map((ref) => `[${ref}]`).join('')}`);
+    }
+    if (result.summary.exceptions.length) {
+      lines.push('例外、冲突与限制：');
+      for (const point of result.summary.exceptions) {
+        lines.push(`- ${point.text}${point.refs.map((ref) => `[${ref}]`).join('')}`);
+      }
+    }
+  }
+  if (result.extraction) {
+    const labels = { data: '数据', conclusion: '结论', viewpoint: '观点' };
+    for (const kind of ['data', 'conclusion', 'viewpoint']) {
+      lines.push(`${labels[kind]}：`);
+      const group = result.extraction.items.filter((item) => item.kind === kind);
+      if (!group.length) {
+        lines.push(result.extraction.sections[kind] === 'none'
+          ? '- （已覆盖输入，但没有该类可提取内容）' : '- （未处理）');
+        continue;
+      }
+      for (const item of group) {
+        lines.push(`- ${item.content}${item.refs.map((ref) => `[${ref}]`).join('')}`);
+      }
+    }
+  }
+  const citations = (result.summary && result.summary.citations)
+    || (result.extraction && result.extraction.citations) || [];
+  if (citations.length) {
+    lines.push('引用：');
+    for (const citation of citations) {
+      lines.push(`[${citation.reference_id}] ${citation.quote}`);
+    }
+  }
+  if (result.limitations.length) {
+    lines.push('适用边界：');
+    for (const text of result.limitations) lines.push(`- ${text}`);
+  }
+  return lines.join('\n');
+}
+
+async function refreshParsingStatus() {  // 解析服务可达性单独探测：可达不代表模型已预热或内容质量合格。
   try {
     const status = await api('/parsing/status');
     $('parsing-status').textContent = status.reachable
@@ -1040,16 +1618,74 @@ async function askQuestion() {
 }
 
 async function intelligence(action, body) {
-  // 摘要与信息提取仍未接入：调用后由后端返回 503 提示，页面不伪造结果。
+  // 摘要与信息提取已改为任务式接口：提交后由独立 worker 执行，页面轮询真实状态。
+  // action 取 'summary' 或 'extract'；body 只允许解析版本、计划指纹与幂等键。
+  analysisRequestCount += 1;
+  const slot = pendingAnalysisSlot(action, body);
   const result = await api(`/documents/${selectedId}/${action}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
-  setMessage(JSON.stringify(result), 'info');
+  pendingAnalysisKeys.delete(slot);
+  try { sessionStorage.removeItem(slot); } catch (_) { /* 只在明确收到响应后释放键。 */ }
+  analysisJobId = result.job ? result.job.id : null;
+  renderAnalysisJob(result.job);
+  setMessage(result.message + (result.reused ? '（复用了已有任务或结果）' : ''), 'ok');
+  await loadAnalysisResults();
+  scheduleAnalysisPoll(0);
 }
 
-$('summary').onclick = () => run(() => intelligence('summary'));
-$('extract').onclick = () => run(() => intelligence('extract'));
+$('analysis-plan').onclick = () => run(() => loadAnalysisPlan(analysisKind));
+async function ensureVisibleAnalysisPlan(kind) {
+  const doc = documents.find((item) => item.id === selectedId);
+  if (!analysisPlan || analysisPlan.kind !== kind || analysisPlan.document_id !== selectedId
+      || analysisPlan.parse_version_id !== (doc && doc.active_parse_version_id)) {
+    await loadAnalysisPlan(kind);
+    setMessage('已展示分析范围与请求上界。确认后再次点击生成按钮；本次尚未创建生成任务。', 'info');
+    return false;
+  }
+  if (!analysisPlan.executable) {
+    setMessage('当前计划不可执行，请先处理显示的限制。', 'error');
+    return false;
+  }
+  return true;
+}
+$('summary').onclick = () => run(async () => {
+  analysisKind = 'summary';
+  if (!await ensureVisibleAnalysisPlan('summary')) return;
+  const body = analysisPlanPayload();
+  await intelligence('summary', body);
+});
+$('extract').onclick = () => run(async () => {
+  analysisKind = 'extraction';
+  if (!await ensureVisibleAnalysisPlan('extraction')) return;
+  const body = analysisPlanPayload();
+  await intelligence('extract', body);
+});
+$('analysis-stop').onclick = () => run(async () => {
+  if (!analysisJobId) return;
+  const result = await api(`/analysis-jobs/${analysisJobId}/cancel`, { method: 'POST' });
+  setMessage(result.message, 'ok');
+  renderAnalysisJob(await api(`/analysis-jobs/${analysisJobId}`));
+  await loadAnalysisResults();
+});
+$('analysis-retry').onclick = () => run(async () => {
+  if (!analysisJobId) return;
+  // 明确重试：预算不重置，已校验步骤直接复用；页面提示可能重复计费。
+  const job = await api(`/analysis-jobs/${analysisJobId}/retry`, { method: 'POST' });
+  setMessage('已提交重试：只做未完成的批次，已校验步骤复用；失败与不确定调用仍占用预算，'
+    + '可能重复计费。', 'ok');
+  renderAnalysisJob(job);
+  scheduleAnalysisPoll(0);
+});
+$('analysis-regenerate').onclick = () => run(async () => {
+  // 明确重新生成：使用新幂等键，产生新的结果版本，旧结果继续可读。
+  const kind = lastResultKind || analysisKind || 'extraction';
+  analysisKind = kind;
+  if (!await ensureVisibleAnalysisPlan(kind)) return;
+  const body = analysisPlanPayload(true);
+  await intelligence(kind === 'summary' ? 'summary' : 'extract', body);
+});
 $('question-form').onsubmit = (event) => {
   // 阻止浏览器默认提交；问答提交期间重复触发会被 askQuestion 直接忽略。
   event.preventDefault();
@@ -1100,6 +1736,29 @@ window.__docqaTest = {
   renderAnswerMarkdown: (markdown) => renderAnswerMarkdown(markdown),
   renderCitations: (citations, meta) => renderCitations(citations, meta),
   renderAnswer: (payload) => renderAnswer(payload),
+  // 分析任务的渲染函数导出：同一份生产代码，供离线安全回归与浏览器验收复用。
+  renderAnalysisPlan: (plan) => renderAnalysisPlan(plan),
+  renderAnalysisJob: (job) => renderAnalysisJob(job),
+  renderAnalysisResult: (result) => renderAnalysisResult(result),
+  renderAnalysisResultList: () => renderAnalysisResultList(),
+  resultToText: (result) => resultToText(result),
+  // 分析只读状态：用于断言“刷新与查看历史不触发生成”“重复点击只提交一次”。
+  analysisState: () => ({
+    kind: analysisKind,
+    hasPlan: analysisPlan !== null,
+    planFingerprint: analysisPlan ? analysisPlan.plan_fingerprint : null,
+    jobId: analysisJobId,
+    jobStatus: analysisJobState ? analysisJobState.status : null,
+    requestsUsed: analysisJobState ? analysisJobState.requests_used : null,
+    maxRequests: analysisJobState ? analysisJobState.max_requests : null,
+    resultCount: analysisResults.length,
+    activeResultId,
+    activeResultKind: lastResultKind,
+    submitCount: analysisRequestCount,
+    polling: analysisPollTimer === null ? 0 : 1,
+    summaryDisabled: $('summary').disabled,
+    extractDisabled: $('extract').disabled,
+  }),
   // 选择文档必须走与用户点击完全相同的路径，不做任何内部状态注入。
   selectDocument: (documentId) => run(() => select(documentId)),
   setQuestion: (value) => { $('question').value = value; return true; },

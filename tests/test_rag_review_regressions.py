@@ -189,3 +189,94 @@ def test_repeated_amount_in_explanation_still_needs_its_own_correct_reference():
               'citations':[{'reference_id':1,'quote':case['evidence'][0]['text']},
                            {'reference_id':2,'quote':case['evidence'][1]['text']}]}
     assert not evaluator.judge(case, answer)['passed']
+
+
+@pytest.mark.parametrize('reverse_refs', [False, True])
+@pytest.mark.parametrize('claim,scope,token', [
+    ('合成样本规定设备支出超过二十六万元需负责人批准。',
+     '设备验收环节由设备管理细则另行规定。', '二十六万元'),
+    ('合成样本规定收到申请后十四日内答复。',
+     '申请材料清单由申请指南另行规定。', '十四日'),
+    ('合成样本评审委员会由九人组成。',
+     '评审委员的遴选流程由评审细则另行规定。', '九人'),
+])
+def test_compound_explanation_attribution_across_sources(tmp_path, claim, scope, token,
+                                                       reverse_refs):
+    """不同金额、期限、人数及编号顺序复现错引，避免只针对 S05 的十万元。
+
+    错误/拆分/联合三种输出都走生产校验与渲染。形式合法不等于语义正确；
+    正确的多片段联合引用仍应通过，不能借原子化建议收窄原有协议。
+    """
+    evaluator = _load_evaluator()
+    texts = [scope, claim] if reverse_refs else [claim, scope]
+    claim_ref, scope_ref = (2, 1) if reverse_refs else (1, 2)
+    case = {
+        'case_id': 'compound-attribution', 'category': '补充说明错引回归',
+        'question': '规则及具体流程是什么？', 'expected_status': 'answered',
+        'must_include': [token], 'must_not_include': [], 'allowed_refs': [1, 2],
+        'evidence': [{'chunk_id': f'c{i}', 'text': text}
+                     for i, text in enumerate(texts, start=1)],
+        'simulated_model_output': {
+            'status': 'answered', 'conclusion': [{'text': claim, 'refs': [claim_ref]}],
+            'explanation': [{'text': claim + scope, 'refs': [scope_ref]}],
+            'clarification_questions': [],
+            'evidence_quotes': [{'ref': i, 'quote': text}
+                                for i, text in enumerate(texts, start=1)],
+        },
+    }
+    settings = Settings(data_dir=tmp_path)
+    bad = evaluator.run_offline([case], settings)['records'][0]
+    assert bad['validated'] is True
+    assert bad['passed'] is False
+    assert any(c['check'] == 'citation_attribution' and not c['passed']
+               for c in bad['checks'])
+
+    # 模拟作者按各自来源拆分说明；这只是协议/判定回归，不能冒充模型实测。
+    case['simulated_model_output']['explanation'] = [{'text': scope, 'refs': [scope_ref]}]
+    split = evaluator.run_offline([case], settings)['records'][0]
+    assert split['passed'] is True
+    assert split['answer']['explanation'] == [{'text': scope, 'refs': [scope_ref]}]
+
+    case['simulated_model_output']['explanation'] = [
+        {'text': claim + scope, 'refs': [claim_ref, scope_ref]}]
+    joint = evaluator.run_offline([case], settings)['records'][0]
+    assert joint['passed'] is True
+
+
+def test_quoted_user_duration_keeps_strict_source_attribution(tmp_path):
+    """保留 v5 实测未通过项：词面检查不豁免引号中的用户数字。
+
+    这里的七天是复述用户条件，并非直接声明政策期限。现有判定不能区分二者，
+    本轮不为得到通过结果而新增豁免；也不能将此测试称为完整语义判断。
+    """
+    evaluator = _load_evaluator()
+    texts = [
+        '样本公司退货规则（虚构样本）：自签收之日起七日内，商品未使用且不影响二次销售的，可以申请无理由退货。',
+        '退货期限自签收之日起计算，购买日期不作为退货期限的起算点。',
+    ]
+    case = {
+        'case_id': 'quoted-user-duration', 'category': '澄清说明来源回归',
+        'question': '我买了七天了，还能无理由退货吗？',
+        'expected_status': 'clarification_needed', 'must_include': ['签收'],
+        'must_not_include': [], 'allowed_refs': [1, 2],
+        'token_aliases': {'七日': ['七天']},
+        'evidence': [{'chunk_id': f'c{i}', 'text': text}
+                     for i, text in enumerate(texts, start=1)],
+        'simulated_model_output': {
+            'status': 'clarification_needed', 'conclusion': [],
+            'explanation': [
+                {'text': '无理由退货的期限自签收之日起计算，购买日期不作为起算点，因此“买了七天”不能直接对应可退货期限。',
+                 'refs': [2]},
+                {'text': '可以申请无理由退货的条件是：自签收之日起七日内，且商品未使用、不影响二次销售。',
+                 'refs': [1]},
+            ],
+            'clarification_questions': ['请问您的签收日期是哪一天？', '商品是否未使用且不影响二次销售？'],
+            'evidence_quotes': [{'ref': i, 'quote': text}
+                                for i, text in enumerate(texts, start=1)],
+        },
+    }
+    record = evaluator.run_offline([case], Settings(data_dir=tmp_path))['records'][0]
+    assert record['validated'] is True
+    assert record['passed'] is False
+    assert any(c['check'] == 'citation_attribution' and not c['passed']
+               for c in record['checks'])

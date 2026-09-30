@@ -6,6 +6,8 @@
 
 单文档问答的实现边界、接口契约与验收标准见 [RAG 问答接入工程任务书](docs/RAG问答接入工程任务书.md)；当前修正与验证结果以 [RAG 问答接入独立验收报告](docs/RAG问答接入独立验收报告.md) 为准，初次交付记录保留在 [实施报告](docs/RAG问答接入实施报告.md)。
 
+按用户决定暂缓 RAG 语义专项，推进摘要、信息提取和本地稳定试用版。实施依据见 [分阶段工程任务书](docs/稳定试用版分阶段工程任务书.md)、[配套执行 skill](skills/docqa-stable-release/SKILL.md) 与 [执行提示词](docs/DeepSeek稳定试用版执行提示词.md)。摘要与信息提取已实现，独立验收修复了引用映射、取消、预算、幂等与启停缺陷；最新结论以 [稳定试用版独立验收报告](docs/稳定试用版独立验收报告.md) 为准。历史 S2 存在新增计算，真实格式及长文档在线证据不足，**尚不能判定稳定试用版达标**。[实施报告](docs/稳定试用版实施报告.md) 原文保留，不作为独立通过证明。
+
 本阶段的最新修正和验证范围以 [Docling 接入独立验收报告](docs/Docling接入独立验收报告.md) 为准；原实施报告保留为初次交付记录。
 
 ## 当前链路
@@ -21,11 +23,17 @@
   → 检索并展示原文与来源
   → 基于当前文档提问：检索 → 固定证据版本 → DeepSeek 生成 → 后端校验引用
   → 网页展示答案、逐事实引用与可核对来源
+
+基于**解析版本**（不需要向量索引）的两条新链路：
+  → 信息提取：查看分析范围 → 创建任务 → 分析 worker 分批生成与校验 → 确定性合并
+                → 持久化已校验结果 → 页面逐条来源 / 复制 / 导出 Markdown、JSON
+  → 文档摘要：单批直接完成；长文档分批生成已校验中间结果 + 一次汇总
+                → 最终引用回落原文连续子串 → 持久化与导出
 ```
 
-三个状态彼此独立：**任务状态**（本次解析是否排队/执行/失败/完成）、**内容质量**（结构是否可用、有何告警）、**索引状态**（哪个解析版本的向量可用）。新任务失败不会把已有内容标记为失效。
+三类状态彼此独立：**任务状态**（排队/执行/失败/完成）、**内容质量**（结构是否可用、有何告警）、**索引状态**（哪个解析版本的向量可用）。分析任务另有独立状态与**覆盖口径**：任务失败不会把已有解析内容或已有成功结果标记为失效。
 
-## 启动（三个进程）
+## 启动（最多四个进程）
 
 需要 Python 3.11 或更新版本，以及本机可用的 Docling 解析服务（见下一节）。
 
@@ -35,7 +43,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.lock.txt
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 
-# 2) 启动 Docling 解析服务（独立 Docker 服务，必须先启动）
+# 2) 启动 Docling 解析服务（独立 Docker 服务；只有解析新文档时才必需）
 $dc = @('compose', '--env-file', 'deploy/docling/lab.env', '-f', 'deploy/docling/compose.yaml', '-f', 'deploy/docling/compose.ocr-gpu.yaml')
 $env:PARSER_DEVICE = 'cuda'
 docker @dc up -d --pull never --wait --wait-timeout 240
@@ -43,21 +51,38 @@ docker @dc up -d --pull never --wait --wait-timeout 240
 # 3) 启动 Web（终端 A）
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
-# 4) 启动解析 worker（终端 B，必须单独运行，否则任务只会停在 queued）
+# 4) 启动解析 worker（终端 B；不启动则解析任务停在 queued）
 .\.venv\Scripts\python.exe -m app.parse_worker
+
+# 5) 启动分析 worker（终端 C；不启动则摘要／提取任务停在 queued）
+.\.venv\Scripts\python.exe -m app.analysis_worker
 ```
 
 访问工作台 http://127.0.0.1:8000 ，交互接口文档 http://127.0.0.1:8000/docs 。第一次启动会自动创建 `data/docqa.db`、`data/uploads/`，并在需要时执行数据库迁移（迁移前自动生成一致性备份到 `data/db-backups/`）。
 
-**启动顺序**：Docling → Web → worker。Web 与 worker 可以任意先后启动，但 worker 必须运行才能执行解析任务；两者使用同一个 `DOCQA_DATA_DIR`。
+**或用 Windows 脚本一次启动**（推荐，带端口检查与进程归属记录）：
 
-**停止**：在各自终端按 `Ctrl+C`。worker 收到 SIGINT 后会保留当前任务的恢复信息（上游 task_id 与租约）后退出，不会把正在执行的任务标记为失败。
+```powershell
+# 预检：只核对数据目录、端口与迁移状态，不启动进程
+powershell -ExecutionPolicy Bypass -File scripts/start_local.ps1 -DataDir data -Port 8000 -DryRun
+# 启动 Web + 解析 worker + 分析 worker（隐藏窗口，PID 写入所选数据目录/.local-service/）
+powershell -ExecutionPolicy Bypass -File scripts/start_local.ps1 -DataDir data -Port 8000
+powershell -ExecutionPolicy Bypass -File scripts/status_local.ps1 -DataDir data
+powershell -ExecutionPolicy Bypass -File scripts/stop_local.ps1 -DataDir data
+```
+
+脚本行为边界：端口被占用时**只报告不杀进程**；停止时只停止“PID + 可执行路径 + 数据目录”
+三者都匹配的进程；不启动、不拉取、不停止 Docling 容器；不会触发解析、索引或模型调用。
+
+**启动顺序**：Docling → Web → worker。Web 与两个 worker 可以任意先后启动，但对应 worker 必须运行才能执行任务；三者使用同一个 `DOCQA_DATA_DIR`。
+
+**停止**：在各自终端按 `Ctrl+C`，或使用 `scripts/stop_local.ps1`。worker 收到停止请求后会保留当前任务的可恢复状态（上游 task_id、租约、已校验检查点）后退出。
 
 **端口冲突**：解析服务默认 `127.0.0.1:5001`，Web 默认 `8000`。解析服务端口由 `deploy/docling/lab.env` 与 `compose.yaml` 决定；如需更换，同时修改 `DOCQA_DOCLING_BASE_URL`。Web 端口冲突时用 `--port` 指定其他端口。
 
-**任务恢复**：已保存上游 task_id 的任务在租约过期后恢复查询与领取，**不会重新上传**。提交阶段中断且没有上游 ID 时进入 `needs_attention`，明确重试可能产生重复转换。点击“停止等待”会暂停任务；恢复已保存 ID 的暂停任务时继续等待原任务。索引候选构建中断后，最长等待 300 秒租约过期即可重建，原可用索引不受影响。
+**任务恢复**：已保存上游 task_id 的解析任务在租约过期后恢复查询与领取，**不会重新上传**。提交阶段中断且没有上游 ID 时进入 `needs_attention`。分析任务：租约过期且**没有**残留调用意图时回到 `queued` 可继续；存在“已发出请求但未保存结果”的调用时转 `needs_attention`，**不会自动重发**（供应商是否已接收无法确定，重试可能重复计费）。
 
-**升级现有项目**：先停止旧 Web 与 worker，再启动新版本。schema v2 自动备份并保留现有版本、分块和向量；新解析版本与候选索引独立保存。B 解析成功但尚未建索引时，预览 B，检索继续使用 A，页面会提示。不要让旧后端进程与新结构同时写同一数据库。回退代码时须同时恢复匹配的迁移前备份，并先保留、移开现库的 WAL/SHM 文件。
+**升级现有项目**：先停止旧 Web 与 worker，再启动新版本。schema v2～v4 自动备份并保留现有版本、分块和向量；v4 增加分析请求键映射，复用已有任务时也保存新键。回退代码时须同时恢复匹配的迁移前备份，并先保留、移开现库的 WAL/SHM 文件。正式库升级需用户单独决定；本阶段只在独立目录演练。
 
 ## Docling 解析服务
 
@@ -142,6 +167,8 @@ DOCQA_RAG_MIN_SCORE=               # 空值表示禁用分数阈值；配置时�
 
 **引用规则**：引用编号由服务端对**本次最终入选证据**分配，模型只能引用确实进入 Prompt 的编号；文档 ID、chunk ID、页码、坐标与文件路径全部由后端从证据映射复制，模型看不到也无法伪造。每个引述必须是对应证据正文的连续子串（只允许统一 CRLF），被使用的每个编号恰好对应一条引述。Markdown 中的引用标记例如 `事实。[1][2]` 由后端按已校验编号生成，不集中堆在末尾。
 
+当前 Prompt 为 `rag-qa-v5`：先选原文引述，按论断分别组织引用；补充说明避免重复结论，澄清问题直接询问缺失条件。答案不设最低字数，但必须保留条件与例外。引用的语义支持仍需独立评估，当前结果与历史失败见 [RAG 问答接入独立验收报告](docs/RAG问答接入独立验收报告.md)。
+
 **上下文与预算**：采用确定性整块装入——块连同必要元数据序列化后计入预算，容纳不下就跳过并继续尝试后续候选；入选块不会被从尾部硬截断，标题、表头、条件与脚注不会为了凑字数被删掉。因字符预算舍弃整块时返回 `retrieval.truncated=true`（表示证据集合不完整，不表示引用文本被截断）。字符预算**不等于** token 预算。
 
 **版本策略**：检索结果返回后，index_id、parse_version_id、chunk 文本与来源作为本次请求快照固定到结束。回答期间发布新解析版本或切换活动索引，都不会把 A 的正文与 B 的来源拼成一次回答：本次仍基于固定快照回答，并通过 `is_old_version` / `is_current_index` 与质量告警提示版本变化，**不会二次生成、不会二次计费**。下次提问才使用新版本（需先为新版本建立索引）。
@@ -151,6 +178,67 @@ DOCQA_RAG_MIN_SCORE=               # 空值表示禁用分数阈值；配置时�
 **费用与幂等（如实说明）**：点击“提问”会发生在线调用并可能产生费用——问题会发送给已配置的 Embedding 服务用于检索，入选片段与问题会发送给已配置的 DeepSeek 服务用于生成回答。本阶段**没有持久化幂等保证**：两个独立的合法 POST 会产生两次费用；刷新页面或中断浏览器也不代表上游停止计费；问答结果本身不持久化，刷新后答案区清空。系统不会自动重发生成请求，页面加载、列表刷新、解析轮询与能力探测都不会触发问答。问答为单轮：不保存会话历史，澄清后的下一轮需要提交补全条件的完整问题，上一轮答案不会被当作事实回传。当前仅限本地服务运行，不应扩展为无鉴权公网部署。
 
 **网页交互**：提问期间按钮与输入框禁用、文档切换被锁定（第一版沿用 busy 锁定），因此重复点击与 Enter 连按不会产生第二次请求；即使如此，成功与失败分支都会校验请求序号与当前选中文档，迟到响应不会覆盖新状态。答案、澄清问题、质量提示、适用范围与引用卡片全部用 `createElement`/`textContent` 渲染，只支持有限 Markdown（标题/列表/加粗），不解析任意 HTML、图片或外链；模型文本中的 `<script>`、`img onerror`、`javascript:` 只能作为文字出现。点击引用标记 `[n]` 会定位到对应引用卡片，卡片提供“查看引用版本”（版本级预览，不声称已精确高亮对应字符）与 PDF 原件页码链接；DOCX/XLSX/TXT 按真实来源展示，不伪造 PDF 页码。
+
+## 文档摘要与信息提取（基于解析版本，不需要向量索引）
+
+选中文档 → 点击“查看分析范围”确认解析版本、可分析单元数、输入批次与**请求数上界** →
+明确发起“生成摘要”或“提取数据 / 结论 / 观点” → 分析 worker 分批生成并由服务端严格校验 →
+结果持久化保存 → 页面逐条展示引用与来源，可复制或导出 Markdown／JSON。
+
+```dotenv
+# 分析预算：单位是字符，不是 token。每个任务的生成尝试次数是费用硬上限。
+DOCQA_ANALYSIS_MAX_REQUESTS=8              # 单个分析任务的生成尝试上限（1～50）
+DOCQA_ANALYSIS_BATCH_MAX_CHARS=12000       # 每批送入模型的输入单元字符上限
+DOCQA_ANALYSIS_REDUCE_MAX_CHARS=16000      # 汇总阶段输入的字符上限
+DOCQA_ANALYSIS_INPUT_MAX_CHARS=20000       # system + user 消息字符上限
+DOCQA_ANALYSIS_MAX_DOCUMENT_CHARS=200000   # 单任务可遍历的解析版本文本上限
+DOCQA_ANALYSIS_MAX_ITEMS_PER_BATCH=15      # 单批提取条目上限
+DOCQA_ANALYSIS_MAX_ITEMS_TOTAL=60          # 单次任务提取条目总量上限
+```
+
+| 接口 | 用途 |
+| --- | --- |
+| `POST /api/documents/{id}/analysis-plan?kind=extraction\|summary` | **只做本地输入规划**：版本、范围、批次、消息长度、请求数上界与是否可执行；零外部调用 |
+| `POST /api/documents/{id}/extract` | 创建／复用信息提取任务；新建或进行中 202，幂等已完成 200 |
+| `POST /api/documents/{id}/summary` | 创建／复用文档摘要任务；状态同上 |
+| `GET /api/analysis-jobs/{job_id}` | 状态、阶段、预算、覆盖口径与结果入口；不返回模型原始正文 |
+| `GET /api/analysis-jobs/{job_id}/calls` | 调用账本：逐次请求的角色、状态与耗时 |
+| `POST /api/analysis-jobs/{job_id}/retry` | 明确重试：预算不重置，已校验步骤复用 |
+| `POST /api/analysis-jobs/{job_id}/cancel` | 取消后续处理，重复取消幂等 |
+| `GET /api/documents/{id}/analysis-jobs` | 该文档的分析任务历史 |
+| `GET /api/documents/{id}/analysis-results?kind=…` | 已校验结果历史（不含正文） |
+| `GET /api/analysis-results/{result_id}` | 已校验结果（含逐条引用与来源） |
+| `GET /api/analysis-results/{result_id}/export?format=markdown\|json` | 导出；文件名安全化、危险语法文本化 |
+| `GET /api/analysis/status` | 分析配置与预算；不调用任何收费接口 |
+
+**请求体只接受必要字段**（`parse_version_id`、`plan_fingerprint`、`idempotency_key`、`regenerate`）。
+类型由 `summary`／`extract` 入口决定；拒绝未知字段，前端不能提交 system 提示、模型端点、证据正文或文件路径。
+计划指纹不匹配（例如预览版本已切换）返回 409 并要求重新查看分析范围，避免静默扩大费用。
+
+**输入规划**：遍历该解析版本的**完整合格正文与表格清单**（不是检索 top-k）。页眉、页脚、图片与空白块
+被排除并单独计数；公式内容缺失时保留占位并标注“不能当作 0”。单个单元超过批次预算时本次规划
+**不可执行**并说明原因——第一版不提供“只处理前几批却称为全文”的降级，也不自动拆成多个收费任务。
+
+**引用规则**：服务端把单元编号**按批独立分配**，模型只能引用本批实际收到的编号；块 ID、页码、章节、
+工作表与单元格范围全部由后端从本次输入映射复制。每条提取项必须有非空 `refs`，每个被使用的编号恰好
+对应一条**原文连续子串**引述（仅允许 CRLF 归一化）。非空的事实字段（对象／数值／单位／时间／主体／口径）
+必须能在**任一**被引用单元的原文中找到，否则判失败——不允许主句有引用、数值或时间字段另行编造。
+
+**摘要的中间结果不是原文**：长文档先逐批生成**已校验**中间摘要，再用一次汇总调用合并；汇总阶段
+只接收已校验条目与其引述，最终引用由服务端沿链**回落到原文单元编号**。任一必需批次未完成、
+校验失败或预算耗尽时，本次不发布“完整全文摘要”，已校验检查点保留供明确重试，旧成功结果继续可读。
+
+**覆盖口径**（与任务状态分开）：`total_units`、`processed_units`、`unresolved_units` 及原因、
+`excluded_units` 及原因、完成批次数、是否执行汇总、`complete`，以及最终引用是否全部回落到原文。
+`complete=true` 表示“该解析版本的可分析内容已全部处理”，**不是** OCR 正确率或任意全文理解率。
+
+**错误与费用**：不存在 404；非法参数 422；解析版本不可用、计划指纹或幂等键冲突 409；缺生成模型配置 503；
+上游错误只返回稳定安全提示与错误码，不含密钥、路径或上游原始响应。**查询状态、查看历史、复制与导出
+都不会触发生成**；重试不会重置预算，页面明确提示重试可能重复计费。
+
+**语义边界（必读）**：后端校验只证明结构合法、编号范围正确、引述可追溯到原文，
+**不能证明每个结论在语义上必然正确**。真实语义由 `scripts/evaluate_analysis.py` 在明确预算内评估，
+逐题结果与失败记录见 [稳定试用版实施报告](docs/稳定试用版实施报告.md)。
 
 ## 质量边界（必须阅读）
 
@@ -170,20 +258,35 @@ DOCQA_RAG_MIN_SCORE=               # 空值表示禁用分数阈值；配置时�
 
 ## 尚未实现
 
-摘要、信息提取、网站抓取、浏览器插件、多用户系统、多文档知识库、多轮会话记忆、查询改写、重排服务、联网搜索均未接入，相关接口明确返回 503，`/api/capabilities` 中对应项为 `false`（`rag` 已为 `true`）。旧 `.doc`/`.xls`、图片、PPTX 等格式未验收，不能因 Docling 支持某格式便直接对外承诺。当前为本地单机部署，未引入 Redis/Celery 或专用向量数据库。
+网站抓取、浏览器插件、多用户系统、多文档知识库、跨文档问答、多轮会话记忆、查询改写、
+重排服务、联网搜索、图表语义识别、公式重算均未接入；`/api/capabilities` 中对应项为 `false`。
+旧 `.doc`/`.xls`、图片、PPTX 等格式未验收，不能因 Docling 支持某格式便直接对外承诺。
+当前为本地单机、单用户部署，未引入 Redis/Celery 或专用向量数据库。
+
+已实现（`/api/capabilities` 为 `true`）：上传与格式识别、Docling 解析（含扫描件 OCR）、
+版本化解析与来源、质量告警、embedding 索引与检索、单文档单轮问答、**文档摘要**、
+**数据／结论／观点提取**、分析任务持久化与结果导出。
+
+已知限制（详见 [稳定试用版实施报告](docs/稳定试用版实施报告.md) 第 10 节）：
+
+- RAG 语义专项按用户决定延期（D-RAG-01）：历史固定集 12/13，S03 的用户条件复述未通过既定来源检查；
+- 网页行为的**真实浏览器**验收尚未执行（仅有离线渲染回归与代码级竞态校验）；
+- 摘要汇总为单层（批次数 + 1 次调用），未实现多层汇总树；
+- 新功能在线语义评估只覆盖 8 个合成场景，不代表长期正确率。
 
 ## 目录
 
 ```text
 app/
   main.py                 应用工厂、API、页面入口
-  config.py               环境配置与校验
-  schemas.py              数据契约（任务/版本/块/来源/告警/索引/问答）
-  migrations.py           带版本号的数据库迁移与一致性备份
-  repository.py           SQLite 持久化（任务领取、版本发布、索引切换）
+  config.py               环境配置与校验（含分析预算）
+  schemas.py              数据契约（任务/版本/块/来源/告警/索引/问答/分析）
+  migrations.py           带版本号的数据库迁移与一致性备份（当前 SCHEMA_VERSION=3）
+  repository.py           SQLite 持久化（任务领取、版本发布、索引切换、分析任务与账本）
   file_detect.py          上传格式识别（内容判定与安全限制）
   docling_client.py       Docling 客户端（提交/查询/领取、错误分类、期限）
   parse_worker.py         持久化解析 worker（python -m app.parse_worker）
+  analysis_worker.py      持久化分析 worker（python -m app.analysis_worker）
   document_normalizer.py  Docling 结果规范化、来源映射与质量告警
   chunking.py             结构化分块（正文/表格/目录/公式占位）
   parsing.py              本地 TXT 解析与旧分块兼容
@@ -192,12 +295,24 @@ app/
   deepseek.py             DeepSeek API 调用与安全错误转换
   rag.py                  RAG 问答编排（前置检查、快照、生成、降级）
   rag_context.py          证据构建、字符预算与引用编号分配
-  rag_prompts.py          固定系统规则与内部 JSON 协议（Prompt 版本 rag-qa-v3）
+  rag_prompts.py          固定系统规则与内部 JSON 协议（Prompt 版本 rag-qa-v5）
   rag_validation.py       严格解析、结构与引用校验、Markdown 渲染
+  analysis_sources.py     分析输入规划（单元、批次、上界、覆盖口径、计划指纹）
+  analysis_prompts.py     提取／摘要／汇总提示词与独立版本常量
+  analysis_validation.py  严格解析、字段与引用校验、确定性合并
+  extraction.py           提取分批、校验入口与三类状态汇总
+  summarization.py        摘要分批与汇总、引用链回落
+  analysis_jobs.py        分析任务生命周期服务（规划/创建/重试/取消/结果/导出）
   providers.py            OCR / Embedding / 向量库 / 大模型协议
   web/                    工作台页面
 scripts/
-  acceptance_e2e.py       真实链路验收（上传→异步解析→预览→来源）
+  start_local.ps1         Windows 启动入口（端口检查、角色记录、隐藏窗口）
+  status_local.ps1        服务状态与进程归属核对（只读）
+  stop_local.ps1          只停止自身服务的停止入口
+  seed_recovery_sample.py M5 恢复演练（注入合成解析版本，零真实调用）
+  evaluate_analysis.py    摘要／提取语义评估（默认离线；在线需显式授权与累计预算）
+  review_analysis_evidence.py 对已保存的原始模型正文做逐条复核（零在线调用）
+  acceptance_e2e.py       真实解析链路验收（上传→异步解析→预览→来源）
   browser_acceptance.mjs  真实浏览器验收（T21/T22，Chrome + CDP）
   evaluate_rag.py         RAG 语义评估（默认离线模拟；--allow-online 才真实调用）
   evaluate_rag_live.py    真实在线最小批次评估（6 类样本，独立数据目录）
@@ -209,8 +324,9 @@ scripts/
 deploy/docling/           解析服务 GPU 部署与验证
 docs/                     需求、验收与实施报告
 tests/                    离线自动测试（不依赖 Docker、密钥或现有数据）
-  fixtures/rag/           语义评估用例、合成样本知识库
-  web/render_safety.mjs   网页渲染安全回归（加载真实 app.js 的 DOM 桩测试）
+  fixtures/rag/           RAG 语义评估用例、合成样本知识库
+  fixtures/analysis/      分析任务的固定合成样例清单（8 场景 + 4 负例）
+  web/render_safety.mjs   网页渲染安全回归（加载真实 app.js 的 DOM 桩测试，17 项）
 ```
 
 ## 验证
@@ -222,6 +338,18 @@ tests/                    离线自动测试（不依赖 Docker、密钥或现�
 # 网页渲染安全回归（离线，无需浏览器）
 node tests/web/render_safety.mjs
 
+# 分析任务离线语义固件（零在线调用）：8 正例通过、4 负例按设计失败
+.\.venv\Scripts\python.exe scripts/evaluate_analysis.py --offline `
+  --data-dir data/stable-release-dev/analysis-eval
+
+# 分析任务在线语义评估（必须显式授权；受跨目录累计预算约束，不会重置）
+.\.venv\Scripts\python.exe scripts/evaluate_analysis.py --allow-online `
+  --cases E1,E2,E3,E4,S1,S2,S3,S4 --max-requests 24 `
+  --data-dir data/stable-release-dev/analysis-eval
+
+# 逐条复核已保存的原始模型正文（零在线调用）
+.\.venv\Scripts\python.exe scripts/review_analysis_evidence.py
+
 # RAG 语义评估：默认离线模拟（不产生任何在线请求）
 .\.venv\Scripts\python.exe scripts/evaluate_rag.py --all-cases --data-dir data/rag-eval
 
@@ -231,7 +359,7 @@ node tests/web/render_safety.mjs
 # 真实在线最小批次（6 类样本，复用扫描 PDF 的解析版本与索引）
 .\.venv\Scripts\python.exe scripts/evaluate_rag_live.py --allow-online --max-requests 20 --data-dir data/rag-live
 
-# 真实链路验收（需要已启动 Docling、Web 与 worker）
+# 真实解析链路验收（需要已启动 Docling、Web 与 worker）
 $env:PYTHONIOENCODING = 'utf-8'
 .\.venv\Scripts\python.exe scripts/acceptance_e2e.py --api http://127.0.0.1:8010 --timeout 2400
 
@@ -239,15 +367,17 @@ $env:PYTHONIOENCODING = 'utf-8'
 node scripts/browser_acceptance.mjs --api http://127.0.0.1:8010
 ```
 
-自动测试默认离线，覆盖旧库迁移、任务幂等与租约、上游错误分类、结果幂等发布、空白页、表格去重、多来源、XLSX 坐标与公式缓存、长表分块、索引候选发布与失败保留、格式伪装与越权访问、RAG 证据范围与字符预算、输出协议与引用校验、HTTP 状态与调用次数、版本竞态与上游错误脱敏等场景。`tests/test_real_fixtures.py` 使用真实 Docling 结果夹具，夹具缺失时会跳过并提示，不会把跳过当成通过。
+自动测试默认离线，覆盖旧库迁移、任务幂等与租约、上游错误分类、结果幂等发布、空白页、表格去重、多来源、XLSX 坐标与公式缓存、长表分块、索引候选发布与失败保留、格式伪装与越权访问、RAG 证据范围与字符预算、输出协议与引用校验、HTTP 状态与调用次数、版本竞态与上游错误脱敏，以及**分析任务的迁移 v3、输入规划与覆盖口径、幂等与原子领取、租约与过期令牌、逐请求预算预扣、不确定调用不自动重发、检查点复用与重试、版本竞争、跨批编号拒绝、字段依据校验、多批摘要引用链回落、导出与转义、真实 SDK + MockTransport 的 HTTP 契约**等场景。`tests/test_real_fixtures.py` 使用真实 Docling 结果夹具，夹具缺失时会跳过并提示，不会把跳过当成通过。
 
 ## 数据库迁移与恢复
 
-启动时按版本号执行迁移（当前 `SCHEMA_VERSION=1`），迁移前用 SQLite 在线备份 API 生成一致性副本到 `data/db-backups/`（包含 WAL 中已提交数据）。迁移失败会**停止启动**并保留原库与备份，不会静默新建空数据库。
+启动时按版本号执行迁移（当前 `SCHEMA_VERSION=4`），迁移前用 SQLite 在线备份 API 生成一致性副本到所选数据目录的 `db-backups/`（包含 WAL 中已提交数据）。迁移失败会停止启动并保留原库与备份。v3 新增分析表；v4 新增 `analysis_request_keys` 并结转旧请求键，不改写旧任务或结果。
 
 恢复步骤：
 
 1. 停止 Web 与 worker，避免继续写入；
-2. 备份当前 `data/docqa.db`（连同 `-wal`、`-shm`）；
-3. 把 `data/db-backups/` 中最近的备份复制回 `data/docqa.db`；
-4. 如需回到旧代码：`git stash` 或切回上一版本代码后重新启动，旧表结构仍被保留。
+2. 完整保留现库及其 `-wal`、`-shm`；活跃库另取副本时使用 SQLite backup API；
+3. 在服务全部停止后，把现库及对应 WAL/SHM 移到保留目录，再将选定的迁移前一致备份恢复到目标库路径；不能残留旧 WAL；
+4. 使用与该备份版本匹配的代码启动。先核对工作区未提交修改，不能为了回滚覆盖尚未保存的工作；正式恢复也需用户决定。
+
+**本阶段未对正式库执行迁移**，也没有执行 Git 提交或推送；升级正式库需用户单独决定。

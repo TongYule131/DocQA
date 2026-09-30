@@ -92,6 +92,24 @@ button.ref{background:#e8f1e6;color:#2f5a44;padding:1px 6px;margin-left:3px;font
 .citation a{font-size:12px;align-self:center}
 .error{color:#8d3733;background:#fbeaea;border-radius:6px;padding:10px 12px;font-size:13px;line-height:1.7}
 #result{white-space:pre-wrap;overflow-wrap:anywhere;background:#f0f5eb;padding:16px;font-family:inherit}
+/* 分析任务（摘要 / 信息提取）：范围、任务状态、结果历史与已校验结果。 */
+.analysis{margin-top:18px;border:1px solid #dbe4d8;border-radius:10px;padding:16px;background:#fbfcfa}
+.analysis h3{font-size:16px;margin:0;color:#2f5a44}
+.analysis h4{font-size:14px;margin:14px 0 6px;color:#3c6a50}
+.analysis p{margin:8px 0;line-height:1.7;overflow-wrap:anywhere}
+.analysis code{background:#eef3ec;border-radius:4px;padding:1px 4px;font-size:12px}
+.plan-batches{margin:6px 0;padding-left:20px;font-size:12px;color:#5c6b5f}
+.plan-batches li{line-height:1.7}
+.analysis-results{margin-top:8px}
+.result-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;
+  border-top:1px solid #e6ece3;padding:8px 0;font-size:12px;color:#4d5b50}
+.result-row span{overflow-wrap:anywhere}
+.analysis-result{border:1px solid #e2e8de;border-radius:8px;padding:14px 16px;background:#fff;margin-top:10px}
+.analysis-result ul{margin:6px 0;padding-left:22px}
+.analysis-result li{margin:4px 0;line-height:1.75;overflow-wrap:anywhere}
+.extraction-item{border-left:3px solid #d5e3d2;padding:2px 0 2px 10px;margin:8px 0}
+.extraction-item p{margin:2px 0}
+.extraction-item small{display:block;line-height:1.6}
 footer{text-align:center;color:#98a092;font-size:11px;padding:12px 0 32px}
 :focus-visible{outline:2px solid #5b9373;outline-offset:3px}
 /* 窄屏适配：双栏改为单栏，缩小外边距和字号 */

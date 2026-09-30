@@ -13,10 +13,12 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import Body, FastAPI, File, Header, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app import migrations
+from app.analysis_jobs import AnalysisJobService
+from app.analysis_prompts import EXTRACTION_PROMPT_VERSION, SUMMARY_PROMPT_VERSION
 from app.config import Settings
 from app.deepseek import DeepSeekModel, ModelError
 from app.docling_client import DoclingClient
@@ -27,10 +29,15 @@ from app.rag import RagError, RagService
 from app.rag_prompts import PROMPT_VERSION
 from app.repository import Repository, TaskConflict, now_iso
 from app.schemas import (
+    AnalysisJob,
+    AnalysisJobRequest,
+    AnalysisPlan,
+    AnalysisResult,
+    AnalysisResultSummary,
+    AnalysisSubmitResponse,
     Answer,
     Chunk,
     Document,
-    Extraction,
     IndexInfo,
     ParseRequest,
     ParseSubmitResponse,
@@ -59,6 +66,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     index = DocumentIndex(repository, embedding)
     # RAG 服务在应用装配阶段构造一次；每次提问只调用一次查询 embedding 与一次生成。
     rag = RagService(settings, repository, index, model)
+    # 分析任务服务只做规划与任务生命周期；生成由独立 worker 进程执行。
+    analysis = AnalysisJobService(settings, repository)
     upload_dir = settings.data_dir / "uploads"
     web_dir = Path(__file__).parent / "web"
 
@@ -127,13 +136,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "解析版本不存在或不属于该文档")
         return version
 
-    def require_intelligence(document_id: str):
-        # 先检查解析前置条件，再明确拒绝尚未接入的智能能力，避免伪造结果。
-        document = require_document(document_id)
-        if document.active_parse_version_id is None:
-            raise HTTPException(409, "请先成功解析文档")
-        raise HTTPException(503, "文档答案生成、摘要与提取尚未接入；当前可建立向量索引并检索原文")
-
     @app.get("/", include_in_schema=False)
     def home():
         # HTML 和静态资源与 API 同源，前端使用相对路径调用后端。
@@ -179,8 +181,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                  "xlsx_sheet_cell": True, "txt_line_range": True},
             "quality_warnings": True,
             "versioned_parse": True,
-            "embedding": True, "retrieval": True, "rag": True, "summary": False,
-            "extraction": False, "web_crawl": False, "browser_extension": False,
+            "embedding": True, "retrieval": True, "rag": True, "summary": True,
+            "extraction": True, "web_crawl": False, "browser_extension": False,
             "model_adapters": {"deepseek": True, "qwen": False, "chatglm": False, "llama": False},
             "model_configured": bool(settings.deepseek_api_key.strip()),
             "embedding_configured": bool(settings.embedding_api_key.strip()),
@@ -188,6 +190,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "rag_mode": "single-document-single-turn-non-streaming",
             "rag_prompt_version": PROMPT_VERSION,
             "rag_configured": rag.ready()[0],
+            # 分析能力：摘要／提取基于解析版本，不依赖 embedding 索引；
+            # 任务由独立 worker 执行，能力查询本身不产生任何收费调用。
+            "analysis": {
+                "enabled": True,
+                "requires_embedding_index": False,
+                "requires_worker": True,
+                "configured": analysis.ready()[0],
+                "extraction_prompt_version": EXTRACTION_PROMPT_VERSION,
+                "summary_prompt_version": SUMMARY_PROMPT_VERSION,
+                "max_requests_per_job": settings.analysis_max_requests,
+            },
         }
 
     @app.get("/api/parsing/status")
@@ -489,15 +502,133 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return index.search(document_id, payload.query, payload.top_k)
 
     # ------------------------------------------------------------------
-    # 尚未接入的智能能力：明确返回未接入，不伪造结果
+    # 分析任务（摘要 / 信息提取）
+    #
+    # 契约变化说明：原 `/summary` 与 `/extract` 是未接入占位（503）。
+    # 本阶段改为任务式响应：202 表示已创建或复用进行中的任务，200 表示复用已有成功
+    # 结果（不新增任何计费调用）。规划、状态查询、结果读取与导出都**不会**触发生成。
     # ------------------------------------------------------------------
-    @app.post("/api/documents/{document_id}/summary", response_model=Summary)
-    def summarize(document_id: str):
-        require_intelligence(document_id)
+    def analysis_ready() -> None:
+        """缺生成模型配置时返回 503；不发起任何在线调用。"""
+        ok, reason = analysis.ready()
+        if not ok:
+            raise HTTPException(503, reason)
 
-    @app.post("/api/documents/{document_id}/extract", response_model=Extraction)
-    def extract(document_id: str):
-        require_intelligence(document_id)
+    @app.post("/api/documents/{document_id}/analysis-plan", response_model=AnalysisPlan)
+    def analysis_plan(document_id: str, kind: str = Query("extraction", pattern="^(extraction|summary)$"),
+                      version_id: str | None = None):
+        """只做本地输入规划：返回版本、范围、批次、请求数上界与是否可执行。
+
+        该接口零外部调用：不生成、不 embedding、不解析、不建索引。
+        """
+        analysis_ready()
+        outcome = analysis.build_plan(document_id, kind, version_id)
+        return analysis.plan_response(outcome, kind)
+
+    def submit_analysis(document_id: str, kind: str, payload: AnalysisJobRequest | None,
+                        idempotency_key: str | None):
+        """摘要与提取共用的提交逻辑：只写数据库，不发起生成调用。
+
+        前置检查顺序由服务层保证（文档存在 → 可用解析版本 → 模型已配置），
+        因此这里不提前做能力检查，避免“缺配置”掩盖更准确的缺失原因。
+        """
+        request = payload or AnalysisJobRequest()
+        if idempotency_key and not request.idempotency_key:
+            request = request.model_copy(update={"idempotency_key": idempotency_key})
+        response, status = analysis.submit(document_id, kind, request)
+        return JSONResponse(status_code=status, content=response.model_dump())
+
+    @app.post("/api/documents/{document_id}/extract")
+    def extract(document_id: str, payload: AnalysisJobRequest | None = Body(default=None),
+                idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
+        """创建或复用信息提取任务（数据／结论／观点）。"""
+        return submit_analysis(document_id, "extraction", payload, idempotency_key)
+
+    @app.post("/api/documents/{document_id}/summary")
+    def summarize(document_id: str, payload: AnalysisJobRequest | None = Body(default=None),
+                  idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
+        """创建或复用文档摘要任务。"""
+        return submit_analysis(document_id, "summary", payload, idempotency_key)
+
+    @app.get("/api/analysis-jobs/{job_id}", response_model=AnalysisJob)
+    def get_analysis_job(job_id: str):
+        """任务状态、阶段、进度、预算与结果入口；不返回模型原始正文。"""
+        return analysis.get_job(job_id)
+
+    @app.get("/api/analysis-jobs/{job_id}/calls")
+    def analysis_job_calls(job_id: str):
+        """调用账本：每次外部请求的顺序、角色、状态与耗时（失败与不确定调用都计入）。"""
+        job = analysis.get_job(job_id)
+        calls = repository.analysis_calls(job_id)
+        return {"job_id": job_id, "requests_used": job.requests_used,
+                "max_requests": job.max_requests, "calls": [call.model_dump() for call in calls]}
+
+    @app.post("/api/analysis-jobs/{job_id}/retry", response_model=AnalysisJob)
+    def retry_analysis_job(job_id: str):
+        """明确重试失败或待处理任务：预算不重置，已校验步骤直接复用。"""
+        analysis_ready()
+        return analysis.retry_job(job_id)
+
+    @app.post("/api/analysis-jobs/{job_id}/cancel")
+    def cancel_analysis_job(job_id: str):
+        """取消后续处理；重复取消幂等；不承诺取消已在途的计费。"""
+        return analysis.cancel_job(job_id)
+
+    @app.get("/api/documents/{document_id}/analysis-jobs", response_model=list[AnalysisJob])
+    def list_analysis_jobs(document_id: str):
+        """该文档的分析任务历史；只读，不触发生成。"""
+        require_document(document_id)
+        return repository.list_analysis_jobs(document_id)
+
+    @app.get("/api/documents/{document_id}/analysis-results",
+             response_model=list[AnalysisResultSummary])
+    def list_analysis_results(document_id: str,
+                              kind: str | None = Query(None, pattern="^(extraction|summary)$")):
+        """该文档已校验结果历史，包含版本与是否为当前预览版本。"""
+        return analysis.list_results(document_id, kind)
+
+    @app.get("/api/analysis-results/{result_id}", response_model=AnalysisResult)
+    def get_analysis_result(result_id: str):
+        """返回持久化结果；只按结果 ID 读取，不接受任意路径或版本参数。"""
+        return analysis.get_result(result_id)
+
+    @app.get("/api/analysis-results/{result_id}/export")
+    def export_analysis_result(result_id: str,
+                               format: str = Query("markdown", pattern="^(markdown|json)$")):
+        """导出已校验结果及必要来源信息。
+
+        不导出凭证、模型思考或原始模型响应；文件名做安全化处理。
+        """
+        fmt = "json" if format == "json" else "markdown"
+        body, media_type, filename = analysis.export(result_id, fmt)
+        return Response(
+            content=body, media_type=media_type,
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{_quote(filename)}"})
+
+    @app.get("/api/analysis/status")
+    def analysis_status():
+        """分析能力状态：只报告配置与预算，不调用任何收费接口，也不探测账号可用性。"""
+        ok, reason = analysis.ready()
+        return {
+            "extraction_prompt_version": EXTRACTION_PROMPT_VERSION,
+            "summary_prompt_version": SUMMARY_PROMPT_VERSION,
+            "configured": ok,
+            "note": reason,
+            "model": settings.deepseek_model,
+            "max_requests_per_job": settings.analysis_max_requests,
+            "batch_max_chars": settings.analysis_batch_max_chars,
+            "reduce_max_chars": settings.analysis_reduce_max_chars,
+            "input_max_chars": settings.analysis_input_max_chars,
+            "max_document_chars": settings.analysis_max_document_chars,
+            "max_items_per_batch": settings.analysis_max_items_per_batch,
+            "max_items_total": settings.analysis_max_items_total,
+            "budget_unit": "characters",
+            # 需要独立 worker 进程真正运行，任务才会被执行。
+            "requires_worker": True,
+            "worker_command": "python -m app.analysis_worker",
+            # 分析基于解析版本，不依赖 embedding 索引。
+            "requires_embedding_index": False,
+        }
 
     @app.get("/api/rag/status")
     def rag_status():

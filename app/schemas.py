@@ -409,3 +409,292 @@ class ExtractedItem(BaseModel):
 class Extraction(BaseModel):
     # 一次提取可以返回多个条目，每个条目拥有自己的引用。
     items: list[ExtractedItem]
+
+
+# ----------------------------------------------------------------------
+# 分析任务契约（摘要 / 信息提取）
+#
+# 与 RAG 问答的三处关键区别（都直接影响可信度，必须显式表达）：
+#   1. 摘要与提取**基于解析版本**，不依赖 embedding 索引；因此输入是完整的
+#      合格正文／表格清单，而不是检索 top-k。
+#   2. 结果持久化：任务、尝试、分批步骤、调用账本与已校验结果全部落库；
+#      HTTP 响应与页面展示都只使用**已校验结构**，绝不回显原始模型正文。
+#   3. 覆盖范围与任务状态分开：任务 succeeded 只表示本次批次全部处理，
+#      覆盖字段仍要如实给出“总输入单元 / 已处理 / 未处理及原因”。
+# ----------------------------------------------------------------------
+
+# 分析任务顶层状态：与解析任务保持同一套取值，便于页面复用。
+AnalysisJobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled", "needs_attention"]
+# 处理阶段用于展示“正在做什么”，不代表完成百分比。
+AnalysisStage = Literal["queued", "planning", "generating", "reducing", "validating", "saving", "done"]
+AnalysisKind = Literal["extraction", "summary"]
+
+# 提取条目的类别：数据 / 结论 / 观点。
+ExtractionItemKind = Literal["data", "conclusion", "viewpoint"]
+
+# 是否存在某类内容：present 有提取项；none 已覆盖输入但没有该类内容；
+# not_applicable 明确不适用（例如表格口径下不给出观点）；unprocessed 未处理。
+SectionStatus = Literal["present", "none", "not_applicable", "unprocessed"]
+
+
+class AnalysisPlanBatch(BaseModel):
+    """一个输入批次：只描述本地规划结果，不含模型输出。"""
+    batch_id: str
+    order_index: int
+    unit_ids: list[str]
+    unit_count: int
+    chars: int
+    message_chars: int
+
+
+class AnalysisPlanCoverage(BaseModel):
+    """规划阶段的覆盖口径。
+
+    total_units 只统计“可分析单元”（正文／表格／公式占位／图表标题／引用），
+    页眉、页脚、图片与空白块属于 excluded_units，并单独给出原因计数。
+    """
+    total_units: int
+    planned_units: int
+    total_chars: int
+    excluded_units: int
+    excluded_reasons: dict[str, int] = Field(default_factory=dict)
+    batch_count: int
+
+
+class AnalysisPlanLimits(BaseModel):
+    """本次规划使用的配置上界，页面据此说明“为什么不可执行”。"""
+    max_requests: int
+    batch_max_chars: int
+    reduce_max_chars: int
+    input_max_chars: int
+    max_document_chars: int
+    max_items_per_batch: int
+    max_items_total: int
+
+
+class AnalysisPlan(BaseModel):
+    """POST /analysis-plan 的响应：零外部调用，只做本地输入规划。"""
+    document_id: str
+    parse_version_id: str
+    kind: AnalysisKind
+    prompt_version: str
+    protocol_version: str
+    plan_fingerprint: str
+    is_active_version: bool
+    coverage: AnalysisPlanCoverage
+    limits: AnalysisPlanLimits
+    batches: list[AnalysisPlanBatch] = Field(default_factory=list)
+    # 汇总阶段是否需要一次独立调用（多批摘要需要；单批提取不需要）。
+    reduce_required: bool = False
+    # 规划出的请求数上界：分批数 + （需要时）1 次汇总，全部计入任务预算。
+    request_upper_bound: int = 0
+    executable: bool = False
+    limitations: list[str] = Field(default_factory=list)
+    # 不可执行时的稳定原因码：文档过大、批次预算过小、请求数超预算等。
+    blocked_reason: str | None = None
+
+
+class AnalysisJobRequest(BaseModel):
+    """创建分析任务的最小请求体。
+
+    只接受解析版本、计划指纹与幂等键；审核类型由 summary／extract 入口决定。
+    模型端点、system 提示、证据正文与文件路径都不允许由前端提交。
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    parse_version_id: str | None = Field(default=None, max_length=200)
+    plan_fingerprint: str | None = Field(default=None, max_length=128)
+    idempotency_key: str | None = Field(default=None, max_length=200)
+    # 明确重新生成：必须由用户操作产生，会创建新的结果版本。
+    regenerate: bool = False
+
+
+class AnalysisJob(BaseModel):
+    """分析任务：状态、阶段、进度、预算与结果入口。"""
+    id: str
+    document_id: str
+    parse_version_id: str
+    kind: AnalysisKind
+    status: AnalysisJobStatus
+    stage: AnalysisStage
+    stage_detail: str | None = None
+    idempotency_key: str | None = None
+    plan_fingerprint: str | None = None
+    retry_of_document: str | None = None
+    request_upper_bound: int = 0
+    max_requests: int = 0
+    requests_used: int = 0
+    steps_total: int = 0
+    steps_completed: int = 0
+    result_id: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    created_at: str
+    updated_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    # 执行令牌只在 worker 内部使用；出现在契约里是为了让离线测试能断言
+    # “过期令牌不能继续发请求或发布结果”，页面不会使用该字段。
+    lease_token: str | None = None
+    lease_expires_at: str | None = None
+    attempt_count: int = 0
+    # 版本与配置指纹（不含密钥），用于判断同版本同配置能否复用已有成功结果。
+    prompt_version: str = ""
+    protocol_version: str = ""
+    model_signature: str = ""
+    # 覆盖口径：与任务状态分开，失败任务也可显示已完成批次进度。
+    coverage: dict[str, Any] | None = None
+    limitations: list[str] = Field(default_factory=list)
+    # 该文档是否已有同版本同配置的成功结果（页面据此提示“可查看历史结果”）。
+    has_result: bool = False
+
+
+class AnalysisCallEntry(BaseModel):
+    """调用账本条目：证明“每次外部请求前已预扣预算并写入调用意图”。"""
+    id: str
+    job_id: str
+    step_id: str | None = None
+    role: Literal["batch", "reduce"]
+    sequence_no: int
+    status: Literal["intent", "succeeded", "failed", "uncertain", "skipped"]
+    error_code: str | None = None
+    started_at: str
+    settled_at: str | None = None
+    elapsed_ms: int | None = None
+
+
+class AnalysisStepInfo(BaseModel):
+    """已校验的分批／汇总检查点。"""
+    id: str
+    job_id: str
+    role: Literal["batch", "reduce"]
+    order_index: int
+    batch_id: str | None = None
+    status: Literal["pending", "succeeded", "failed"]
+    unit_ids: list[str] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+
+
+class AnalysisCitation(BaseModel):
+    """引用卡片：全部字段来自服务端来源映射与已校验引述。
+
+    服务端只把“解析版本内的单元编号”交给模型；块 ID、页码、章节、工作表与
+    单元格范围都由后端从本次输入映射复制，模型既看不到也无法伪造。
+    定位信息缺失时保持为空或 null，绝不代为编造页码或坐标。
+    """
+    reference_id: int
+    # 块 ID 由服务端映射给出；定位信息缺失时为空串，不编造。
+    block_id: str = ""
+    source_index: int | None = None
+    block_type: str | None = None
+    quote: str
+    sources: list[SourceLocation] = Field(default_factory=list)
+    # 引述在原文中的偏移只声明“已校验的连续子串位置”，不声称已实现字符级高亮。
+    char_start: int | None = None
+    char_end: int | None = None
+
+
+class AnalysisExtractionItem(BaseModel):
+    """一条数据／结论／观点。
+
+    可选字段没有原文依据时为 null，明确区分“未提及”与“明确不适用”；
+    数值一律保留原文文本与单位，绝不换算、不补 0、不做数值推导。
+    """
+    item_id: str
+    kind: ExtractionItemKind
+    content: str
+    name: str | None = None
+    value_text: str | None = None
+    unit: str | None = None
+    period: str | None = None
+    subject: str | None = None
+    scope: str | None = None
+    refs: list[int] = Field(default_factory=list)
+
+
+class AnalysisExtractionResult(BaseModel):
+    """信息提取的已校验结果。"""
+    items: list[AnalysisExtractionItem] = Field(default_factory=list)
+    sections: dict[str, SectionStatus] = Field(default_factory=dict)
+    citations: list[AnalysisCitation] = Field(default_factory=list)
+
+
+class AnalysisSummaryPoint(BaseModel):
+    """摘要要点／例外：各自携带引用编号。"""
+    text: str
+    refs: list[int] = Field(default_factory=list)
+
+
+class AnalysisSummaryResult(BaseModel):
+    """文档摘要的已校验结果。"""
+    topic_overview: str = ""
+    main_points: list[AnalysisSummaryPoint] = Field(default_factory=list)
+    exceptions: list[AnalysisSummaryPoint] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    citations: list[AnalysisCitation] = Field(default_factory=list)
+
+
+class AnalysisCoverage(BaseModel):
+    """已发布结果的覆盖口径（不是 OCR 正确率，也不是任意全文理解率）。"""
+    total_units: int = 0
+    processed_units: int = 0
+    unresolved_units: int = 0
+    unresolved_reasons: dict[str, int] = Field(default_factory=dict)
+    excluded_units: int = 0
+    excluded_reasons: dict[str, int] = Field(default_factory=dict)
+    batch_total: int = 0
+    batch_completed: int = 0
+    reduce_completed: bool = False
+    complete: bool = False
+    # 中间摘要不是原文：这里记录最终引用是否全部回落到原文单元。
+    resolved_original_refs: int = 0
+    unresolved_original_refs: int = 0
+
+
+class AnalysisResult(BaseModel):
+    """已校验结果：页面展示与导出都从这里生成。"""
+    id: str
+    job_id: str
+    document_id: str
+    parse_version_id: str
+    kind: AnalysisKind
+    is_active_version: bool = False
+    coverage: AnalysisCoverage
+    quality_warnings: list[QualityWarning] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    prompt_version: str
+    protocol_version: str
+    model_signature: str = ""
+    parse_parser_name: str | None = None
+    parse_quality_status: QualityStatus | None = None
+    requests_used: int = 0
+    created_at: str
+    extraction: AnalysisExtractionResult | None = None
+    summary: AnalysisSummaryResult | None = None
+
+
+class AnalysisResultSummary(BaseModel):
+    """结果历史列表项：不含正文，避免列表接口返回大量内容。"""
+    id: str
+    job_id: str
+    document_id: str
+    parse_version_id: str
+    kind: AnalysisKind
+    is_active_version: bool = False
+    is_current_version: bool = False
+    complete: bool = False
+    coverage: AnalysisCoverage
+    prompt_version: str
+    protocol_version: str
+    requests_used: int = 0
+    created_at: str
+
+
+class AnalysisSubmitResponse(BaseModel):
+    """摘要／提取提交响应：202 表示已排队或正在执行，200 表示复用已有成功结果。"""
+    job: AnalysisJob
+    document: Document
+    reused: bool = False
+    regenerated: bool = False
+    message: str

@@ -173,7 +173,7 @@ def test_answered_response_comes_from_model_output_and_real_chunks(tmp_path, gat
         body = response.json()
         assert body["status"] == "answered"
         assert body["answer_id"] and len(body["answer_id"]) == 32
-        assert body["prompt_version"] == "rag-qa-v3"
+        assert body["prompt_version"] == "rag-qa-v5"
         # 正文由后端按已校验结构渲染：事实后紧跟引用标记。
         assert "- 全书内容分为21个部分。[1]" in body["answer"]
         assert body["answer"].startswith("## 结论")
@@ -619,7 +619,7 @@ def test_rag_status_reports_configuration_without_calling(tmp_path, gateway):
     with client:
         status = client.get("/api/rag/status").json()
         assert status["configured"] is True
-        assert status["prompt_version"] == "rag-qa-v3"
+        assert status["prompt_version"] == "rag-qa-v5"
         assert status["budget_unit"] == "characters"
         assert status["persists_history"] is False and status["idempotent"] is False
         assert status["context_max_chars"] and status["input_max_chars"]

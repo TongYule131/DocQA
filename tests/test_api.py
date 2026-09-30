@@ -90,11 +90,13 @@ def test_upload_validation_and_cleanup(client, tmp_path):
 
 
 def test_intelligence_explicitly_unavailable(client, tmp_path):
-    """摘要与提取仍未接入；问答已按新契约接入并保持前置检查顺序。
+    """摘要与提取的前置检查与任务式契约（原“未接入 503 占位”已按本阶段契约更新）。
 
-    业务意图保持不变：
-    - 未解析时先返回 409（前置条件），不暴露“能力未接入”；
-    - 摘要与提取在解析完成后仍是 503（能力未接入）；
+    业务意图保持不变，只是把“未接入”换成“任务式”：
+    - 未解析时先返回 409（缺可用解析版本），不暴露内部实现；
+    - 未知字段必须被拒绝（422），前端不能提交 system、模型端点或证据正文；
+    - 缺生成模型配置时返回 503，且**不创建任务、不产生任何外部调用**；
+    - 缺模型配置时能力清单仍为“已接入但未配置”，不当成可连接或账号可用；
     - 问答在解析完成但没有可用索引时返回 409，并指明需要建立有效索引。
     """
     document_id = upload(client)
@@ -102,7 +104,15 @@ def test_intelligence_explicitly_unavailable(client, tmp_path):
     assert client.post(path + '/summary').status_code == 409
     parse_and_wait(client, tmp_path, document_id)
     for endpoint in ['summary', 'extract']:
-        assert client.post(path + '/' + endpoint, json={'question': '核心结论？'}).status_code == 503
+        # 只接受必要字段：额外字段（例如 question）一律拒绝。
+        assert client.post(path + '/' + endpoint, json={'question': '核心结论？'}).status_code == 422
+        # 缺 DEEPSEEK_API_KEY 时 503，且任务不会被创建。
+        response = client.post(path + '/' + endpoint, json={})
+        assert response.status_code == 503
+        assert 'DEEPSEEK_API_KEY' in response.json()['detail']
+    assert client.get(f'/api/documents/{document_id}/analysis-jobs').json() == []
+    # 规划接口只做本地输入规划，同样零外部调用；缺配置时也返回 503。
+    assert client.post(path + '/analysis-plan?kind=extraction').status_code == 503
     # 问答：解析完成但没有任何索引，属于索引前置条件失败，不能调用在线接口。
     questions = client.post(path + '/questions', json={'question': '核心结论？'})
     assert questions.status_code == 409
@@ -110,9 +120,14 @@ def test_intelligence_explicitly_unavailable(client, tmp_path):
     assert questions.json()['code'] in {'index_missing', 'index_not_compatible'}
     assert client.post(path + '/questions', json={'question': '  '}).status_code == 422
     capabilities = client.get('/api/capabilities').json()
-    # 问答能力已接入；摘要、提取、抓取与插件仍未接入。
+    # 问答、摘要与提取均已接入；抓取与插件仍未接入。
     assert capabilities['rag'] is True
-    assert capabilities['summary'] is False and capabilities['extraction'] is False
+    assert capabilities['summary'] is True and capabilities['extraction'] is True
+    # 分析能力不依赖 embedding 索引，但需要独立 worker 进程执行任务。
+    assert capabilities['analysis']['enabled'] is True
+    assert capabilities['analysis']['requires_embedding_index'] is False
+    assert capabilities['analysis']['requires_worker'] is True
+    assert capabilities['analysis']['configured'] is False
     # 能力清单区分格式支持与服务可达：OCR/解析能力已接入，抓取与插件仍未接入。
     assert capabilities['ocr'] is True and capabilities['docling_parsing'] is True
     assert capabilities['web_crawl'] is False and capabilities['browser_extension'] is False

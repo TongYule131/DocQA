@@ -1,6 +1,6 @@
 {
   "fixture_version": "rag-semantic-v1",
-  "prompt_version": "rag-qa-v3",
+  "prompt_version": "rag-qa-v5",
   "note": "本文件中的资料是人工构造的测试样本（虚构公司、虚构政策、虚构日期），不是任何业务原件，也不代表项目知识库事实。用例的预期结论在看模型输出之前写定。chunk 元数据中的 page/format 只作为页面展示与来源校验，不参与语义判断。",
   "cases": [
     {

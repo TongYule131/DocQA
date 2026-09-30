@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
+import { randomUUID } from 'node:crypto'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const appJs = readFileSync(resolve(here, '../../app/web/app.js'), 'utf8')
@@ -95,15 +96,22 @@ const containerIds = ['message', 'connection-status', 'documents', 'document-tit
   'answer-body', 'answer-questions', 'answer-warnings', 'answer-limitations', 'answer-citations',
   'question', 'ask', 'summary', 'extract', 'parse', 'reparse', 'refresh', 'test-model',
   'test-embedding', 'build-index', 'rebuild-index', 'search-query', 'search', 'stop-task',
-  'retry-task', 'upload-form', 'question-form', 'search-form', 'file']
+  'retry-task', 'upload-form', 'question-form', 'search-form', 'file',
+  // 分析任务（摘要 / 信息提取）面板容器。
+  'analysis-plan', 'analysis-plan-panel', 'analysis-status', 'analysis-job', 'analysis-results',
+  'analysis-stop', 'analysis-retry', 'analysis-regenerate']
 const elements = new Map(containerIds.map((id) => [id, new Node('div')]))
 elements.get('upload-form').querySelector = () => new Node('button')
 elements.get('answer-panel').hidden = true
 
+const sessionValues = new Map()
 const sandbox = {
   document: documentStub,
   window: {},
-  sessionStorage: { getItem: () => null, setItem: () => {} },
+  sessionStorage: { getItem: (key) => sessionValues.get(key) || null,
+    setItem: (key, value) => sessionValues.set(key, value),
+    removeItem: (key) => sessionValues.delete(key) },
+  crypto: { randomUUID },
   fetch: async () => { throw new Error('离线渲染测试不应发起网络请求') },
   setTimeout: (fn) => 0,
   clearTimeout: () => {},
@@ -132,6 +140,7 @@ vm.runInContext(appJs, context, { filename: 'app.js' })
 const hooks = sandbox.window.__docqaTest
 const renderAnswerMarkdown = hooks.renderAnswerMarkdown
 const renderCitations = hooks.renderCitations
+const renderAnalysisResult = hooks.renderAnalysisResult
 
 // --- R24 渲染安全 ---------------------------------------------------------
 // 静态检查只作为附加证据：主要依据是下面基于真实 DOM 桩的节点断言。
@@ -204,7 +213,95 @@ const openedLinks = linkNodes.filter((node) => node.target === '_blank')
 check('R24-5', '外部打开均带 noopener', openedLinks.every((node) => node.rel === 'noopener noreferrer'),
   `target=_blank 数量 ${openedLinks.length}`)
 
+// --- 分析结果渲染安全（摘要 / 提取） --------------------------------------
+// 与问答共用同一套受限渲染：模型文本、引述与文件名里的 HTML 只能作为文字出现。
+const analysisResult = {
+  id: 'res_test',
+  job_id: 'job_test',
+  document_id: 'doc-1',
+  parse_version_id: 'v-a',
+  kind: 'extraction',
+  is_active_version: true,
+  coverage: {
+    total_units: 3, processed_units: 3, unresolved_units: 0, unresolved_reasons: {},
+    excluded_units: 1, excluded_reasons: { '页眉属于版面信息，不作为事实依据': 1 },
+    batch_total: 1, batch_completed: 1, reduce_completed: false, complete: true,
+    resolved_original_refs: 1, unresolved_original_refs: 0,
+  },
+  quality_warnings: [],
+  limitations: ['<img src=x onerror="window.__xss=1"> 只是文本'],
+  prompt_version: 'docqa-extract-v1',
+  protocol_version: 'docqa-extract-protocol-v1',
+  model_signature: 'sig',
+  parse_parser_name: 'synthetic',
+  parse_quality_status: 'warnings',
+  requests_used: 1,
+  created_at: '2026-09-29T00:00:00+00:00',
+  extraction: {
+    items: [{
+      item_id: 'b1-i1', kind: 'data',
+      content: '<script>window.__xss=1</script> 收入 1.2 亿元',
+      name: '<svg/onload=window.__xss=1>', value_text: '1.2 亿元', unit: '亿元',
+      period: '<a href="javascript:window.__xss=1">2024 年</a>', subject: null, scope: null,
+      refs: [1],
+    }],
+    sections: { data: 'present', conclusion: 'none', viewpoint: 'none' },
+    citations: [{
+      reference_id: 1, block_id: 'v-a-b1', source_index: 0, block_type: 'paragraph',
+      quote: '<iframe src="https://example.invalid"></iframe>原文引述',
+      sources: [{ format: 'pdf', page: 2 }], char_start: 3, char_end: 12,
+    }],
+  },
+  summary: null,
+}
+renderAnalysisResult(analysisResult)
+const analysisNodes = elements.get('analysis-results').allNodes()
+const dangerousNodes = analysisNodes.filter(
+  (node) => ['SCRIPT', 'IMG', 'IFRAME', 'SVG'].includes(node.tagName))
+check('R24-8', '分析结果中的恶意文本不产生可执行或外链节点',
+  dangerousNodes.length === 0,
+  `危险节点：${dangerousNodes.map((n) => n.tagName).join(',') || '无'}`)
+
+const analysisRefButtons = elements.get('analysis-results').allNodes()
+  .filter((node) => node.tagName === 'BUTTON' && node.className === 'ref')
+check('R24-9', '分析结果逐条引用渲染为可点击引用标记',
+  analysisRefButtons.length === 1 && analysisRefButtons[0].textContent === '[1]',
+  `引用按钮：${analysisRefButtons.map((node) => node.textContent).join('') || '无'}`)
+
+const analysisLinks = analysisNodes.filter((node) => node.tagName === 'A')
+check('R24-10', '分析结果的链接只指向受控导出与原件接口',
+  analysisLinks.length === 3
+    && analysisLinks.every((node) => String(node.href).startsWith('/api/')),
+  `链接：${analysisLinks.map((node) => node.href).join(',')}`)
+check('R24-11', '分析结果的导出链接指向导出接口且带有结果 ID',
+  analysisLinks.some((node) => String(node.href).includes('/export?format=markdown'))
+    && analysisLinks.some((node) => String(node.href).includes('/export?format=json')),
+  `导出链接：${analysisLinks.map((node) => node.href).join(',')}`)
+
+const analysisText = hooks.resultToText(analysisResult)
+check('R24-12', '复制文本含引用与限制，且不包含原始模型响应字段',
+  analysisText.includes('[1]') && analysisText.includes('适用边界')
+    && !analysisText.includes('reasoning'),
+  `文本长度 ${analysisText.length}`)
+
 // --- 汇总 -----------------------------------------------------------------
+// 未确认提交必须跨本页重试与刷新复用原键；重新生成与普通提交不能混为一份载荷。
+const pendingCheck = vm.runInContext(`
+  selectedId = 'offline-doc';
+  analysisPlan = {kind:'summary',parse_version_id:'v-1',plan_fingerprint:'plan-1'};
+  const firstPending = analysisPlanPayload();
+  const repeatedPending = analysisPlanPayload();
+  pendingAnalysisKeys.clear();
+  const afterPageReload = analysisPlanPayload();
+  const regeneratedPending = analysisPlanPayload(true);
+  ({same:firstPending.idempotency_key===repeatedPending.idempotency_key,
+    retained:firstPending.idempotency_key===afterPageReload.idempotency_key,
+    distinct:firstPending.idempotency_key!==regeneratedPending.idempotency_key});
+`, context)
+check('A06-UI-1', '响应未确认时重复操作与刷新保留幂等键',
+  pendingCheck.same && pendingCheck.retained, JSON.stringify(pendingCheck))
+check('A06-UI-2', '明确重新生成使用独立请求键', pendingCheck.distinct, JSON.stringify(pendingCheck))
+
 const failed = results.filter((item) => !item.passed)
 console.log(`\n离线渲染安全测试：${results.length - failed.length}/${results.length} 通过`)
 process.exit(failed.length ? 1 : 0)

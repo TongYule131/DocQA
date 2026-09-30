@@ -1,0 +1,4 @@
+interface:
+  display_name: "DocQA 稳定试用版实施与验收"
+  short_description: "按阶段实现文档提取、摘要与稳定性改进，并保留独立验收证据和既有问答边界"
+  default_prompt: "使用 $docqa-stable-release 按项目任务书推进 DocQA 稳定试用版，记录当前阶段、验证结果和剩余边界。"

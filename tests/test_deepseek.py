@@ -50,13 +50,17 @@ def test_request_contract_and_connection_endpoint(monkeypatch, tmp_path):
         assert response.status_code == 200
         assert response.json()['answer'] == '连接成功'
         assert 'reasoning_content' not in response.text
-        # RAG 已按新契约接入：能力清单把 rag 更新为 true，其他真实能力状态保持不变。
+        # RAG 与分析任务已按新契约接入：能力清单把对应项更新为 true，其余保持真实状态。
         capabilities = client.get('/api/capabilities').json()
         assert capabilities['rag'] is True
-        assert capabilities['summary'] is False and capabilities['extraction'] is False
+        assert capabilities['summary'] is True and capabilities['extraction'] is True
+        # 已配置生成模型，因此分析能力“已配置”；这不代表账号可用或 worker 正在运行。
+        assert capabilities['analysis']['configured'] is True
         assert capabilities['web_crawl'] is False and capabilities['browser_extension'] is False
         # 只有 DeepSeek 密钥时问答仍不可用：检索需要 Embedding 配置。
         assert client.get('/api/rag/status').json()['configured'] is False
+        # 分析能力只需要生成模型，因此不受缺少 Embedding 配置影响。
+        assert client.get('/api/analysis/status').json()['configured'] is True
     assert len(requests) == 1
 
 

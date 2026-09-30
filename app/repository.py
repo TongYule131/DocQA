@@ -14,6 +14,10 @@ from uuid import uuid4
 
 from app import migrations
 from app.schemas import (
+    AnalysisCallEntry,
+    AnalysisJob,
+    AnalysisResultSummary,
+    AnalysisStepInfo,
     Block,
     Chunk,
     Document,
@@ -33,8 +37,19 @@ class TaskConflict(Exception):
 
 
 def now_iso() -> str:
-    """统一使用带时区的 UTC ISO 时间字符串，便于比较租约过期。"""
-    return datetime.now(timezone.utc).isoformat()
+    """统一使用带时区的 UTC ISO 时间字符串。
+
+    必须固定微秒位数：租约是否过期是通过**字符串比较**判断的，
+    而 `isoformat()` 在微秒为 0 时会省略小数部分，导致
+    "…:42" 与 "…:42.123456" 的字典序与真实时间顺序相反。
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def lease_expiry_iso(seconds: int) -> str:
+    """租约到期时间：与 now_iso() 使用同一固定精度，保证字符串比较可靠。"""
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat(
+        timespec="microseconds")
 
 
 def parse_iso(value: str | None) -> datetime | None:
@@ -334,7 +349,7 @@ class Repository:
         """
         now = datetime.now(timezone.utc)
         token = f"{worker_id}:{now.timestamp()}"
-        expires = (now + timedelta(seconds=lease_seconds)).isoformat()
+        expires = lease_expiry_iso(lease_seconds)
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             self._recover_expired_leases(db)
@@ -353,8 +368,8 @@ class Repository:
                    heartbeat_at=?, started_at=COALESCE(started_at,?), updated_at=?,
                    attempt_count=attempt_count+1
                    WHERE id=? AND (status='queued' OR (status='running' AND lease_expires_at < ?))""",
-                (token, expires, now.isoformat(), now.isoformat(), now.isoformat(),
-                 row["id"], now.isoformat()))
+                (token, expires, now.isoformat(timespec="microseconds"), now.isoformat(timespec="microseconds"), now.isoformat(timespec="microseconds"),
+                 row["id"], now.isoformat(timespec="microseconds")))
             if updated.rowcount != 1:
                 # 另一个 worker 抢先领取；本次不重复执行。
                 return None
@@ -363,7 +378,7 @@ class Repository:
                    upstream_task_id, started_at)
                    VALUES (?,?,?,?,?,?,?,?)""",
                 (f"att-{row['id']}-{row['attempt_count'] + 1}", row["id"], row["attempt_count"] + 1,
-                 "running", "submitting", token, row["upstream_task_id"], now.isoformat()),
+                 "running", "submitting", token, row["upstream_task_id"], now.isoformat(timespec="microseconds")),
             )
         return self.get_task(row["id"])
 
@@ -374,8 +389,8 @@ class Repository:
             result = db.execute(
                 "UPDATE parse_tasks SET lease_expires_at=?, heartbeat_at=?, updated_at=?"
                 " WHERE id=? AND lease_token=? AND status='running' AND lease_expires_at>?",
-                ((now + timedelta(seconds=lease_seconds)).isoformat(), now.isoformat(),
-                 now.isoformat(), task_id, token, now.isoformat()))
+                (lease_expiry_iso(lease_seconds), now.isoformat(timespec="microseconds"),
+                 now.isoformat(timespec="microseconds"), task_id, token, now.isoformat(timespec="microseconds")))
             return result.rowcount == 1
 
     def update_task_progress(self, task_id: str, token: str, *, stage: str,
@@ -913,7 +928,7 @@ class Repository:
                 (document_id, "indexing", index_id, version_id, model_signature,
                  migrations.SIGNATURE_ALGO_VERSIONED, now_iso()))
             db.execute("UPDATE embedding_indexes SET lease_expires_at=? WHERE id=?",
-                       ((datetime.now(timezone.utc) + timedelta(seconds=300)).isoformat(), index_id))
+                       (lease_expiry_iso(300), index_id))
         return index_id
 
     def renew_index_lease(self, index_id: str) -> bool:
@@ -921,7 +936,7 @@ class Repository:
         with self.connect() as db:
             return db.execute("UPDATE embedding_indexes SET lease_expires_at=? WHERE id=? "
                               "AND status='indexing' AND lease_expires_at>?",
-                              ((datetime.now(timezone.utc) + timedelta(seconds=300)).isoformat(),
+                              (lease_expiry_iso(300),
                                index_id, now_iso())).rowcount == 1
 
     @staticmethod
@@ -949,3 +964,612 @@ class Repository:
             db.execute(
                 "UPDATE embedding_indexes SET status='failed', error=? WHERE document_id=? AND status='indexing'",
                 (message, document_id))
+
+    # ------------------------------------------------------------------
+    # 分析任务（摘要 / 信息提取）
+    #
+    # 事务约定与解析任务一致：领取、预算预扣、检查点保存与结果发布都在短事务中
+    # 用条件更新完成；网络请求期间绝不持有写事务。
+    # ------------------------------------------------------------------
+    _ANALYSIS_JOB_COLUMNS = (
+        "id, document_id, parse_version_id, kind, status, stage, stage_detail, idempotency_key,"
+        " request_fingerprint, plan_fingerprint, plan_json, input_hash, prompt_version,"
+        " protocol_version, model_signature, request_upper_bound, max_requests, requests_used,"
+        " steps_total, steps_completed, result_id, coverage_json, limitations_json, error_code,"
+        " error_message, created_at, updated_at, started_at, finished_at"
+    )
+
+    # 任务查询必须带上的执行字段：令牌与租约是恢复与防覆盖的核心，不能漏读。
+    _ANALYSIS_JOB_SELECT = ("SELECT j.*, j.lease_token AS lease_token,"
+                            " j.lease_expires_at AS lease_expires_at,"
+                            " j.attempt_count AS attempt_count,"
+                            " j.retry_of AS retry_of,"
+                            " EXISTS(SELECT 1 FROM analysis_results r WHERE r.job_id=j.id) AS has_result"
+                            " FROM analysis_jobs j")
+
+    @staticmethod
+    def _json_or_none(value: str | None):
+        if not value:
+            return None
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _analysis_job_from_row(self, row: sqlite3.Row) -> AnalysisJob:
+        keys = row.keys()
+        return AnalysisJob(
+            id=row["id"], document_id=row["document_id"], parse_version_id=row["parse_version_id"],
+            kind=row["kind"], status=row["status"], stage=row["stage"],
+            stage_detail=row["stage_detail"], idempotency_key=row["idempotency_key"],
+            plan_fingerprint=row["plan_fingerprint"], request_upper_bound=row["request_upper_bound"],
+            max_requests=row["max_requests"], requests_used=row["requests_used"],
+            steps_total=row["steps_total"], steps_completed=row["steps_completed"],
+            result_id=row["result_id"], error_code=row["error_code"],
+            error_message=row["error_message"], created_at=row["created_at"],
+            updated_at=row["updated_at"], started_at=row["started_at"],
+            finished_at=row["finished_at"], prompt_version=row["prompt_version"],
+            protocol_version=row["protocol_version"], model_signature=row["model_signature"],
+            coverage=self._json_or_none(row["coverage_json"]),
+            limitations=self._json_or_none(row["limitations_json"]) or [],
+            lease_token=row["lease_token"] if "lease_token" in keys else None,
+            lease_expires_at=row["lease_expires_at"] if "lease_expires_at" in keys else None,
+            attempt_count=row["attempt_count"] if "attempt_count" in keys else 0,
+            has_result=bool(row["has_result"]) if "has_result" in keys else bool(row["result_id"]),
+        )
+
+    def create_analysis_job(self, job: AnalysisJob, *, plan: dict, input_hash: str,
+                            request_fingerprint: str) -> tuple[AnalysisJob, bool]:
+        """在单一写事务中创建分析任务，返回 (任务, 是否新建)。
+
+        幂等与并发都由事务内的检查 + 数据库唯一索引共同保证：
+        - 同文档同幂等键的旧任务直接复用；指纹不同说明载荷不同，交给上层返回 409；
+        - 同文档同类型的活动任务被复用，重复点击不会产生第二次收费调用。
+        """
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if job.idempotency_key:
+                existing = db.execute(
+                    "SELECT j.*, k.request_fingerprint AS key_fingerprint FROM analysis_jobs j "
+                    "JOIN analysis_request_keys k ON k.job_id=j.id "
+                    "WHERE k.document_id=? AND k.idempotency_key=?",
+                    (job.document_id, job.idempotency_key)).fetchone()
+                if existing is not None:
+                    if existing["key_fingerprint"] != request_fingerprint:
+                        raise TaskConflict("该幂等键已用于不同的分析请求")
+                    return self._analysis_job_from_row(existing), False
+            active = db.execute(
+                "SELECT * FROM analysis_jobs WHERE document_id=? AND kind=? AND status IN ('queued','running')",
+                (job.document_id, job.kind)).fetchone()
+            if active is not None:
+                if (active["request_fingerprint"] != request_fingerprint or
+                        active["model_signature"] != job.model_signature):
+                    raise TaskConflict("已有不同版本或配置的分析任务在执行，请等待或取消后再创建")
+                if job.idempotency_key:
+                    db.execute("INSERT INTO analysis_request_keys VALUES (?,?,?,?)",
+                               (job.document_id, job.idempotency_key, active["id"], request_fingerprint))
+                return self._analysis_job_from_row(active), False
+            db.execute(
+                f"""INSERT INTO analysis_jobs ({self._ANALYSIS_JOB_COLUMNS})
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",                (job.id, job.document_id, job.parse_version_id, job.kind, job.status, job.stage,
+                 job.stage_detail, job.idempotency_key, request_fingerprint, job.plan_fingerprint,
+                 json.dumps(plan, ensure_ascii=False), input_hash, job.prompt_version,
+                 job.protocol_version, job.model_signature, job.request_upper_bound,
+                 job.max_requests, 0, job.steps_total, 0, None,
+                 json.dumps(job.coverage, ensure_ascii=False) if job.coverage is not None else None,
+                 json.dumps(job.limitations, ensure_ascii=False),
+                 job.error_code, job.error_message, job.created_at, job.updated_at,
+                 job.started_at, job.finished_at))
+            if job.idempotency_key:
+                db.execute("INSERT INTO analysis_request_keys VALUES (?,?,?,?)",
+                           (job.document_id, job.idempotency_key, job.id, request_fingerprint))
+        return self.get_analysis_job(job.id), True
+
+    def get_analysis_job(self, job_id: str) -> AnalysisJob | None:
+        with self.connect() as db:
+            row = db.execute(self._ANALYSIS_JOB_SELECT + " WHERE j.id=?", (job_id,)).fetchone()
+        return self._analysis_job_from_row(row) if row else None
+
+    def analysis_job_plan(self, job_id: str) -> dict | None:
+        """读取任务创建时固定的输入计划（版本、批次、上界）。"""
+        with self.connect() as db:
+            row = db.execute("SELECT plan_json FROM analysis_jobs WHERE id=?", (job_id,)).fetchone()
+        return self._json_or_none(row["plan_json"]) if row else None
+
+    def analysis_job_fingerprint(self, job_id: str, key: str | None = None) -> str | None:
+        with self.connect() as db:
+            if key:
+                row = db.execute("SELECT request_fingerprint FROM analysis_request_keys "
+                                 "WHERE job_id=? AND idempotency_key=?", (job_id, key)).fetchone()
+                return row["request_fingerprint"] if row else None
+            row = db.execute("SELECT request_fingerprint FROM analysis_jobs WHERE id=?", (job_id,)).fetchone()
+        return row["request_fingerprint"] if row else None
+
+    def find_analysis_job_by_idempotency(self, document_id: str, key: str) -> AnalysisJob | None:
+        with self.connect() as db:
+            row = db.execute(
+                self._ANALYSIS_JOB_SELECT + " WHERE j.id IN (SELECT job_id FROM analysis_request_keys "
+                "WHERE document_id=? AND idempotency_key=?)",
+                (document_id, key)).fetchone()
+        return self._analysis_job_from_row(row) if row else None
+
+    def bind_analysis_request_key(self, job_id: str, document_id: str, key: str,
+                                  fingerprint: str) -> str:
+        """复用成功结果时仍原子登记本次键；竞争者先绑定时返回其原任务。"""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            old = db.execute("SELECT * FROM analysis_request_keys WHERE document_id=? "
+                             "AND idempotency_key=?", (document_id, key)).fetchone()
+            if old:
+                if old["request_fingerprint"] != fingerprint:
+                    raise TaskConflict("该幂等键已用于不同的分析请求")
+                return old["job_id"]
+            db.execute("INSERT INTO analysis_request_keys VALUES (?,?,?,?)",
+                       (document_id, key, job_id, fingerprint))
+        return job_id
+
+    def find_active_analysis_job(self, document_id: str, kind: str) -> AnalysisJob | None:
+        with self.connect() as db:
+            row = db.execute(
+                self._ANALYSIS_JOB_SELECT +
+                " WHERE j.document_id=? AND j.kind=? AND j.status IN ('queued','running')"
+                " ORDER BY j.created_at DESC LIMIT 1", (document_id, kind)).fetchone()
+        return self._analysis_job_from_row(row) if row else None
+
+    def latest_analysis_job(self, document_id: str, kind: str | None = None) -> AnalysisJob | None:
+        with self.connect() as db:
+            if kind:
+                row = db.execute(
+                    self._ANALYSIS_JOB_SELECT + " WHERE j.document_id=? AND j.kind=?"
+                    " ORDER BY j.created_at DESC, j.rowid DESC LIMIT 1",
+                    (document_id, kind)).fetchone()
+            else:
+                row = db.execute(
+                    self._ANALYSIS_JOB_SELECT + " WHERE j.document_id=?"
+                    " ORDER BY j.created_at DESC, j.rowid DESC LIMIT 1", (document_id,)).fetchone()
+        return self._analysis_job_from_row(row) if row else None
+
+    def list_analysis_jobs(self, document_id: str) -> list[AnalysisJob]:
+        with self.connect() as db:
+            rows = db.execute(
+                self._ANALYSIS_JOB_SELECT + " WHERE j.document_id=?"
+                " ORDER BY j.created_at DESC, j.rowid DESC", (document_id,)).fetchall()
+        return [self._analysis_job_from_row(row) for row in rows]
+
+    def _analysis_job_token_valid(self, db: sqlite3.Connection, job_id: str, token: str) -> bool:
+        row = db.execute("SELECT lease_token, status, lease_expires_at FROM analysis_jobs WHERE id=?",
+                         (job_id,)).fetchone()
+        return bool(row and row["status"] == "running" and row["lease_token"] == token
+                    and row["lease_expires_at"] and row["lease_expires_at"] > now_iso())
+
+    def claim_next_analysis_job(self, worker_id: str, lease_seconds: int, *,
+                                job_id: str | None = None) -> AnalysisJob | None:
+        """原子领取一个分析任务；过期执行者持有的任务先被恢复再领取。
+
+        领取条件：status='queued'。租约过期的 running 任务会先经过
+        `_recover_expired_analysis_leases` 归一化：
+        - 没有残留调用意图的（进程正常消失）回到 queued，可被继续执行；
+        - 有残留调用意图的（已发出请求但未保存结果）转 needs_attention，绝不自动重发。
+        领取时写入新的执行令牌与租约，旧令牌随即失效，不能继续发请求或发布结果。
+        """
+        now = datetime.now(timezone.utc)
+        token = f"{worker_id}:{now.timestamp()}"
+        expires = lease_expiry_iso(lease_seconds)
+        stamp = now.isoformat(timespec="microseconds")
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._recover_expired_analysis_leases(db)
+            if job_id:
+                row = db.execute(
+                    "SELECT id, attempt_count, stage FROM analysis_jobs"
+                    " WHERE id=? AND status='queued' AND cancel_requested=0", (job_id,)).fetchone()
+            else:
+                row = db.execute(
+                    "SELECT id, attempt_count, stage FROM analysis_jobs"
+                    " WHERE status='queued' AND cancel_requested=0"
+                    " ORDER BY created_at LIMIT 1").fetchone()
+            if row is None:
+                return None
+            updated = db.execute(
+                """UPDATE analysis_jobs SET status='running', lease_token=?, lease_expires_at=?,
+                   heartbeat_at=?, started_at=COALESCE(started_at,?), updated_at=?,
+                   attempt_count=attempt_count+1
+                   WHERE id=? AND status='queued'""",
+                (token, expires, stamp, stamp, stamp, row["id"]))
+            if updated.rowcount != 1:
+                return None
+            db.execute(
+                """INSERT INTO analysis_attempts(id, job_id, attempt_no, status, stage, lease_token, started_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (f"aatt-{row['id']}-{row['attempt_count'] + 1}", row["id"], row["attempt_count"] + 1,
+                 "running", row["stage"], token, stamp))
+        return self.get_analysis_job(row["id"])
+
+    def _recover_expired_analysis_leases(self, db: sqlite3.Connection) -> None:
+        """恢复租约过期的分析任务；两种情况必须严格区分。
+
+        1. **没有残留调用意图**：执行者进程只是消失了（崩溃、被杀、正常退出），
+           供应商没有收到任何在途请求，任务回到 queued 可被继续执行。
+        2. **存在残留调用意图**（intent 行未结算）：请求可能已发出，
+           供应商是否已接收无法确定。此时转 needs_attention，**绝不自动重发**，
+           账本行标记为 uncertain 并保留，仍计入预算。
+        """
+        now = now_iso()
+        rows = db.execute(
+            "SELECT id, cancel_requested FROM analysis_jobs WHERE status='running'"
+            " AND (lease_expires_at IS NULL OR lease_expires_at<=?)", (now,)).fetchall()
+        for row in rows:
+            job_id = row["id"]
+            uncertain = db.execute(
+                "SELECT 1 FROM analysis_calls WHERE job_id=? AND status='intent' LIMIT 1",
+                (job_id,)).fetchone()
+            if uncertain is None:
+                if row["cancel_requested"]:
+                    db.execute("UPDATE analysis_jobs SET status='cancelled', stage='done',"
+                               " lease_token=NULL, lease_expires_at=NULL, finished_at=?, updated_at=?"
+                               " WHERE id=?", (now, now, job_id))
+                    db.execute("UPDATE analysis_attempts SET status='cancelled', finished_at=?"
+                               " WHERE job_id=? AND status='running'", (now, job_id))
+                    continue
+                # 情况 1：可安全继续；租约清空后由下一个 worker 重新领取。
+                db.execute(
+                    "UPDATE analysis_jobs SET status='queued', lease_token=NULL,"
+                    " lease_expires_at=NULL, updated_at=?"
+                    " WHERE id=? AND status='running'", (now, job_id))
+                db.execute(
+                    "UPDATE analysis_attempts SET status='failed', error_code='lease_expired',"
+                    " error_message='执行者租约过期，任务已回到队列可继续执行', finished_at=?"
+                    " WHERE job_id=? AND status='running'", (now, job_id))
+                continue
+            # 情况 2：不确定调用，停在 needs_attention 等待用户核实。
+            db.execute("UPDATE analysis_calls SET status='uncertain', settled_at=?"
+                       " WHERE job_id=? AND status='intent'", (now, job_id))
+            db.execute(
+                "UPDATE analysis_jobs SET status='needs_attention', lease_token=NULL,"
+                " lease_expires_at=NULL, error_code='call_uncertain', updated_at=?,"
+                " error_message='有一次已发出的生成调用未保存结果，供应商是否已接收无法确定；"
+                "系统不会自动重发，请核实后明确重试（可能重复计费）' WHERE id=?",
+                (now, job_id))
+            db.execute(
+                "UPDATE analysis_attempts SET status='needs_attention', error_code='call_uncertain',"
+                " error_message='存在未确认的生成调用', finished_at=?"
+                " WHERE job_id=? AND status='running'", (now, job_id))
+
+    def renew_analysis_lease(self, job_id: str, token: str, lease_seconds: int) -> bool:
+        now = datetime.now(timezone.utc)
+        with self.connect() as db:
+            result = db.execute(
+                "UPDATE analysis_jobs SET lease_expires_at=?, heartbeat_at=?, updated_at=?"
+                " WHERE id=? AND lease_token=? AND status='running' AND lease_expires_at>?",
+                (lease_expiry_iso(lease_seconds), now.isoformat(timespec="microseconds"),
+                 now.isoformat(timespec="microseconds"), job_id, token, now.isoformat(timespec="microseconds")))
+            return result.rowcount == 1
+
+    def analysis_lease_valid(self, job_id: str, token: str) -> bool:
+        with self.connect() as db:
+            return self._analysis_job_token_valid(db, job_id, token)
+
+    def update_analysis_progress(self, job_id: str, token: str, *, stage: str,
+                                 stage_detail: str | None = None) -> bool:
+        """更新执行阶段；必须持有有效令牌，过期执行者不能继续推进任务。"""
+        with self.connect() as db:
+            result = db.execute(
+                "UPDATE analysis_jobs SET stage=?, stage_detail=COALESCE(?, stage_detail), updated_at=?"
+                " WHERE id=? AND lease_token=? AND status='running' AND lease_expires_at>?",
+                (stage, stage_detail, now_iso(), job_id, token, now_iso()))
+            return result.rowcount == 1
+
+    def set_analysis_plan_counts(self, job_id: str, token: str, *, steps_total: int,
+                                 request_upper_bound: int) -> bool:
+        with self.connect() as db:
+            result = db.execute(
+                "UPDATE analysis_jobs SET steps_total=?, request_upper_bound=?, updated_at=?"
+                " WHERE id=? AND lease_token=? AND status='running' AND lease_expires_at>?",
+                (steps_total, request_upper_bound, now_iso(), job_id, token, now_iso()))
+            return result.rowcount == 1
+
+    def claim_analysis_budget(self, job_id: str, token: str, *, role: str, step_id: str) -> int | None:
+        """预算预扣 + 调用意图写入，必须在同一次外部请求**之前**完成。
+
+        返回账本序号（从 1 开始，仅用于结算该行）；返回 None 表示租约失效或预算已耗尽，
+        调用方因此**不得**发起请求。扣减与插入在同一 BEGIN IMMEDIATE 事务中执行，
+        两个并发 worker 不可能同时把 requests_used 推过上限。
+
+        序号由服务端在事务内分配（不采用调用方的步骤下标）：这样“第几次调用”
+        在账本里始终是唯一且连续的，结算时不会因步骤下标重复而误配到别的行。
+        """
+        now = now_iso()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not self._analysis_job_token_valid(db, job_id, token):
+                return None
+            row = db.execute("SELECT requests_used, max_requests, cancel_requested FROM analysis_jobs WHERE id=?",
+                             (job_id,)).fetchone()
+            if row is None or row["cancel_requested"]:
+                return None
+            next_used = row["requests_used"] + 1
+            if row["max_requests"] and next_used > row["max_requests"]:
+                return None
+            db.execute("UPDATE analysis_jobs SET requests_used=?, updated_at=? WHERE id=?",
+                       (next_used, now, job_id))
+            db.execute(
+                """INSERT INTO analysis_calls(id, job_id, step_id, role, sequence_no, status, started_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (f"acall-{job_id}-{next_used}", job_id, step_id, role, next_used, "intent", now))
+            return next_used
+
+    def settle_analysis_call(self, job_id: str, sequence_no: int, *, status: str,
+                             error_code: str | None = None, elapsed_ms: int | None = None) -> bool:
+        """结算一次调用：只允许把 intent 行改为终态，避免重复结算掩盖问题。"""
+        with self.connect() as db:
+            result = db.execute(
+                "UPDATE analysis_calls SET status=?, error_code=?, settled_at=?, elapsed_ms=?"
+                " WHERE job_id=? AND sequence_no=? AND status='intent'",
+                (status, error_code, now_iso(), elapsed_ms, job_id, sequence_no))
+            return result.rowcount == 1
+
+    def analysis_calls(self, job_id: str) -> list[AnalysisCallEntry]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM analysis_calls WHERE job_id=? ORDER BY sequence_no", (job_id,)).fetchall()
+        return [AnalysisCallEntry(
+            id=row["id"], job_id=row["job_id"], step_id=row["step_id"], role=row["role"],
+            sequence_no=row["sequence_no"], status=row["status"], error_code=row["error_code"],
+            started_at=row["started_at"], settled_at=row["settled_at"],
+            elapsed_ms=row["elapsed_ms"]) for row in rows]
+
+    def analysis_calls_used(self, job_id: str) -> int:
+        """已占用预算次数：包含失败与不确定调用（intent／uncertain 也算已发出）。"""
+        with self.connect() as db:
+            return db.execute("SELECT COUNT(*) FROM analysis_calls WHERE job_id=?", (job_id,)).fetchone()[0]
+
+    def has_uncertain_analysis_call(self, job_id: str) -> bool:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT 1 FROM analysis_calls WHERE job_id=? AND status IN ('intent','uncertain')"
+                " AND COALESCE(error_code,'') != 'retry_acknowledged_uncertain' LIMIT 1",
+                (job_id,)).fetchone()
+        return row is not None
+
+    def analysis_step(self, job_id: str, role: str, order_index: int) -> dict | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM analysis_steps WHERE job_id=? AND role=? AND order_index=?",
+                (job_id, role, order_index)).fetchone()
+        return dict(row) if row else None
+
+    def save_analysis_step(self, job_id: str, token: str, *, step_id: str, role: str,
+                           order_index: int, batch_id: str | None, unit_ids: list[str],
+                           input_chars: int, payload: dict) -> bool:
+        """保存**已校验**的分批／汇总检查点，并同步已完成步骤计数。
+
+        只有校验通过的结果才会走到这里；令牌失效时拒绝写入，
+        避免过期执行者把半途结果覆盖到新执行者的检查点上。
+        """
+        now = now_iso()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not self._analysis_job_token_valid(db, job_id, token):
+                return False
+            db.execute(
+                """INSERT INTO analysis_steps(id, job_id, role, order_index, batch_id, status,
+                   unit_ids_json, input_chars, payload_json, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(job_id, role, order_index) DO UPDATE SET
+                     status='succeeded', payload_json=excluded.payload_json,
+                     unit_ids_json=excluded.unit_ids_json, input_chars=excluded.input_chars,
+                     updated_at=excluded.updated_at""",
+                (step_id, job_id, role, order_index, batch_id, "succeeded",
+                 json.dumps(unit_ids, ensure_ascii=False), input_chars,
+                 json.dumps(payload, ensure_ascii=False), now, now))
+            completed = db.execute(
+                "SELECT COUNT(*) FROM analysis_steps WHERE job_id=? AND status='succeeded'",
+                (job_id,)).fetchone()[0]
+            db.execute("UPDATE analysis_jobs SET steps_completed=?, updated_at=? WHERE id=?",
+                       (completed, now, job_id))
+        return True
+
+    def mark_analysis_step_failed(self, job_id: str, token: str, *, step_id: str, role: str,
+                                  order_index: int, batch_id: str | None, unit_ids: list[str],
+                                  error_code: str) -> bool:
+        """记录失败步骤（不写入 payload），保留失败原因供诊断与重试。"""
+        now = now_iso()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not self._analysis_job_token_valid(db, job_id, token):
+                return False
+            db.execute(
+                """INSERT INTO analysis_steps(id, job_id, role, order_index, batch_id, status,
+                   unit_ids_json, input_chars, payload_json, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(job_id, role, order_index) DO UPDATE SET
+                     status='failed', error_code=excluded.error_code,
+                     payload_json=NULL, updated_at=excluded.updated_at""",
+                (step_id, job_id, role, order_index, batch_id, "failed",
+                 json.dumps(unit_ids, ensure_ascii=False), 0,
+                 json.dumps({"error_code": error_code}, ensure_ascii=False), now, now))
+        return True
+
+    def succeeded_analysis_steps(self, job_id: str) -> dict[tuple[str, int], dict]:
+        """已校验检查点：重试时直接复用，不重复发请求。"""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM analysis_steps WHERE job_id=? AND status='succeeded'", (job_id,)).fetchall()
+        result: dict[tuple[str, int], dict] = {}
+        for row in rows:
+            payload = self._json_or_none(row["payload_json"])
+            if payload is None:
+                continue
+            result[(row["role"], row["order_index"])] = {
+                "step_id": row["id"], "payload": payload,
+                "unit_ids": self._json_or_none(row["unit_ids_json"]) or [],
+                "batch_id": row["batch_id"],
+            }
+        return result
+
+    def fail_analysis_job(self, job_id: str, token: str, *, status: str, stage: str,
+                          error_code: str, error_message: str,
+                          coverage: dict | None = None) -> bool:
+        """写入终态；令牌失效时拒绝写入，避免覆盖新执行者的结果。"""
+        now = now_iso()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not self._analysis_job_token_valid(db, job_id, token):
+                return False
+            db.execute(
+                "UPDATE analysis_jobs SET status=?, stage=?, error_code=?, error_message=?,"
+                " finished_at=?, updated_at=?, lease_token=NULL, lease_expires_at=NULL,"
+                " coverage_json=COALESCE(?, coverage_json) WHERE id=? AND lease_token=?",
+                (status, stage, error_code, error_message, now, now,
+                 json.dumps(coverage, ensure_ascii=False) if coverage is not None else None,
+                 job_id, token))
+            db.execute(
+                "UPDATE analysis_attempts SET status=?, stage=?, error_code=?, error_message=?, finished_at=?"
+                " WHERE job_id=? AND lease_token=? AND status='running'",
+                (status, stage, error_code, error_message, now, job_id, token))
+        return True
+
+    def publish_analysis_result(self, job_id: str, token: str, *, result_id: str, kind: str,
+                                payload: dict, coverage: dict, warnings: list,
+                                limitations: list[str], prompt_version: str,
+                                protocol_version: str, model_signature: str,
+                                requests_used: int) -> bool:
+        """在短事务中发布**已校验**结果并把任务置为 succeeded。
+
+        结果正文（payload）与结果行在同一事务写入：这样“结果行存在但正文缺失”
+        或“正文存在但任务未成功”都不可能发生，重启后读取结果无需再调用模型。
+        旧成功结果不在这里被删除或替换：重新生成会写入新的 result 行，
+        `analysis_results.job_id` 上的唯一索引保证一个任务只有一个结果。
+        """
+        now = now_iso()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not self._analysis_job_token_valid(db, job_id, token):
+                logger.warning("分析任务 %s 的租约已失效，丢弃本次结果", job_id)
+                return False
+            row = db.execute("SELECT document_id, parse_version_id, cancel_requested FROM analysis_jobs WHERE id=?",
+                             (job_id,)).fetchone()
+            if row is None or row["cancel_requested"]:
+                return False
+            db.execute(
+                """INSERT INTO analysis_results(id, job_id, document_id, parse_version_id, kind,
+                   payload_json, coverage_json, warnings_json, limitations_json, prompt_version,
+                   protocol_version, model_signature, requests_used, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(job_id) DO UPDATE SET
+                     payload_json=excluded.payload_json,
+                     coverage_json=excluded.coverage_json, warnings_json=excluded.warnings_json,
+                     limitations_json=excluded.limitations_json,
+                     requests_used=excluded.requests_used, created_at=excluded.created_at""",
+                (result_id, job_id, row["document_id"], row["parse_version_id"], kind,
+                 json.dumps(payload, ensure_ascii=False),
+                 json.dumps(coverage, ensure_ascii=False),
+                 json.dumps([w.model_dump() if hasattr(w, "model_dump") else w for w in warnings],
+                            ensure_ascii=False),
+                 json.dumps(limitations, ensure_ascii=False), prompt_version, protocol_version,
+                 model_signature, requests_used, now))
+            db.execute(
+                "UPDATE analysis_jobs SET status='succeeded', stage='done', result_id=?,"
+                " error_code=NULL, error_message=NULL, finished_at=?, updated_at=?,"
+                " coverage_json=?, limitations_json=?, lease_token=NULL, lease_expires_at=NULL"
+                " WHERE id=? AND lease_token=?",
+                (result_id, now, now, json.dumps(coverage, ensure_ascii=False),
+                 json.dumps(limitations, ensure_ascii=False), job_id, token))
+            db.execute(
+                "UPDATE analysis_attempts SET status='succeeded', stage='done', finished_at=?"
+                " WHERE job_id=? AND lease_token=? AND status='running'",
+                (now, job_id, token))
+        return True
+
+    def analysis_result_payload(self, result_id: str) -> dict | None:
+        """读取结果行与已校验正文；纯读取，绝不重新调用模型。"""
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM analysis_results WHERE id=?", (result_id,)).fetchone()
+        if row is None:
+            return None
+        data = dict(row)
+        data["payload"] = self._json_or_none(row["payload_json"])
+        return data
+
+    def list_analysis_results(self, document_id: str, kind: str | None = None) -> list[AnalysisResultSummary]:
+        """结果历史：按时间倒序；不返回正文，避免列表接口返回大量内容。"""
+        with self.connect() as db:
+            sql = "SELECT * FROM analysis_results WHERE document_id=?"
+            params: list = [document_id]
+            if kind:
+                sql += " AND kind=?"
+                params.append(kind)
+            sql += " ORDER BY created_at DESC, rowid DESC"
+            rows = db.execute(sql, params).fetchall()
+            active = db.execute("SELECT active_parse_version_id FROM documents WHERE id=?",
+                                (document_id,)).fetchone()
+        active_version = active["active_parse_version_id"] if active else None
+        summaries: list[AnalysisResultSummary] = []
+        for row in rows:
+            coverage = self._json_or_none(row["coverage_json"]) or {}
+            summaries.append(AnalysisResultSummary(
+                id=row["id"], job_id=row["job_id"], document_id=row["document_id"],
+                parse_version_id=row["parse_version_id"], kind=row["kind"],
+                is_active_version=bool(active_version and row["parse_version_id"] == active_version),
+                is_current_version=bool(active_version and row["parse_version_id"] == active_version),
+                complete=bool(coverage.get("complete")),
+                coverage=coverage, prompt_version=row["prompt_version"],
+                protocol_version=row["protocol_version"], requests_used=row["requests_used"],
+                created_at=row["created_at"]))
+        return summaries
+
+    def get_analysis_result_row(self, result_id: str) -> dict | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM analysis_results WHERE id=?", (result_id,)).fetchone()
+        return dict(row) if row else None
+
+    def set_analysis_stage_after_retry(self, job_id: str) -> bool:
+        """重试前把任务放回队列并清空取消标记；预算与检查点原样保留。"""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            job = db.execute("SELECT * FROM analysis_jobs WHERE id=?", (job_id,)).fetchone()
+            if (job is None or job["status"] not in {"failed", "needs_attention"}
+                    or job["requests_used"] >= job["max_requests"]):
+                return False
+            if db.execute("SELECT 1 FROM analysis_jobs WHERE document_id=? AND kind=?"
+                          " AND status IN ('queued','running')", (job["document_id"], job["kind"])).fetchone():
+                return False
+            result = db.execute(
+                "UPDATE analysis_jobs SET status='queued', cancel_requested=0, error_code=NULL,"
+                " error_message=NULL, finished_at=NULL, updated_at=?, retry_of=COALESCE(retry_of, id)"
+                " WHERE id=? AND status IN ('failed','needs_attention','cancelled')",
+                (now_iso(), job_id))
+            # 只有明确重试才能确认承担不确定调用风险；保留 uncertain 及费用历史。
+            if result.rowcount == 1:
+                db.execute("UPDATE analysis_calls SET status='uncertain',"
+                           " error_code='retry_acknowledged_uncertain', settled_at=COALESCE(settled_at,?)"
+                           " WHERE job_id=? AND status IN ('intent','uncertain')",
+                           (now_iso(), job_id))
+            return result.rowcount == 1
+
+    def request_analysis_cancel(self, job_id: str) -> bool:
+        """请求取消：queued 任务不发请求直接取消；running 任务阻止后续步骤与成功发布。"""
+        now = now_iso()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT status FROM analysis_jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None or row["status"] not in {"queued", "running"}:
+                return False
+            db.execute("UPDATE analysis_jobs SET cancel_requested=1, updated_at=? WHERE id=?",
+                       (now, job_id))
+            # 排队中的任务没有任何在途请求，可以直接落为 cancelled，且不会产生调用。
+            db.execute(
+                "UPDATE analysis_jobs SET status='cancelled', stage='done', finished_at=?, updated_at=?,"
+                " lease_token=NULL, lease_expires_at=NULL, error_code='cancelled_before_run',"
+                " error_message='任务在开始执行前被取消，未产生任何模型调用'"
+                " WHERE id=? AND status='queued'", (now, now, job_id))
+            return True
+
+    def analysis_cancel_requested(self, job_id: str) -> bool:
+        with self.connect() as db:
+            row = db.execute("SELECT cancel_requested FROM analysis_jobs WHERE id=?", (job_id,)).fetchone()
+        return bool(row and row["cancel_requested"])
+
+    def queued_analysis_job_count(self) -> int:
+        with self.connect() as db:
+            return db.execute("SELECT COUNT(*) FROM analysis_jobs WHERE status='queued'").fetchone()[0]

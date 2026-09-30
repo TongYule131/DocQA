@@ -76,6 +76,26 @@ class Settings:
     # 证据最低排序分值；None 表示禁用阈值（不把相似度当置信度）。
     # 阈值上线前必须用正负样本校准，不能仅用同一份文档调参。
     rag_min_score: float | None = None
+    # ------------------------------------------------------------------
+    # 摘要与信息提取（分析任务）
+    # 预算单位仍是字符，不是 token；这里的数值只用于本地输入限流与费用上界，
+    # 真正的模型上下文限制仍需供应商实测。
+    # ------------------------------------------------------------------
+    # 单个分析任务最多允许的生成尝试次数。它是**费用硬上限**：
+    # 规划出的分批 + 汇总请求数超过它时必须在调用前拒绝，而不是运行时扩容。
+    analysis_max_requests: int = 8
+    # 每批送入模型的输入单元字符上限（含文件名、编号、序列化包装）。
+    analysis_batch_max_chars: int = 12000
+    # 汇总阶段送入模型的已校验条目字符上限。
+    analysis_reduce_max_chars: int = 16000
+    # 实际 system + user 消息字符总数上限（规划与执行共用同一口径）。
+    analysis_input_max_chars: int = 20000
+    # 单个分析任务可遍历的解析版本文本总字符上限：超过时提前拒绝，
+    # 不允许“只处理前几块却叫全文”。
+    analysis_max_document_chars: int = 200000
+    # 单批与整次任务的条目数量上限；超过即受控失败，不静默截断尾部条目。
+    analysis_max_items_per_batch: int = 15
+    analysis_max_items_total: int = 60
 
     @classmethod
     def from_env(cls, env_file: Path = Path(".env")):
@@ -121,6 +141,13 @@ class Settings:
             rag_input_max_chars=int(value("DOCQA_RAG_INPUT_MAX_CHARS", "20000")),
             # 空值表示禁用分数阈值；只有显式配置才启用过滤。
             rag_min_score=_optional_float(values.get("DOCQA_RAG_MIN_SCORE")),
+            analysis_max_requests=int(value("DOCQA_ANALYSIS_MAX_REQUESTS", "8")),
+            analysis_batch_max_chars=int(value("DOCQA_ANALYSIS_BATCH_MAX_CHARS", "12000")),
+            analysis_reduce_max_chars=int(value("DOCQA_ANALYSIS_REDUCE_MAX_CHARS", "16000")),
+            analysis_input_max_chars=int(value("DOCQA_ANALYSIS_INPUT_MAX_CHARS", "20000")),
+            analysis_max_document_chars=int(value("DOCQA_ANALYSIS_MAX_DOCUMENT_CHARS", "200000")),
+            analysis_max_items_per_batch=int(value("DOCQA_ANALYSIS_MAX_ITEMS_PER_BATCH", "15")),
+            analysis_max_items_total=int(value("DOCQA_ANALYSIS_MAX_ITEMS_TOTAL", "60")),
         )
 
     def __post_init__(self):
@@ -196,6 +223,26 @@ class Settings:
         if self.rag_min_score is not None:
             if not math.isfinite(self.rag_min_score) or not -1.0 <= self.rag_min_score <= 1.0:
                 raise ValueError("DOCQA_RAG_MIN_SCORE 必须是 [-1,1] 内的有限数值，或留空以禁用阈值")
+        # 分析任务预算：必须是有限正整数并有合理上界，避免配置错误导致费用失控。
+        if not 1 <= self.analysis_max_requests <= 50:
+            raise ValueError("DOCQA_ANALYSIS_MAX_REQUESTS 必须在 1 到 50 之间")
+        if self.analysis_batch_max_chars <= 0:
+            raise ValueError("DOCQA_ANALYSIS_BATCH_MAX_CHARS 必须大于 0")
+        if self.analysis_reduce_max_chars <= 0:
+            raise ValueError("DOCQA_ANALYSIS_REDUCE_MAX_CHARS 必须大于 0")
+        if self.analysis_input_max_chars <= 0:
+            raise ValueError("DOCQA_ANALYSIS_INPUT_MAX_CHARS 必须大于 0")
+        # 批次预算必须小于总输入预算，否则“拆小批次”永远救不回超限请求。
+        if self.analysis_batch_max_chars >= self.analysis_input_max_chars:
+            raise ValueError("DOCQA_ANALYSIS_BATCH_MAX_CHARS 必须小于 DOCQA_ANALYSIS_INPUT_MAX_CHARS")
+        if self.analysis_reduce_max_chars >= self.analysis_input_max_chars:
+            raise ValueError("DOCQA_ANALYSIS_REDUCE_MAX_CHARS 必须小于 DOCQA_ANALYSIS_INPUT_MAX_CHARS")
+        if self.analysis_max_document_chars <= 0:
+            raise ValueError("DOCQA_ANALYSIS_MAX_DOCUMENT_CHARS 必须大于 0")
+        if not 1 <= self.analysis_max_items_per_batch <= 50:
+            raise ValueError("DOCQA_ANALYSIS_MAX_ITEMS_PER_BATCH 必须在 1 到 50 之间")
+        if self.analysis_max_items_total < self.analysis_max_items_per_batch:
+            raise ValueError("DOCQA_ANALYSIS_MAX_ITEMS_TOTAL 不能小于 DOCQA_ANALYSIS_MAX_ITEMS_PER_BATCH")
 
 
 def _optional_float(raw: str | None) -> float | None:

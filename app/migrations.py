@@ -17,7 +17,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # 当前代码期望的数据库结构版本；新增迁移时递增。
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 # 旧 source_signature 算法标识：sha256(json(chunk.model_dump()))，保留用于验证旧索引。
 SIGNATURE_ALGO_LEGACY = "sha256-chunk-dump-v1"
@@ -577,8 +577,171 @@ def _apply_v2(db: sqlite3.Connection) -> None:
         raise MigrationError("迁移后外键校验失败")
 
 
+# ---------------------------------------------------------------------------
+# v3：分析任务、尝试、分批步骤、调用账本与已校验结果
+# ---------------------------------------------------------------------------
+# 设计说明（对应任务书 §5）：
+# 1. 生成任务**不复用** parse_tasks：解析任务的事实来源是 Docling 上游，分析任务的
+#    事实来源是本地解析版本 + 生成调用，两者状态机、预算与恢复语义都不同；
+#    混在一张表里会让“新任务失败不得影响旧解析”这类约束无法独立验证。
+# 2. 调用账本（analysis_calls）是费用事实来源：每次外部请求前先在短事务中
+#    预扣预算并写入 intent 行；只有保存了已校验步骤才把该行标记 succeeded。
+#    存在“已标记发出但未保存结果”的行时任务转 needs_attention，绝不自动重发。
+# 3. 结果与任务分离且不可变：重新生成产生新的 result 版本，旧成功结果继续可读。
+_ANALYSIS_TABLES = """
+-- 分析任务：固定文档、解析版本、输入清单、任务类型、协议与模型指纹（不含密钥）。
+CREATE TABLE IF NOT EXISTS analysis_jobs (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    parse_version_id TEXT NOT NULL REFERENCES parse_versions(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL,
+    stage TEXT NOT NULL DEFAULT 'queued',
+    stage_detail TEXT,
+    idempotency_key TEXT,
+    request_fingerprint TEXT,
+    plan_fingerprint TEXT,
+    plan_json TEXT,
+    input_hash TEXT,
+    prompt_version TEXT NOT NULL DEFAULT '',
+    protocol_version TEXT NOT NULL DEFAULT '',
+    model_signature TEXT NOT NULL DEFAULT '',
+    request_upper_bound INTEGER NOT NULL DEFAULT 0,
+    max_requests INTEGER NOT NULL DEFAULT 0,
+    requests_used INTEGER NOT NULL DEFAULT 0,
+    steps_total INTEGER NOT NULL DEFAULT 0,
+    steps_completed INTEGER NOT NULL DEFAULT 0,
+    result_id TEXT,
+    coverage_json TEXT,
+    limitations_json TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    lease_token TEXT,
+    lease_expires_at TEXT,
+    heartbeat_at TEXT,
+    retry_of TEXT REFERENCES analysis_jobs(id),
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    CHECK (kind IN ('extraction','summary')),
+    CHECK (status IN ('queued','running','succeeded','failed','cancelled','needs_attention'))
+);
+CREATE INDEX IF NOT EXISTS ix_analysis_jobs_document ON analysis_jobs(document_id, created_at);
+-- 同一文档同一类型最多一个活动任务：重复点击直接复用，不产生第二次收费调用。
+CREATE UNIQUE INDEX IF NOT EXISTS ux_analysis_jobs_active
+    ON analysis_jobs(document_id, kind) WHERE status IN ('queued','running');
+-- 幂等键在同一文档内唯一；同键不同有效载荷由业务层返回 409。
+CREATE UNIQUE INDEX IF NOT EXISTS ux_analysis_jobs_idempotency
+    ON analysis_jobs(document_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+
+-- 任务尝试：每次真实执行（含重试）留痕，便于区分“重试”与“新建任务”。
+CREATE TABLE IF NOT EXISTS analysis_attempts (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES analysis_jobs(id) ON DELETE CASCADE,
+    attempt_no INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    lease_token TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    detail TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_analysis_attempts_job ON analysis_attempts(job_id, attempt_no);
+
+-- 已校验检查点：分批与汇总各占一行，已成功的步骤在重启与重试后直接复用。
+CREATE TABLE IF NOT EXISTS analysis_steps (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES analysis_jobs(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    order_index INTEGER NOT NULL,
+    batch_id TEXT,
+    status TEXT NOT NULL,
+    unit_ids_json TEXT,
+    input_chars INTEGER NOT NULL DEFAULT 0,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (role IN ('batch','reduce')),
+    CHECK (status IN ('pending','succeeded','failed'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_analysis_steps_slot
+    ON analysis_steps(job_id, role, order_index);
+
+-- 调用账本：每次外部生成请求先预扣预算并写意图；
+-- status=succeeded 表示结果已校验并落盘，intent 状态遗留即为“不确定调用”。
+CREATE TABLE IF NOT EXISTS analysis_calls (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES analysis_jobs(id) ON DELETE CASCADE,
+    step_id TEXT,
+    role TEXT NOT NULL,
+    sequence_no INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    error_code TEXT,
+    started_at TEXT NOT NULL,
+    settled_at TEXT,
+    elapsed_ms INTEGER,
+    CHECK (role IN ('batch','reduce')),
+    CHECK (status IN ('intent','succeeded','failed','uncertain','skipped'))
+);
+CREATE INDEX IF NOT EXISTS ix_analysis_calls_job ON analysis_calls(job_id, sequence_no);
+
+-- 已校验结果：绑定不可变解析版本，页面展示与导出都只从这里生成。
+-- payload_json 保存最终已校验结构（正文），与结果行一起写入同一短事务；
+-- 不额外借用 analysis_steps 保存结果，避免“步骤角色”被迫表达非步骤语义。
+CREATE TABLE IF NOT EXISTS analysis_results (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES analysis_jobs(id) ON DELETE CASCADE,
+    document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    parse_version_id TEXT NOT NULL REFERENCES parse_versions(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    coverage_json TEXT NOT NULL,
+    warnings_json TEXT,
+    limitations_json TEXT,
+    prompt_version TEXT NOT NULL DEFAULT '',
+    protocol_version TEXT NOT NULL DEFAULT '',
+    model_signature TEXT NOT NULL DEFAULT '',
+    requests_used INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    CHECK (kind IN ('extraction','summary'))
+);
+CREATE INDEX IF NOT EXISTS ix_analysis_results_document
+    ON analysis_results(document_id, kind, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_analysis_results_job ON analysis_results(job_id);
+"""
+
+
+def _apply_v3(db: sqlite3.Connection) -> None:
+    """v3 迁移：新增分析任务相关表。
+
+    该迁移只新增表与索引，不修改任何既有表的列或行：文档、解析任务、解析版本、
+    分块、来源、向量与活动指针全部保持原样，因此可以安全地在旧库上增量推进。
+    """
+    _exec_script(db, _ANALYSIS_TABLES)
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='analysis_jobs'").fetchone() is None:
+        raise MigrationError("v3 迁移未创建 analysis_jobs 表")
+
+
+def _apply_v4(db: sqlite3.Connection) -> None:
+    """复用任务也必须保存新幂等键；增量建映射表，旧任务与结果不改写。"""
+    db.execute("""CREATE TABLE analysis_request_keys (
+        document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+        idempotency_key TEXT NOT NULL,
+        job_id TEXT NOT NULL REFERENCES analysis_jobs(id) ON DELETE CASCADE,
+        request_fingerprint TEXT NOT NULL,
+        PRIMARY KEY (document_id, idempotency_key))""")
+    db.execute("""INSERT INTO analysis_request_keys
+        SELECT document_id, idempotency_key, id, request_fingerprint
+        FROM analysis_jobs WHERE idempotency_key IS NOT NULL""")
+
+
 # 版本 -> 迁移函数；按顺序执行。
-MIGRATIONS = {1: _apply_v1, 2: _apply_v2}
+MIGRATIONS = {1: _apply_v1, 2: _apply_v2, 3: _apply_v3, 4: _apply_v4}
 
 
 def run_migrations(db: sqlite3.Connection, *, backup_dir: Path | None = None,
