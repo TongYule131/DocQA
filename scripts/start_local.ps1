@@ -12,11 +12,12 @@
 # 5. 启动不新建任务、不探测模型账号；worker 仅恢复用户此前明确提交且可安全继续的任务。
 #    有未确认调用的任务进入 needs_attention，不自动重发；已排队任务可能使用其剩余预算。
 param(
-    [string]$DataDir = "data",
+    [string]$DataDir = "",
     [int]$Port = 8000,
     [switch]$NoParseWorker,
     [switch]$NoAnalysisWorker,
     [switch]$SkipMigrationCheck,
+    [switch]$AllowDatabaseUpgrade,
     [switch]$DryRun
 )
 
@@ -24,13 +25,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'local_service_common.ps1')
 
-function Resolve-DataDir([string]$value) {
-    # 相对路径一律相对项目根解析，避免受调用者当前目录影响。
-    if ([System.IO.Path]::IsPathRooted($value)) { return [System.IO.Path]::GetFullPath($value) }
-    return [System.IO.Path]::GetFullPath((Join-Path $projectRoot $value))
-}
-
-$resolvedDataDir = Resolve-DataDir $DataDir
+$resolvedDataDir = Resolve-LocalDataDir $DataDir $projectRoot
 $logDir = Join-Path $resolvedDataDir '.local-service'
 $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
 
@@ -38,7 +33,7 @@ Write-Host "=== DocQA 本地启动 ===" -ForegroundColor Cyan
 Write-Host "项目根目录 : $projectRoot"
 Write-Host "数据目录   : $resolvedDataDir"
 Write-Host "Web 端口   : $Port"
-Write-Host "说明       : Web 与分析 worker 使用同一个 DOCQA_DATA_DIR；正式库升级不在本脚本范围内。"
+Write-Host "说明       : 三个角色共用数据目录；已有旧库升级需显式 -AllowDatabaseUpgrade。"
 
 if (-not (Test-Path $python)) {
     Write-Error "找不到虚拟环境 Python：$python。请先按 README 创建 .venv。"
@@ -76,32 +71,14 @@ if ($portOwner) {
 }
 Write-Host "端口检查   : $Port 空闲" -ForegroundColor Green
 
-# 迁移检查：只读取当前 schema 版本并说明是否需要迁移，不执行正式库写入以外的动作。
-if (-not $SkipMigrationCheck) {
-    $check = & $python -c @"
-import json, sys
-from pathlib import Path
-from app import migrations
-from app.repository import Repository
-data_dir = Path(sys.argv[1])
-db = data_dir / 'docqa.db'
-if not db.exists():
-    print(json.dumps({'exists': False, 'current': 0, 'target': migrations.SCHEMA_VERSION}))
-else:
-    import sqlite3
-    conn = sqlite3.connect(db)
-    try:
-        print(json.dumps({'exists': True, 'current': migrations.detect_version(conn),
-                          'target': migrations.SCHEMA_VERSION}))
-    finally:
-        conn.close()
-"@ $resolvedDataDir
-    Write-Host "数据库状态 : $check"
-    $parsed = $check | ConvertFrom-Json
-    if ($parsed.exists -and $parsed.current -lt $parsed.target) {
-        Write-Host "提示       : 该数据库需要从 v$($parsed.current) 迁移到 v$($parsed.target)。" -ForegroundColor Yellow
-        Write-Host "             启动时会自动生成一致性备份；失败则停止启动并保留备份。"
-        Write-Host "             请确认这不是正式业务库；本任务不授权对正式库执行升级。"
+# 兼容性保护不可由 SkipMigrationCheck 绕过；旧参数仅保留调用兼容。
+$runtimeInfo = Get-LocalRuntimeInfo $projectRoot $resolvedDataDir
+Write-Host ("数据库状态 : 当前 v{0} / 代码要求 v{1}" -f $runtimeInfo.schema_version, $runtimeInfo.expected_schema_version)
+if (-not $runtimeInfo.structure_valid) { throw $runtimeInfo.schema_error }
+if ($runtimeInfo.database_exists -and $runtimeInfo.schema_version -lt $runtimeInfo.expected_schema_version) {
+    Write-Host '已有数据库需要增量升级；升级前会生成 SQLite 一致性备份。' -ForegroundColor Yellow
+    if (-not $AllowDatabaseUpgrade -and -not $DryRun) {
+        throw '未启动服务：请先核对数据目录和备份，再明确使用 -AllowDatabaseUpgrade。'
     }
 }
 
@@ -111,6 +88,26 @@ if ($DryRun) {
 }
 
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
+
+# 同一数据目录的启动串行化，且先核对全部角色，避免 Web 已启动才发现旧 worker。
+$mutexDigest = [System.Security.Cryptography.SHA256]::Create()
+$mutexHash = [BitConverter]::ToString($mutexDigest.ComputeHash([Text.Encoding]::UTF8.GetBytes($resolvedDataDir.ToLowerInvariant()))).Replace('-', '')
+$mutexDigest.Dispose()
+$startMutex = [System.Threading.Mutex]::new($false, "Local\DocQA-start-$mutexHash")
+$ownsMutex = $false
+$launchAttempted = $false
+try {
+    try { $ownsMutex = $startMutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $ownsMutex = $true }
+    if (-not $ownsMutex) { throw '同一数据目录已有启动操作，请等待其完成。' }
+    foreach ($roleName in @('web', 'parse-worker', 'analysis-worker')) {
+        $existingRecordPath = Join-Path $logDir "$roleName.json"
+        if (Test-Path -LiteralPath $existingRecordPath) {
+            $existingRecord = Get-Content -LiteralPath $existingRecordPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            foreach ($identity in @($existingRecord.processes) + @($existingRecord)) {
+                if (Test-RoleProcess $identity) { throw "角色 $roleName 仍在运行，请先停止本数据目录的三个角色后重启。" }
+            }
+        }
+    }
 
 # 启动一个隐藏窗口的后台进程，并记录归属信息（PID、启动时间、可执行路径、角色、端口、数据目录）。
 function Start-Role([string]$role, [string[]]$arguments, [int]$rolePort) {
@@ -122,6 +119,8 @@ function Start-Role([string]$role, [string[]]$arguments, [int]$rolePort) {
         }
     }
     $env:DOCQA_DATA_DIR = $resolvedDataDir
+    $env:DOCQA_EXPECTED_CODE_FINGERPRINT = $runtimeInfo.code_fingerprint
+    $env:DOCQA_ALLOW_DATABASE_UPGRADE = if ($AllowDatabaseUpgrade) { '1' } else { '0' }
     $stdout = Join-Path $logDir "$role.out.log"
     $stderr = Join-Path $logDir "$role.err.log"
     $process = Start-Process -FilePath $python -ArgumentList $arguments -WorkingDirectory $projectRoot `
@@ -141,25 +140,41 @@ function Start-Role([string]$role, [string[]]$arguments, [int]$rolePort) {
         stderr_log     = $stderr
         start_time     = if ($started) { $started.StartTime.ToUniversalTime().ToString("o") } else { $null }
         processes      = @(Get-RoleProcessTree $process.Id)
+        code_fingerprint = $runtimeInfo.code_fingerprint
+        expected_schema_version = $runtimeInfo.expected_schema_version
     }
     $recordPath = Join-Path $logDir "$role.json"
     $record | ConvertTo-Json -Depth 4 | Set-Content -Path $recordPath -Encoding UTF8
     if (-not $started) {
-        Write-Error "角色 $role 启动后立即退出；请查看 $stderr"
-        return $null
+        throw "角色 $role 启动后立即退出；请查看 $stderr"
     }
+    $roleReady = $false
+    for ($readyAttempt = 0; $readyAttempt -lt 30; $readyAttempt++) {
+        $currentRuntime = Get-LocalRuntimeInfo $projectRoot $resolvedDataDir
+        $readiness = Get-RoleReadiness $record $currentRuntime
+        if ($readiness.ready) { $roleReady = $true; break }
+        if (-not (Get-Process -Id $process.Id -ErrorAction SilentlyContinue)) { break }
+        Start-Sleep -Milliseconds 200
+    }
+    if (-not $roleReady) { throw "角色 $role 未就绪或代码/数据库不一致，请查看 $stderr" }
     Write-Host ("已启动 {0,-16} PID {1,-7} 日志 {2}" -f $role, $process.Id, $stdout) -ForegroundColor Green
     return $process
 }
 
 # 启动顺序：Web 先启动（迁移由 Web 完成），再启动两个 worker。
+$launchAttempted = $true
 Start-Role "web" @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "$Port") $Port | Out-Null
 # 不能靠固定 600ms 假定迁移成功；Web 就绪后才启动会读取任务的 worker。
 $ready = $false
 for ($attempt = 0; $attempt -lt 30; $attempt++) {
     try {
-        $response = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/documents" -TimeoutSec 1 -UseBasicParsing
-        if ($response.StatusCode -eq 200) { $ready = $true; break }
+        $response = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 1 -UseBasicParsing
+        # Windows PowerShell 5.1 对无 charset 的 JSON 可能按 ANSI 解码；
+        # FastAPI 的 JSON 为 UTF-8，必须直接解码响应字节，避免中文目录误判不匹配。
+        $health = [System.Text.Encoding]::UTF8.GetString($response.RawContentStream.ToArray()) | ConvertFrom-Json
+        if ($response.StatusCode -eq 200 -and $health.runtime.data_dir -eq $resolvedDataDir -and
+            $health.runtime.code_fingerprint -eq $runtimeInfo.code_fingerprint -and
+            $health.runtime.schema_version -eq $runtimeInfo.expected_schema_version) { $ready = $true; break }
     } catch { Start-Sleep -Milliseconds 300 }
 }
 if (-not $ready) { throw "Web 未成功就绪；停止启动后续 worker，请查看迁移或启动日志。" }
@@ -170,12 +185,23 @@ if (-not $NoAnalysisWorker) {
     Start-Role "analysis-worker" @("-m", "app.analysis_worker") 0 | Out-Null
 }
 
+} catch {
+    if ($launchAttempted) {
+        # 预检时不存在存活的自身角色；失败只回收本轮已登记的进程，保留日志。
+        & (Join-Path $PSScriptRoot 'stop_local.ps1') -DataDir $resolvedDataDir -KeepRecords
+    }
+    throw
+} finally {
+    if ($ownsMutex) { $startMutex.ReleaseMutex() }
+    $startMutex.Dispose()
+}
+
 Write-Host ""
 Write-Host "工作台地址 : http://127.0.0.1:$Port" -ForegroundColor Cyan
 Write-Host "接口文档   : http://127.0.0.1:$Port/docs"
 Write-Host "进程记录   : $logDir\*.json"
-Write-Host "查看状态   : pwsh -File scripts\status_local.ps1 -DataDir $DataDir"
-Write-Host "停止       : pwsh -File scripts\stop_local.ps1 -DataDir $DataDir"
+Write-Host "查看状态   : pwsh -File scripts\status_local.ps1 -DataDir `"$resolvedDataDir`""
+Write-Host "停止       : pwsh -File scripts\stop_local.ps1 -DataDir `"$resolvedDataDir`""
 Write-Host ""
 Write-Host "注意：解析与摘要／提取任务分别由两个 worker 执行；未启动对应 worker 时任务只会停在 queued。"
 Write-Host "      Docling 解析服务是独立 Docker 服务，本脚本不启动、不拉镜像、不下载模型。"

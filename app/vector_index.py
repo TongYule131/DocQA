@@ -182,8 +182,7 @@ class DocumentIndex:
 
         current = self.index_info(document_id)
         if (not rebuild and current["status"] == "indexed"
-                and current["parse_version_id"] == target_version
-                and current["matches_active_version"]):
+                and current["parse_version_id"] == target_version):
             # 同一版本同一模型已建立：直接复用，不重复调用收费接口。
             return self.status(document_id)
 
@@ -206,7 +205,7 @@ class DocumentIndex:
                     if not self.repository.renew_index_lease(index_id):
                         return
                 except Exception:
-                    logger.exception("候选索引续租失败，发布前将重新校验")
+                    logger.error("候选索引续租失败，发布前将重新校验")
                     return
 
         thread = Thread(target=heartbeat, daemon=True)
@@ -225,7 +224,8 @@ class DocumentIndex:
                 vectors=[(chunk.id, json.dumps(vector), dimension)
                          for chunk, vector in zip(chunks, vectors)],
                 chunking_algo=chunks[0].chunk_type or "structured",
-                expected_version_id=target_version)
+                # 显式历史版本与开始时的预览版本可以不同；只拒绝构建期间的切换。
+                expected_version_id=document.active_parse_version_id)
             if not published:
                 raise EmbeddingError(
                     409, "构建期间该文档的活动解析版本已变化，本次索引构建已过期；"
@@ -237,7 +237,8 @@ class DocumentIndex:
                                               document_id=document_id)
             if isinstance(exc, EmbeddingError):
                 raise
-            logger.exception("索引构建失败：文档 %s", document_id)
+            # 上游异常原文可能包含凭证或文档内容，不将异常链写入日志。
+            logger.error("索引构建失败：文档 %s，异常类型 %s", document_id, type(exc).__name__)
             raise EmbeddingError(500, message) from None
         finally:
             done.set()

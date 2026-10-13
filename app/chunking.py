@@ -22,7 +22,7 @@ from app.schemas import Block, Chunk, SourceLocation
 logger = logging.getLogger(__name__)
 
 # 分块算法标识：写入索引记录，便于判断旧索引由哪种规则生成。
-CHUNKING_ALGO = "structured-heading-table-v2"
+CHUNKING_ALGO = "structured-heading-table-v3"
 
 # 分块类型：正文 / 表格行组 / 目录 / 公式占位 / 单行超长续切。
 CHUNK_TYPE_TEXT = "text"
@@ -39,8 +39,8 @@ _SENTENCE_END = re.compile(r"(?<=[。！？；!?;])|(?<=[.])(?=\s|$)")
 # 安全文本边界：换行、制表符与中英文标点，用于避免在词中间切断。
 _SAFE_BREAK = re.compile(r"[\n\t ，、；：,;:）)】」”]")
 
-# 表头行识别：首行或标记为 column_header 的行。
-_MAX_HEADER_ROWS = 4
+# 在展开网格之前限制总位置数，损坏跨度不能使 worker 分配无界矩阵。
+_MAX_TABLE_GRID_POSITIONS = 1_000_000
 
 
 @dataclass
@@ -104,28 +104,37 @@ def _table_rows(block: Block) -> tuple[list[list[str]], list[int]]:
     table = block.table or {}
     cells = table.get("cells") or []
     if cells:
-        by_row: dict[int, list[tuple[int, str]]] = {}
+        anchors = []
+        rows = cols = 0
         for cell in cells:
-            row = cell.get("row")
-            if not isinstance(row, int):
-                continue
+            if not isinstance(cell, dict):
+                raise ValueError("表格单元格结构无效，不能可靠建立检索分块")
+            row, col = cell.get("row"), cell.get("col")
+            height, width = cell.get("row_span", 1), cell.get("col_span", 1)
+            if (type(row) is not int or type(col) is not int or row < 0 or col < 0
+                    or type(height) is not int or type(width) is not int or height < 1 or width < 1):
+                raise ValueError("表格行列坐标或合并跨度无效，不能可靠建立检索分块")
             text = (cell.get("text") or "").strip()
-            col = cell.get("col") if isinstance(cell.get("col"), int) else 0
-            by_row.setdefault(row, []).append((col, text))
-        rows: list[list[str]] = []
-        numbers: list[int] = []
-        for row_index in sorted(by_row):
-            entries = sorted(by_row[row_index])
-            values: list[str] = []
-            for _col, text in entries:
-                if values and text and values[-1] == text:
-                    # 合并单元格的重复文本：标记为占位，不再重复输出内容。
-                    values.append("↳")
-                    continue
-                values.append(text)
-            rows.append(values)
-            numbers.append(row_index)
-        return rows, numbers
+            anchors.append((row, col, height, width, text))
+            rows, cols = max(rows, row + height), max(cols, col + width)
+        for name, inferred in (("num_rows", rows), ("num_cols", cols)):
+            declared = table.get(name)
+            if declared is not None and (type(declared) is not int or declared < inferred):
+                raise ValueError("表格声明尺寸与单元格位置不一致，不能可靠建立检索分块")
+        rows, cols = table.get("num_rows") or rows, table.get("num_cols") or cols
+        if rows * cols > _MAX_TABLE_GRID_POSITIONS:
+            raise ValueError("表格网格超过检索分块容量，请拆分文档后重新解析")
+        grid = [[""] * cols for _ in range(rows)]
+        occupied = set()
+        for row, col, height, width, text in anchors:
+            for target_row in range(row, row + height):
+                for target_col in range(col, col + width):
+                    location = (target_row, target_col)
+                    if location in occupied:
+                        raise ValueError("表格单元格位置重叠，不能可靠建立检索分块")
+                    occupied.add(location)
+                    grid[target_row][target_col] = text if location == (row, col) else "↳"
+        return grid, list(range(rows))
     # 没有单元格结构时退回按行拆分表格文本。
     lines = [line for line in (block.text or "").splitlines() if line.strip()]
     return [[line] for line in lines], list(range(len(lines)))
@@ -137,13 +146,15 @@ def _header_rows(block: Block, rows: list[list[str]]) -> int:
     cells = table.get("cells") or []
     if not cells:
         return 1 if rows else 0
-    header_row_indices = {
-        cell.get("row") for cell in cells
-        if cell.get("column_header") and isinstance(cell.get("row"), int)
-    }
+    header_row_indices = {row for cell in cells if cell.get("column_header")
+                          for row in range(cell["row"], cell["row"] + cell.get("row_span", 1))}
     if not header_row_indices:
         return 1 if rows else 0
-    return min(max(header_row_indices) + 1, _MAX_HEADER_ROWS, len(rows))
+    # 仅取连续的开头表头；中途重复的表头不能把前面的数据也变成表头。
+    count = 0
+    while count in header_row_indices and count < len(rows):
+        count += 1
+    return count
 
 
 def _table_context(block: Block) -> str:

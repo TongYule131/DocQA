@@ -58,10 +58,14 @@ class DeepSeekModel:
         try:
             choice = response.choices[0]
             content = choice.message.content
-            complete = choice.finish_reason == "stop"
+            finish_reason = choice.finish_reason
+            complete = finish_reason == "stop"
         except (AttributeError, IndexError, TypeError):
             raise ModelError(502, "DeepSeek 响应结构不完整") from None
         if not complete:
+            if finish_reason == "length":
+                raise ModelError(502, "DeepSeek 未返回完整答案：输出额度已耗尽；"
+                                 "请调高 DEEPSEEK_MAX_TOKENS（思考与正文共用额度）后明确重试")
             raise ModelError(502, "DeepSeek 未返回完整答案，请检查输出长度限制或重试")
         if not isinstance(content, str) or not content.strip():
             raise ModelError(502, "DeepSeek 未返回有效答案正文")

@@ -12,6 +12,8 @@ from dotenv import dotenv_values
 class Settings:
     # 创建配置实例时读取环境变量；冻结实例，避免运行中被意外修改。
     data_dir: Path = field(default_factory=lambda: Path(os.getenv("DOCQA_DATA_DIR", "data")).resolve())
+    # 已有旧库升级必须明确允许；首次空目录建库不需要这个开关。
+    allow_database_upgrade: bool = False
     # 单位为 MB，上传接口校验时转换为字节数。
     max_upload_mb: int = field(default_factory=lambda: int(os.getenv("DOCQA_MAX_UPLOAD_MB", "20")))
     # Docling 解析服务地址只来自后端配置，前端不能覆盖；默认本机独立服务。
@@ -52,8 +54,9 @@ class Settings:
     deepseek_model: str = "deepseek-flash"
     deepseek_thinking: str = "enabled"
     deepseek_reasoning_effort: str = "high"
-    deepseek_timeout_seconds: float = 120
-    deepseek_max_tokens: int = 8192
+    # 思考与最终正文共用输出额度；8192 在实际长文提取中会在正文开始前耗尽。
+    deepseek_timeout_seconds: float = 300
+    deepseek_max_tokens: int = 65536
     # Embedding 网关使用独立密钥，绝不自动复用 DeepSeek 的密钥。
     embedding_api_key: str = field(default="", repr=False)
     embedding_base_url: str = "https://tokendance.space/gateway/v1"
@@ -105,6 +108,7 @@ class Settings:
             return (values.get(name) or default).strip()
         return cls(
             data_dir=Path(value("DOCQA_DATA_DIR", "data")).resolve(),
+            allow_database_upgrade=value("DOCQA_ALLOW_DATABASE_UPGRADE", "0") == "1",
             max_upload_mb=int(value("DOCQA_MAX_UPLOAD_MB", "20")),
             docling_base_url=value("DOCQA_DOCLING_BASE_URL", "http://127.0.0.1:5001"),
             docling_connect_timeout_seconds=float(value("DOCQA_DOCLING_CONNECT_TIMEOUT_SECONDS", "10")),
@@ -128,8 +132,8 @@ class Settings:
             deepseek_model=value("DEEPSEEK_MODEL", "deepseek-flash"),
             deepseek_thinking=value("DEEPSEEK_THINKING", "enabled"),
             deepseek_reasoning_effort=value("DEEPSEEK_REASONING_EFFORT", "high"),
-            deepseek_timeout_seconds=float(value("DEEPSEEK_TIMEOUT_SECONDS", "120")),
-            deepseek_max_tokens=int(value("DEEPSEEK_MAX_TOKENS", "8192")),
+            deepseek_timeout_seconds=float(value("DEEPSEEK_TIMEOUT_SECONDS", "300")),
+            deepseek_max_tokens=int(value("DEEPSEEK_MAX_TOKENS", "65536")),
             embedding_api_key=value("EMBEDDING_API_KEY", ""),
             embedding_base_url=value("EMBEDDING_BASE_URL", "https://tokendance.space/gateway/v1"),
             embedding_model=value("EMBEDDING_MODEL", "qwen3.7-text-embedding"),

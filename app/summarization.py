@@ -213,7 +213,6 @@ def resolve_direct_points(points: list[ValidatedSummaryPoint], *,
 __all__ = [
     "PROMPT_VERSION",
     "PROTOCOL_VERSION",
-    "QUOTE_PREVIEW_CHARS",
     "SummaryBatchRequest",
     "SummaryReduceRequest",
     "build_batch_request",

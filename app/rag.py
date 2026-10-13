@@ -43,6 +43,7 @@ from app.rag_validation import (
     ValidatedOutput,
     render_markdown,
     validate_model_output,
+    validate_user_condition_boundary,
 )
 from app.repository import Repository
 from app.schemas import (
@@ -189,6 +190,7 @@ class RagService:
 
         try:
             validated = validate_model_output(raw, pack)
+            validate_user_condition_boundary(validated, pack, question=question)
         except ModelOutputError as exc:
             # 只记录非敏感原因码：不带原文、完整输出与凭证。
             logger.warning("RAG 输出校验失败：reason=%s", exc.reason)

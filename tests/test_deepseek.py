@@ -36,7 +36,7 @@ def test_request_contract_and_connection_endpoint(monkeypatch, tmp_path):
         assert payload['thinking'] == {'type': 'enabled'}
         assert payload['reasoning_effort'] == 'high'
         assert payload['stream'] is False
-        assert payload['max_tokens'] == 8192
+        assert payload['max_tokens'] == 65536
         assert payload['messages'][1]['content'] == '请回复：连接成功'
         return httpx.Response(200, json=completion())
     mock_api(monkeypatch, handler)
@@ -119,6 +119,19 @@ def test_env_loading_precedence_and_secret_repr(monkeypatch, tmp_path):
     assert settings.deepseek_model == 'environment-model'
     assert settings.deepseek_api_key == 'file-secret'
     assert 'file-secret' not in repr(settings)
+
+
+def test_length_failure_has_actionable_error_and_no_retry(monkeypatch):
+    requests = []
+    def handler(request):
+        requests.append(request)
+        assert json.loads(request.content)['max_tokens'] == 8192
+        return httpx.Response(200, json=completion('', 'length'))
+    mock_api(monkeypatch, handler)
+    with pytest.raises(ModelError, match='DEEPSEEK_MAX_TOKENS') as error:
+        DeepSeekModel(Settings(deepseek_api_key='test-secret', deepseek_max_tokens=8192)).generate('system', 'user')
+    assert error.value.status_code == 502
+    assert len(requests) == 1
 
 
 @pytest.mark.parametrize('kwargs', [

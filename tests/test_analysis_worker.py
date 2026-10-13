@@ -164,7 +164,7 @@ def test_worker_reuses_validated_checkpoints_after_restart(tmp_path):
     “规划上界 + 1 次失败重试”，以便同时验证检查点复用与预算不重置两条约束。
     """
     settings = fixture_settings(tmp_path, deepseek_api_key="test-secret",
-                                analysis_batch_max_chars=420,
+                                analysis_batch_max_chars=900,
                                 analysis_max_requests=12)
     repository = Repository(tmp_path / "docqa.db")
     document_id, _ = seed_document(repository)
@@ -355,7 +355,7 @@ def test_cross_batch_reference_is_rejected(tmp_path):
 def test_summary_multi_batch_reduce_keeps_original_references(tmp_path, switch_during_reduce):
     """A16/A17：多批摘要必须执行汇总，最终引用回到原文，中间摘要不被当成原文。"""
     settings = fixture_settings(tmp_path, deepseek_api_key="test-secret",
-                                analysis_batch_max_chars=420,
+                                analysis_batch_max_chars=900,
                                 analysis_max_requests=12)
     repository = Repository(tmp_path / "docqa.db")
     document_id, _ = seed_document(repository)
@@ -369,10 +369,12 @@ def test_summary_multi_batch_reduce_keeps_original_references(tmp_path, switch_d
     exception_ids = []
     for index, batch in enumerate(outcome.plan.batches):
         text = batch[0].text
-        replies.append(summary_reply(f"第 {index + 1} 批概述",
-                                     [{"text": "批次要点", "refs": [1]}],
-                                     [{"text": "批次例外", "refs": [1]}],
-                                     {"1": text}))
+        reply = json.loads(summary_reply(f"第 {index + 1} 批概述",
+                                         [{"text": "批次要点", "refs": [1]}],
+                                         [{"text": "批次例外", "refs": [1]}],
+                                         {"1": text}))
+        reply["limitations"] = ["本批次未包含其它章节的具体内容。"]
+        replies.append(json.dumps(reply, ensure_ascii=False))
         # item_id 由服务端按“批次 ID + 分区 + 序号”生成：p 是要点，e 是例外。
         point_ids.append(f"b{index + 1}-p1")
         exception_ids.append(f"b{index + 1}-e1")
@@ -407,6 +409,10 @@ def test_summary_multi_batch_reduce_keeps_original_references(tmp_path, switch_d
     assert result.summary.topic_overview == "整份文档概述"
     assert len(result.summary.main_points) == 2
     assert result.summary.exceptions
+    assert result.summary.limitations == [
+        f"第{index + 1}/{len(outcome.plan.batches)}批局部限制：本批次未包含其它章节的具体内容。"
+        for index in range(len(outcome.plan.batches))
+    ] + list(outcome.plan.limitations)
     # 最终引用必须是原文连续子串，并且能定位到对应解析版本的块。
     for citation in result.summary.citations:
         assert citation.block_id.startswith(result.parse_version_id)
@@ -423,7 +429,7 @@ def test_summary_multi_batch_reduce_keeps_original_references(tmp_path, switch_d
 def test_reduce_with_unknown_item_reference_is_rejected(tmp_path):
     """A17：汇总阶段引用未知中间条目时受控失败，不发布“完整摘要”。"""
     settings = fixture_settings(tmp_path, deepseek_api_key="test-secret",
-                                analysis_batch_max_chars=420,
+                                analysis_batch_max_chars=900,
                                 analysis_max_requests=12)
     repository = Repository(tmp_path / "docqa.db")
     document_id, _ = seed_document(repository)
@@ -711,7 +717,7 @@ def test_export_rejects_unknown_result(tmp_path):
 def test_failed_multi_batch_summary_reports_incomplete_coverage(tmp_path):
     """A16：漏批或失败时覆盖不完整，不得发布“完整全文摘要”。"""
     settings = fixture_settings(tmp_path, deepseek_api_key="test-secret",
-                                analysis_batch_max_chars=420,
+                                analysis_batch_max_chars=900,
                                 analysis_max_requests=12)
     repository = Repository(tmp_path / "docqa.db")
     document_id, _ = seed_document(repository)

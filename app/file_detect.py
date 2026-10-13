@@ -89,6 +89,8 @@ def _inspect_office_package(data: bytes) -> str:
             if total > MAX_ZIP_UNCOMPRESSED_BYTES:
                 raise UploadFormatError(
                     422, f"Office 文件解压后体积过大（超过 {MAX_ZIP_UNCOMPRESSED_BYTES // (1024 * 1024)} MB），已拒绝处理")
+            if any(info.flag_bits & (1 | 64) for info in infos):
+                raise UploadFormatError(422, "暂不支持加密 Office 文件，请先解密后上传")
             names = {info.filename for info in infos}
             if "[Content_Types].xml" not in names:
                 raise UploadFormatError(422, "文件是 ZIP 但不含 [Content_Types].xml，不是有效的 DOCX/XLSX")
@@ -97,7 +99,7 @@ def _inspect_office_package(data: bytes) -> str:
                 content_types = archive.read("[Content_Types].xml")
             except (KeyError, zipfile.BadZipFile) as exc:
                 raise UploadFormatError(422, "无法读取 Office 文件的内容类型清单") from exc
-    except zipfile.BadZipFile as exc:
+    except (zipfile.BadZipFile, RuntimeError, NotImplementedError, EOFError) as exc:
         raise UploadFormatError(422, "Office 文件已损坏或不是有效的 ZIP 包") from exc
     for fmt, marker in _PACKAGE_MARKERS.items():
         if marker in content_types:

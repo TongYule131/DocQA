@@ -45,7 +45,9 @@ class ExtractionBatchRequest:
 
 
 def build_batch_request(*, units: list[InputUnit], document_name: str, version_id: str,
-                        batch_index: int, batch_total: int) -> ExtractionBatchRequest:
+                        batch_index: int, batch_total: int,
+                        extraction_options: dict | None = None,
+                        max_items: int = 15) -> ExtractionBatchRequest:
     """构造一批提取请求。
 
     编号在**本批内**从 1 重新分配：单元对象在规划阶段已经写好 batch_local_id，
@@ -59,7 +61,8 @@ def build_batch_request(*, units: list[InputUnit], document_name: str, version_i
         user_prompt=build_batch_user_prompt(
             kind="extraction", document_name=document_name, version_id=version_id,
             units=[unit.payload() for unit in units], batch_index=batch_index,
-            batch_total=batch_total),
+            batch_total=batch_total, extraction_options=extraction_options,
+            max_items=max_items),
         units=units, batch_index=batch_index)
 
 
@@ -99,11 +102,13 @@ def section_statuses(items: list[ValidatedItem], batches: list[ValidatedExtracti
 
 
 def collect_limitations(batches: list[ValidatedExtraction]) -> list[str]:
-    """汇总各批次的限制说明，按首次出现顺序去重。"""
+    """保留批次范围，避免其它批未见某指标被误解为全文未确认。"""
     seen: set[str] = set()
     result: list[str] = []
-    for batch in batches:
-        for text in batch.limitations:
+    for index, batch in enumerate(batches):
+        for original in batch.limitations:
+            text = (f"第{index + 1}/{len(batches)}批局部限制：{original}"
+                    if len(batches) > 1 else original)
             if text not in seen:
                 seen.add(text)
                 result.append(text)

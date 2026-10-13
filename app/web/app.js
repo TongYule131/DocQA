@@ -20,7 +20,7 @@ const stageLabels = {
   fetching_result: '领取解析结果', normalizing: '规范化结构', chunking: '结构化分块',
   publishing: '写入解析版本', done: '已完成',
 };
-const qualityLabels = { ok: '质量正常', warnings: '有质量告警', invalid: '结构无效，未发布' };
+const qualityLabels = { ok: '质量正常', warnings: '有质量限制或告警', invalid: '结构无效，未发布' };
 const indexLabels = {
   pending: '未建立索引', indexing: '正在建立索引', indexed: '索引可用',
   failed: '索引失败', stale: '模型或原文已变更，请重建索引',
@@ -52,6 +52,12 @@ let answerPayload = null;      // 最近一次问答结果（仅存于内存，�
 let askRequestCount = 0;
 const askRequests = [];
 
+// 服务状态单独查询：不经过生成、解析或外部模型连接测试入口。
+let runtimePollTimer = null;
+let runtimeQuery = null;
+let runtimePollFailures = 0;
+let runtimeCheckedAt = null;
+
 // ---------------------------------------------------------------------------
 // 分析任务（摘要 / 信息提取）页面状态
 //
@@ -68,8 +74,10 @@ let analysisPollDelay = 2500;
 let analysisPollFailures = 0;
 let analysisResults = [];          // 结果历史（不含正文）。
 let activeResultId = null;         // 当前展示的结果。
+let activeResultPayload = null;    // 当前已读取的可信结果，历史列表刷新后继续展示。
 let lastResultKind = null;         // 最近一次结果类型，供“重新生成”使用。
 let analysisRequestCount = 0;      // 页面发起的生成提交次数（用于断言不重复提交）。
+let extractionSettingsRevision = 0; // 丢弃设置变更前的迟到规划响应。
 
 async function api(path, options = {}) {
   // 统一 API 前缀与错误转换，让操作入口只处理成功数据或错误提示。
@@ -105,6 +113,7 @@ function controls() {
   for (const id of ['summary', 'extract', 'analysis-plan']) {
     $(id).disabled = busy || !hasVersion || !analysisConfigured;
   }
+  for (const id of ['extraction-metrics', 'extraction-highlights']) $(id).disabled = busy;
   $('analysis-stop').disabled = busy || !analysisActive;
   $('analysis-retry').hidden = !(analysisJobState
     && ['failed', 'needs_attention'].includes(analysisJobState.status));
@@ -172,6 +181,8 @@ function stopPolling() {
 
 async function select(id, preserveAnswer = false) {
   // 切换文档：先停止旧轮询并清空旧结果，再加载该文档的版本与内容。
+  // 同一文档的普通刷新保留正在核对的结果；真正切文档必须同时隔离结果和类型。
+  const preservedResult = preserveAnswer && selectedId === id ? activeResultPayload : null;
   stopPolling();
   stopAnalysisPolling();
   selectedId = id;
@@ -187,7 +198,9 @@ async function select(id, preserveAnswer = false) {
   analysisJobId = null;
   analysisJobState = null;
   analysisResults = [];
-  activeResultId = null;
+  activeResultPayload = preservedResult;
+  activeResultId = preservedResult ? preservedResult.id : null;
+  lastResultKind = preservedResult ? preservedResult.kind : null;
   analysisPollFailures = 0;
   analysisPollDelay = 2500;
   const token = ++requestSeq;
@@ -268,10 +281,14 @@ async function loadContent(documentId, versionId, token = requestSeq, offset = 0
   if (token !== undefined && token !== requestSeq) return;
   activeVersionId = data.version.id;
   renderVersion(data);
-  renderBlocks(data.blocks);
-  renderWarnings(data.version.warnings);
+  if (data.content_mode === 'legacy_chunks') {
+    renderLegacyChunks(data.legacy_chunks || []);
+  } else {
+    renderBlocks(data.blocks);
+  }
+  renderWarnings(data.version.warnings, data.version);
   $('content-summary').textContent =
-    `版本 ${data.version.id} · ${data.version.block_count} 个结构块（已显示 ${offset + data.returned}）`
+    `版本 ${data.version.id} · ${data.total} 个${data.content_mode === 'legacy_chunks' ? '旧分块' : '结构块'}（已显示 ${offset + data.returned}）`
     + ` · 解析器 ${data.version.parser_name}`
     + (data.version.is_legacy ? ' · 旧库迁移版本（未重新解析）' : '');
   if (offset + data.returned < data.total && data.returned > 0) {
@@ -322,6 +339,28 @@ function renderBlocks(blocks) {
   }
 }
 
+function renderLegacyChunks(chunks) {
+  // 旧逻辑页不冒充 PDF 物理页，也不补造结构化来源或放宽摘要/提取前置要求。
+  if (!chunks.length) {
+    $('chunks').textContent = '该旧版本没有可显示的分块，请查看原件。';
+    return;
+  }
+  const note = document.createElement('p');
+  note.className = 'muted';
+  note.textContent = '旧版本仅保留原始分块，缺少可靠结构化来源；如需摘要或信息提取，请明确重新解析。';
+  $('chunks').append(note);
+  for (const chunk of chunks) {
+    const article = document.createElement('article');
+    article.className = 'chunk';
+    const label = document.createElement('small');
+    label.textContent = `旧分块 ${chunk.id}` + (chunk.page ? ` · 旧逻辑页 ${chunk.page}` : '');
+    const body = document.createElement('p');
+    body.textContent = chunk.text;
+    article.append(label, body);
+    $('chunks').append(article);
+  }
+}
+
 function blockTypeLabel(type) {
   const labels = {
     title: '标题', section_header: '章节标题', paragraph: '正文', list_item: '列表项',
@@ -357,26 +396,34 @@ function renderTable(table) {
   const rows = table.num_rows || 0;
   const cols = table.num_cols || 0;
   const cells = table.cells || [];
-  const byRow = new Map();
+  const grid = new Map();
   for (const cell of cells) {
-    if (typeof cell.row !== 'number') continue;
-    if (!byRow.has(cell.row)) byRow.set(cell.row, []);
-    byRow.get(cell.row).push(cell);
+    if (!Number.isInteger(cell.row) || !Number.isInteger(cell.col)) continue;
+    const height = cell.row_span || 1;
+    const width = cell.col_span || 1;
+    for (let r = cell.row; r < Math.min(rows, cell.row + height); r += 1) {
+      for (let c = cell.col; c < Math.min(cols, cell.col + width); c += 1) {
+        grid.set(`${r}:${c}`, r === cell.row && c === cell.col ? cell : null);
+      }
+    }
   }
   for (let rowIndex = 0; rowIndex < rows; rowIndex += 1) {
     const tr = document.createElement('tr');
-    const rowCells = (byRow.get(rowIndex) || []).slice().sort((a, b) => a.col - b.col);
-    for (const cell of rowCells) {
+    for (let colIndex = 0; colIndex < cols; colIndex += 1) {
+      const key = `${rowIndex}:${colIndex}`;
+      const cell = grid.get(key);
+      if (grid.has(key) && cell === null) continue; // 真正的合并占位，不额外生成单元格。
+      if (!cell) {
+        const empty = document.createElement('td');
+        empty.textContent = '（空）';
+        tr.append(empty);
+        continue;
+      }
       const td = document.createElement(cell.column_header ? 'th' : 'td');
       if (cell.col_span > 1) td.colSpan = cell.col_span;
       if (cell.row_span > 1) td.rowSpan = cell.row_span;
       td.textContent = cell.text === '' ? '（空）' : cell.text;
       if (cell.cell) td.title = `单元格 ${cell.cell}`;
-      tr.append(td);
-    }
-    if (cols && rowCells.length === 0) {
-      const td = document.createElement('td');
-      td.colSpan = cols; td.textContent = '（空行）';
       tr.append(td);
     }
     element.append(tr);
@@ -404,13 +451,17 @@ function renderFormulas(formulas) {
   return list;
 }
 
-function renderWarnings(warnings) {
-  // 质量告警按严重程度展示；没有告警时明确说明，不假装内容已验证。
+function renderWarnings(warnings, version = null) {
+  // legacy 可能只有版本级限制，没有独立告警条目，不能据此宣称没有质量问题。
   $('quality-panel').replaceChildren();
   if (!warnings || !warnings.length) {
     const note = document.createElement('p');
     note.className = 'muted';
-    note.textContent = '当前版本没有质量告警；这不表示内容已与原件逐字核对。';
+    const limited = version && (version.is_legacy
+      || ['warnings', 'invalid'].includes(version.quality_status));
+    note.textContent = limited
+      ? '该版本存在质量限制；未记录独立告警条目。请结合上方版本说明及原件核对。'
+      : '未记录独立质量告警条目；这不表示内容已与原件逐字核对。';
     $('quality-panel').append(note);
     return;
   }
@@ -428,6 +479,109 @@ function renderWarnings(warnings) {
     $('quality-panel').append(item);
   }
 }
+
+const runtimeRoleLabels = { web: '网页服务', 'parse-worker': '解析 worker', 'analysis-worker': '分析 worker' };
+
+function runtimeRoleReady(role) {
+  // 缺字段必须保留“未知”，不能把进程存活或已配置推断为兼容且就绪。
+  return role && ['running', 'ready', 'code_match', 'schema_match', 'data_dir_match']
+    .every((key) => role[key] === true);
+}
+
+function renderRuntimeStatus(status) {
+  const roles = [status && status.web, ...['parse-worker', 'analysis-worker'].map((name) =>
+    status && Array.isArray(status.workers) ? status.workers.find((role) => role && role.role === name) : null)];
+  const allReady = roles.every(runtimeRoleReady);
+  const summary = $('runtime-summary');
+  summary.textContent = status ? (allReady
+    ? '网页、解析 worker 与分析 worker 均已就绪，代码、数据目录和数据库结构匹配。'
+    : '部分本地角色尚未确认就绪，请查看各角色状态；需要时整体重启本地服务。')
+    : '尚未取得当前服务状态，无法确认各角色是否就绪。';
+  summary.dataset.kind = status ? (allReady ? 'ok' : 'error') : 'unknown';
+  const schemaVersion = status && Number.isInteger(status.schema_version) ? status.schema_version : '未知';
+  const expectedVersion = status && Number.isInteger(status.expected_schema_version) ? status.expected_schema_version : '未知';
+  $('runtime-schema').textContent = `数据库结构版本：实际 ${schemaVersion} · 代码要求 ${expectedVersion}`;
+  const container = $('runtime-roles');
+  container.replaceChildren();
+  for (const [index, name] of Object.keys(runtimeRoleLabels).entries()) {
+    const role = roles[index];
+    const card = document.createElement('article');
+    card.className = 'runtime-role';
+    card.dataset.role = name;
+    const title = document.createElement('h3');
+    title.textContent = runtimeRoleLabels[name];
+    const state = document.createElement('p');
+    state.className = 'runtime-state';
+    state.textContent = runtimeRoleReady(role) ? '已就绪' : role && role.running === false ? '未运行'
+      : role && role.running === true ? '运行中，尚未确认就绪' : '状态未知';
+    state.dataset.kind = runtimeRoleReady(role) ? 'ok' : role ? 'error' : 'unknown';
+    const facts = document.createElement('dl');
+    for (const [field, label, yes, no] of [
+      ['running', '进程', '运行中', '未运行'], ['ready', '就绪记录', '已就绪', '未就绪'],
+      ['code_match', '代码', '匹配', '不匹配'], ['schema_match', '数据库结构', '匹配', '不匹配'],
+      ['data_dir_match', '数据目录', '匹配', '不匹配'],
+    ]) {
+      const term = document.createElement('dt');
+      term.textContent = label;
+      const value = document.createElement('dd');
+      const actual = role && role[field];
+      value.textContent = actual === true ? yes : actual === false ? no : '未知';
+      value.dataset.kind = actual === true ? 'ok' : actual === false ? 'error' : 'unknown';
+      facts.append(term, value);
+    }
+    // 仅展示协议中的布尔结论；不复制原始路径、指纹或后端异常到页面。
+    card.append(title, state, facts);
+    container.append(card);
+  }
+}
+
+function stopRuntimePolling() {
+  if (runtimePollTimer !== null) clearTimeout(runtimePollTimer);
+  runtimePollTimer = null;
+}
+
+function scheduleRuntimePoll() {
+  stopRuntimePolling();
+  if (document.hidden) return;
+  runtimePollTimer = setTimeout(() => {
+    runtimePollTimer = null;
+    refreshRuntimeStatus();
+  }, Math.min(60000, 15000 * (2 ** runtimePollFailures)));
+}
+
+async function refreshRuntimeStatus() {
+  // 自动查询与手动刷新复用在途 GET，避免累积请求；失败后不保留旧“就绪”结论。
+  if (runtimeQuery) return runtimeQuery;
+  stopRuntimePolling();
+  $('refresh-runtime').disabled = true;
+  const controller = new AbortController();
+  // 本地连接挂起也必须及时撤下旧就绪结论，随后允许重新查询。
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  runtimeQuery = (async () => {
+    try {
+      const status = await api('/runtime/status', { cache: 'no-store', signal: controller.signal });
+      renderRuntimeStatus(status);
+      runtimePollFailures = 0;
+      runtimeCheckedAt = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+      $('runtime-checked').textContent = `最近检查：${runtimeCheckedAt}`;
+    } catch (_) {
+      runtimePollFailures += 1;
+      renderRuntimeStatus(null);
+      $('runtime-summary').textContent = '无法读取当前服务状态；请检查本地服务，页面将间隔重试。';
+      $('runtime-summary').dataset.kind = 'error';
+      $('runtime-checked').textContent = runtimeCheckedAt
+        ? `上次成功检查：${runtimeCheckedAt}（已过期，当前状态未知）` : '尚无成功检查记录。';
+    } finally {
+      clearTimeout(timeout);
+      runtimeQuery = null;
+      $('refresh-runtime').disabled = false;
+      scheduleRuntimePoll();
+    }
+  })();
+  return runtimeQuery;
+}
+
+$('refresh-runtime').onclick = () => refreshRuntimeStatus();
 
 async function refresh() {
   // 重新获取服务端状态；当前选择仍有效时，同时刷新详情。
@@ -499,6 +653,67 @@ function scheduleAnalysisPoll(delay) {
 }
 
 const pendingAnalysisKeys = new Map();
+function extractionOptions() {
+  const lines = $('extraction-metrics').value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length > 12) throw new Error('需要核对的指标最多 12 项，请减少后重新查看范围。');
+  const requiredMetrics = lines.map((line, index) => {
+    const fields = line.split('|').map((field) => field.trim());
+    if (fields.length > 4 || !fields[0]) {
+      throw new Error(`第 ${index + 1} 行请按“指标名称 | 对象 | 期间 | 口径”填写，后面三项可留空。`);
+    }
+    return { name: fields[0], subject: fields[1] || null, period: fields[2] || null,
+      scope: fields[3] || null };
+  });
+  const includeHighlights = $('extraction-highlights').checked;
+  if (!requiredMetrics.length && !includeHighlights) {
+    throw new Error('请填写需要核对的指标，或勾选“同时自动补充文档重点”。');
+  }
+  return { required_metrics: requiredMetrics, include_highlights: includeHighlights };
+}
+
+function extractionSettingsChanged() {
+  // 设置变更后，旧范围与旧请求键不再代表本次操作；只读历史结果继续可查看。
+  extractionSettingsRevision += 1;
+  analysisKind = 'extraction';
+  if (analysisPlan && analysisPlan.kind === 'extraction') {
+    for (const regenerate of [false, true]) {
+      const slot = pendingAnalysisSlot('extract', { ...analysisPlan, regenerate });
+      pendingAnalysisKeys.delete(slot);
+      try { sessionStorage.removeItem(slot); } catch (_) { /* 存储不可用时仍撤下旧计划。 */ }
+    }
+  }
+  const prefix = `docqa-analysis:${selectedId}:extract:`;
+  for (const slot of pendingAnalysisKeys.keys()) {
+    if (!slot.startsWith(prefix)) continue;
+    pendingAnalysisKeys.delete(slot);
+    try { sessionStorage.removeItem(slot); } catch (_) { /* 只清理当前文档的提取请求键。 */ }
+  }
+  analysisPlan = null;
+  $('analysis-plan-panel').replaceChildren();
+  $('analysis-status').textContent = '提取设置已修改。请重新查看分析范围，再明确发起生成。';
+}
+
+function metricLabel(metric) {
+  return [metric.name, metric.subject && `对象：${metric.subject}`,
+    metric.period && `期间：${metric.period}`, metric.scope && `口径：${metric.scope}`]
+    .filter(Boolean).join(' · ');
+}
+
+function extractionItemOrigin(extraction, item, matchedItemIds) {
+  if (!extraction.metric_coverage) return null;
+  if (matchedItemIds.has(item.item_id)) return '指定指标匹配项';
+  return extraction.options?.include_highlights === false
+    ? '其他提取项（未匹配指定指标）' : '自动补充重点';
+}
+
+function sameExtractionOptions(left, right) {
+  if (!left || !right || left.include_highlights !== right.include_highlights) return false;
+  const fields = ['name', 'subject', 'period', 'scope'];
+  return left.required_metrics.length === right.required_metrics.length
+    && left.required_metrics.every((metric, index) => fields.every((field) =>
+      (metric[field] || null) === (right.required_metrics[index][field] || null)));
+}
+
 function pendingAnalysisSlot(action, body, documentId = selectedId) {
   return `docqa-analysis:${documentId}:${action}:${body.plan_fingerprint}:${Boolean(body.regenerate)}`;
 }
@@ -510,6 +725,7 @@ function analysisPlanPayload(regenerate = false) {
     plan_fingerprint: analysisPlan.plan_fingerprint,
     regenerate,
   };
+  if (analysisPlan.kind === 'extraction') body.extraction_options = analysisPlan.extraction_options;
   const slot = pendingAnalysisSlot(analysisPlan.kind === 'summary' ? 'summary' : 'extract', body);
   let key = pendingAnalysisKeys.get(slot);
   try { key = key || sessionStorage.getItem(slot); } catch (_) { /* 禁用存储时保留本页幂等键。 */ }
@@ -523,11 +739,16 @@ function analysisPlanPayload(regenerate = false) {
 async function loadAnalysisPlan(kind) {
   // 只做本地输入规划：零外部调用；展示版本、范围、批次与请求数上界。
   analysisKind = kind || analysisKind;
+  const plannedKind = analysisKind;
   const documentId = selectedId;
   const token = requestSeq;
-  const plan = await api(`/documents/${documentId}/analysis-plan?kind=${analysisKind}`,
-    { method: 'POST' });
-  if (token !== requestSeq || documentId !== selectedId) return;
+  const settingsRevision = extractionSettingsRevision;
+  const options = plannedKind === 'extraction' ? extractionOptions() : null;
+  const plan = await api(`/documents/${documentId}/analysis-plan?kind=${plannedKind}`,
+    { method: 'POST', ...(options ? { headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ extraction_options: options }) } : {}) });
+  if (token !== requestSeq || documentId !== selectedId || plannedKind !== analysisKind
+      || (options && settingsRevision !== extractionSettingsRevision)) return;
   analysisPlan = plan;
   renderAnalysisPlan(plan);
 }
@@ -541,6 +762,27 @@ function renderAnalysisPlan(plan) {
     + (plan.is_active_version ? '（当前预览版本）' : '（历史解析版本）')
     + ` · Prompt ${plan.prompt_version}`;
   container.append(head);
+
+  if (plan.kind === 'extraction' && plan.extraction_options) {
+    const options = plan.extraction_options;
+    const note = document.createElement('p');
+    note.className = 'muted';
+    note.textContent = options.required_metrics.length
+      ? `逐项核对 ${options.required_metrics.length} 个指标`
+        + (options.include_highlights ? '，并自动补充文档重点。' : '。')
+      : '自动挑选文档重点；本次没有指定逐项核对的指标。';
+    container.append(note);
+    if (options.required_metrics.length) {
+      const metrics = document.createElement('ul');
+      metrics.className = 'plan-batches';
+      for (const metric of options.required_metrics) {
+        const item = document.createElement('li');
+        item.textContent = metricLabel(metric);
+        metrics.append(item);
+      }
+      container.append(metrics);
+    }
+  }
 
   const limits = plan.limits || {};
   $('analysis-status').textContent =
@@ -609,7 +851,7 @@ function renderAnalysisJob(job) {
     note.textContent = `覆盖：已处理 ${coverage.processed_units}/${coverage.total_units} 个输入单元`
       + ` · 完成批次 ${coverage.batch_completed}/${coverage.batch_total}`
       + (coverage.reduce_completed ? ' · 已执行汇总' : '')
-      + (coverage.complete ? ' · 覆盖完整' : ' · 覆盖不完整（未处理内容不会被包装成全文结果）');
+      + (coverage.complete ? ' · 输入处理完整' : ' · 输入处理不完整（未处理内容不会被包装成全文结果）');
     container.append(note);
   }
   if (job.status === 'needs_attention') {
@@ -666,6 +908,12 @@ async function loadAnalysisResults() {
 function renderAnalysisResultList() {
   const container = $('analysis-results');
   container.replaceChildren();
+  const viewedSummary = activeResultPayload && activeResultPayload.document_id === selectedId
+    ? analysisResults.find((item) => item.id === activeResultPayload.id) : null;
+  if (activeResultPayload && !viewedSummary) {
+    activeResultPayload = null;
+    activeResultId = null;
+  }
   if (!analysisResults.length) {
     const empty = document.createElement('p');
     empty.className = 'muted';
@@ -683,7 +931,7 @@ function renderAnalysisResultList() {
     label.textContent = `${analysisKindLabels[item.kind] || item.kind} · `
       + `${item.created_at.slice(0, 19).replace('T', ' ')} · 版本 ${item.parse_version_id}`
       + (item.is_active_version ? '（当前预览版本）' : '（历史解析版本）')
-      + (item.complete ? ' · 覆盖完整' : ' · 覆盖不完整')
+      + (item.complete ? ' · 输入处理完整' : ' · 输入处理不完整')
       + ` · ${item.requests_used} 次调用`;
     row.append(label);
     const open = document.createElement('button');
@@ -695,6 +943,11 @@ function renderAnalysisResultList() {
     row.append(open);
     container.append(row);
   }
+  if (viewedSummary) {
+    // 正文不可变，但“当前／历史版本”标记随预览版本变化，从最新历史列表更新。
+    activeResultPayload = { ...activeResultPayload, is_active_version: viewedSummary.is_active_version };
+    renderAnalysisResult(activeResultPayload, true);
+  }
 }
 
 async function openResult(resultId) {
@@ -703,12 +956,13 @@ async function openResult(resultId) {
   const result = await api(`/analysis-results/${resultId}`);
   if (token !== requestSeq || documentId !== selectedId) return;
   activeResultId = result.id;
+  activeResultPayload = result;
   lastResultKind = result.kind;
   analysisKind = result.kind;
   renderAnalysisResult(result);
 }
 
-function renderAnalysisResult(result) {
+function renderAnalysisResult(result, append = false) {
   // 由已校验结构渲染；全部使用 textContent，模型或文件名里的 HTML 只作为文字。
   const container = $('analysis-results');
   const panel = document.createElement('section');
@@ -733,9 +987,10 @@ function renderAnalysisResult(result) {
   coverageNote.textContent = `覆盖：已处理 ${coverage.processed_units}/${coverage.total_units} 个输入单元`
     + ` · 完成批次 ${coverage.batch_completed}/${coverage.batch_total}`
     + (coverage.reduce_completed ? ' · 已执行汇总' : '')
-    + (coverage.complete ? ' · 本次声明覆盖该解析版本的完整合格输入' : ' · 覆盖不完整')
+    + (coverage.complete ? ' · 本次已处理该解析版本的完整合格输入' : ' · 输入处理不完整')
     + (coverage.excluded_units ? ` · 另有 ${coverage.excluded_units} 个非正文单元未参与分析` : '')
-    + ` · 最终引用回落原文 ${coverage.resolved_original_refs} 条`;
+    + ` · 最终引用回落原文 ${coverage.resolved_original_refs} 条`
+    + (result.extraction ? '。输入处理完整不表示所有事实均已提取。' : '');
   panel.append(coverageNote);
 
   if (result.summary) {
@@ -757,6 +1012,11 @@ function renderAnalysisResult(result) {
     }
   }
   if (result.extraction) {
+    if (result.extraction.metric_coverage) {
+      panel.append(renderMetricCoverage(result.extraction.metric_coverage));
+    }
+    const matchedItemIds = new Set((result.extraction.metric_coverage?.metrics || [])
+      .filter((metric) => metric.status === 'matched').flatMap((metric) => metric.item_ids || []));
     const labels = { data: '数据', conclusion: '结论', viewpoint: '观点' };
     for (const kind of ['data', 'conclusion', 'viewpoint']) {
       const group = result.extraction.items.filter((item) => item.kind === kind);
@@ -774,7 +1034,8 @@ function renderAnalysisResult(result) {
         section.append(note);
       }
       for (const item of group) {
-        section.append(renderExtractionItem(item));
+        section.append(renderExtractionItem(item,
+          extractionItemOrigin(result.extraction, item, matchedItemIds)));
       }
       panel.append(section);
     }
@@ -830,20 +1091,52 @@ function renderAnalysisResult(result) {
     actions.append(link);
   }
   panel.append(actions);
-  container.replaceChildren(panel);
+  if (append) container.append(panel);
+  else container.replaceChildren(panel);
 }
 
-function renderExtractionItem(item) {
+function renderMetricCoverage(coverage) {
+  const section = document.createElement('div');
+  section.className = 'metric-coverage';
+  section.dataset.status = coverage.status;
+  const title = document.createElement('strong');
+  title.textContent = '指标匹配核对（不代表全部语义已验收）';
+  const note = document.createElement('p');
+  note.className = 'muted';
+  note.textContent = coverage.status === 'not_requested'
+    ? '本次未指定指标，展示自动挑选的重点；不承诺穷举所有事实。'
+    : `逐字字段匹配 ${coverage.matched_count}/${coverage.required_count} 项`
+      + (coverage.status === 'complete' ? '，指定指标均有匹配项。' : '，尚有指标未确认。')
+      + ' 每项只核对所填写的条件；未填写的对象、期间或口径不表示所有记录都已提取。';
+  section.append(title, note);
+  const list = document.createElement('ul');
+  for (const metric of coverage.metrics || []) {
+    const item = document.createElement('li');
+    item.textContent = `${metric.status === 'matched' ? '已匹配' : '未确认'} · ${metricLabel(metric)}`
+      + (metric.reason ? ` · ${metric.reason}` : '');
+    list.append(item);
+  }
+  if (list.children.length) section.append(list);
+  return section;
+}
+
+function renderExtractionItem(item, origin = null) {
   const row = document.createElement('div');
   row.className = 'extraction-item';
+  if (origin) {
+    const label = document.createElement('small');
+    label.className = 'extraction-origin';
+    label.textContent = origin;
+    row.append(label);
+  }
   const content = document.createElement('p');
   const text = document.createElement('span');
   text.textContent = item.content;
   content.append(text);
-  appendRefButtons(content, item.refs);
+  appendRefButtons(content, item.refs, 'result-citation');
   row.append(content);
   const details = [];
-  if (item.name) details.push(`对象：${item.name}`);
+  if (item.name) details.push(`名称：${item.name}`);
   if (item.value_text) details.push(`数值：${item.value_text}`);
   if (item.unit) details.push(`单位：${item.unit}`);
   if (item.period) details.push(`时间：${item.period}`);
@@ -869,7 +1162,7 @@ function renderPointSection(title, points) {
     const text = document.createElement('span');
     text.textContent = point.text;
     item.append(text);
-    appendRefButtons(item, point.refs);
+    appendRefButtons(item, point.refs, 'result-citation');
     list.append(item);
   }
   section.append(list);
@@ -937,6 +1230,11 @@ function resultToText(result) {
   const lines = [];
   lines.push(`${analysisKindLabels[result.kind] || result.kind}（解析版本 ${result.parse_version_id}，`
     + `生成时间 ${result.created_at}）`);
+  if (result.coverage) {
+    lines.push(`输入处理：${result.coverage.processed_units}/${result.coverage.total_units} 个单元`
+      + (result.coverage.complete ? '，输入处理完整。' : '，输入处理不完整。')
+      + (result.extraction ? '不表示所有事实均已提取。' : ''));
+  }
   if (result.summary) {
     lines.push(`主题概述：${result.summary.topic_overview}`);
     lines.push('主要内容与结论：');
@@ -951,6 +1249,20 @@ function resultToText(result) {
     }
   }
   if (result.extraction) {
+    const metricCoverage = result.extraction.metric_coverage;
+    const matchedItemIds = new Set((metricCoverage?.metrics || [])
+      .filter((metric) => metric.status === 'matched').flatMap((metric) => metric.item_ids || []));
+    if (metricCoverage) {
+      lines.push('指标匹配核对（不代表全部语义已验收）：');
+      lines.push(metricCoverage.status === 'not_requested'
+        ? '未指定指标，自动挑选重点；不承诺穷举所有事实。'
+        : `逐字字段匹配 ${metricCoverage.matched_count}/${metricCoverage.required_count} 项；`
+          + '仅核对已填写条件，未填写对象、期间或口径不表示穷举全部记录。');
+      for (const metric of metricCoverage.metrics || []) {
+        lines.push(`- ${metric.status === 'matched' ? '已匹配' : '未确认'} · ${metricLabel(metric)}`
+          + (metric.reason ? ` · ${metric.reason}` : ''));
+      }
+    }
     const labels = { data: '数据', conclusion: '结论', viewpoint: '观点' };
     for (const kind of ['data', 'conclusion', 'viewpoint']) {
       lines.push(`${labels[kind]}：`);
@@ -961,7 +1273,9 @@ function resultToText(result) {
         continue;
       }
       for (const item of group) {
-        lines.push(`- ${item.content}${item.refs.map((ref) => `[${ref}]`).join('')}`);
+        const originLabel = extractionItemOrigin(result.extraction, item, matchedItemIds);
+        const origin = originLabel ? `【${originLabel}】` : '';
+        lines.push(`- ${origin}${item.content}${item.refs.map((ref) => `[${ref}]`).join('')}`);
       }
     }
   }
@@ -1313,14 +1627,14 @@ function splitRefs(text) {
   return { text: text.slice(0, match.index).replace(/\s+$/, ''), refs: refs };
 }
 
-function appendRefButtons(container, refs) {
+function appendRefButtons(container, refs, prefix = 'citation') {
   for (const ref of refs) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'ref';
     button.textContent = `[${ref}]`;
     button.title = `查看第 ${ref} 条引用`;
-    button.onclick = () => focusCitation(ref);
+    button.onclick = () => focusCitation(ref, prefix);
     container.append(button);
   }
 }
@@ -1469,9 +1783,9 @@ function renderCitations(citations, meta) {
   }
 }
 
-function focusCitation(ref) {
+function focusCitation(ref, prefix = 'citation') {
   // 点击 [n] 定位到对应引用卡片；不改变任何后端状态。
-  const card = document.getElementById(`citation-${ref}`);
+  const card = document.getElementById(`${prefix}-${ref}`);
   if (!card) return;
   card.scrollIntoView({ block: 'center' });
   card.classList.add('citation-active');
@@ -1619,7 +1933,7 @@ async function askQuestion() {
 
 async function intelligence(action, body) {
   // 摘要与信息提取已改为任务式接口：提交后由独立 worker 执行，页面轮询真实状态。
-  // action 取 'summary' 或 'extract'；body 只允许解析版本、计划指纹与幂等键。
+  // action 取 'summary' 或 'extract'；提取设置固定为已展示计划中的规范设置。
   analysisRequestCount += 1;
   const slot = pendingAnalysisSlot(action, body);
   const result = await api(`/documents/${selectedId}/${action}`, {
@@ -1636,10 +1950,14 @@ async function intelligence(action, body) {
 }
 
 $('analysis-plan').onclick = () => run(() => loadAnalysisPlan(analysisKind));
+$('extraction-metrics').oninput = extractionSettingsChanged;
+$('extraction-highlights').onchange = extractionSettingsChanged;
 async function ensureVisibleAnalysisPlan(kind) {
   const doc = documents.find((item) => item.id === selectedId);
   if (!analysisPlan || analysisPlan.kind !== kind || analysisPlan.document_id !== selectedId
-      || analysisPlan.parse_version_id !== (doc && doc.active_parse_version_id)) {
+      || analysisPlan.parse_version_id !== (doc && doc.active_parse_version_id)
+      || (kind === 'extraction'
+        && !sameExtractionOptions(analysisPlan.extraction_options, extractionOptions()))) {
     await loadAnalysisPlan(kind);
     setMessage('已展示分析范围与请求上界。确认后再次点击生成按钮；本次尚未创建生成任务。', 'info');
     return false;
@@ -1696,9 +2014,11 @@ $('question-form').onsubmit = (event) => {
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     stopPolling();
+    stopRuntimePolling();
   } else if (currentTaskId) {
     schedulePoll(0);
   }
+  if (!document.hidden) refreshRuntimeStatus();
 });
 
 // 自动化验收专用只读钩子：只暴露读取状态与“触发一次真实用户操作”的能力，
@@ -1736,6 +2056,10 @@ window.__docqaTest = {
   renderAnswerMarkdown: (markdown) => renderAnswerMarkdown(markdown),
   renderCitations: (citations, meta) => renderCitations(citations, meta),
   renderAnswer: (payload) => renderAnswer(payload),
+  renderLegacyChunks: (chunks) => renderLegacyChunks(chunks),
+  renderWarnings: (warnings, version) => renderWarnings(warnings, version),
+  renderRuntimeStatus: (status) => renderRuntimeStatus(status),
+  refreshRuntimeStatus: () => refreshRuntimeStatus(),
   // 分析任务的渲染函数导出：同一份生产代码，供离线安全回归与浏览器验收复用。
   renderAnalysisPlan: (plan) => renderAnalysisPlan(plan),
   renderAnalysisJob: (job) => renderAnalysisJob(job),
@@ -1772,3 +2096,4 @@ window.__docqaTest = {
 
 // 首次打开页面时加载文档列表。
 run(refresh);
+refreshRuntimeStatus();

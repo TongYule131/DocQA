@@ -6,11 +6,11 @@
 #    - 记录中的可执行路径等于该进程当前的真实可执行路径（身份仍匹配）；
 #    - 记录中的数据目录等于本次 -DataDir（防止停错环境）。
 #    任何一项不满足都跳过并报告，绝不终止其它 Python／Docker 服务。
-# 2. **受控退出**：worker 收到停止请求后保留当前任务的可恢复状态；
-#    本脚本发送 Ctrl+C 等价的停止信号（Stop-Process），并等待进程结束。
+# 2. **终止与恢复**：Stop-Process 终止进程，并等待其结束；
+#    worker 依靠已持久化的调用意图及租约恢复，不保证执行优雅退出清理。
 # 3. 不停止 Docling 容器（它属于独立部署），需要时请按 README 手动 `docker compose stop`。
 param(
-    [string]$DataDir = "data",
+    [string]$DataDir = "",
     [switch]$Force,
     [switch]$KeepRecords
 )
@@ -18,11 +18,7 @@ param(
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'local_service_common.ps1')
-if ([System.IO.Path]::IsPathRooted($DataDir)) {
-    $resolvedDataDir = [System.IO.Path]::GetFullPath($DataDir)
-} else {
-    $resolvedDataDir = [System.IO.Path]::GetFullPath((Join-Path $projectRoot $DataDir))
-}
+$resolvedDataDir = Resolve-LocalDataDir $DataDir $projectRoot
 $logDir = Join-Path $resolvedDataDir '.local-service'
 
 # 停止顺序：先 worker 后 Web，避免 Web 停止后 worker 仍写入任务状态造成困惑。

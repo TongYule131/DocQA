@@ -33,10 +33,13 @@ from app.analysis_sources import (
     relevant_warnings,
 )
 from app.analysis_validation import AnalysisOutputError
+from app.extraction_requirements import metric_coverage, validate_requested_selection
+from app.analysis_table_validation import validate_table_bindings
 from app.config import Settings
 from app.deepseek import ModelError
 from app.repository import Repository
 from app.schemas import AnalysisJob, QualityWarning
+from app.runtime import RuntimeGuard
 
 logger = logging.getLogger("docqa.analysis")
 
@@ -58,6 +61,7 @@ class AnalysisWorker:
     def __init__(self, settings: Settings, repository: Repository | None = None, *,
                  model=None, worker_id: str | None = None, sleep=time.sleep):
         self.settings = settings
+        self.runtime = RuntimeGuard(settings.data_dir, "analysis-worker")
         self.repository = repository or Repository(settings.data_dir / "docqa.db")
         if model is None:
             from app.deepseek import DeepSeekModel
@@ -80,8 +84,11 @@ class AnalysisWorker:
 
     def run_forever(self, *, max_tasks: int | None = None) -> int:
         processed = 0
+        self.runtime.prepare_database(self.settings.allow_database_upgrade)
         self.repository.initialize()
+        self.runtime.mark_ready()
         while not self.stop_requested:
+            self.runtime.check()
             job = self.repository.claim_next_analysis_job(self.worker_id,
                                                         self.settings.worker_lease_seconds)
             if job is None:
@@ -97,6 +104,7 @@ class AnalysisWorker:
 
     def run_job(self, job_id: str) -> bool:
         """显式执行指定任务（测试与手动恢复使用）。"""
+        self.runtime.check()
         job = self.repository.claim_next_analysis_job(self.worker_id,
                                                      self.settings.worker_lease_seconds,
                                                      job_id=job_id)
@@ -225,7 +233,9 @@ class AnalysisWorker:
                           prompt_version=prompt_version,
                           system_prompt_chars=len(system_prompt),
                           parse_quality_status=version.quality_status,
-                          parse_is_legacy=version.is_legacy)
+                          parse_is_legacy=version.is_legacy,
+                          extraction_options=(self.repository.analysis_job_plan(job.id) or {}).get(
+                              "extraction_options"))
         if not plan.executable:
             self.repository.fail_analysis_job(
                 job.id, token, status="failed", stage="done",
@@ -269,13 +279,15 @@ class AnalysisWorker:
             request = extraction_module.build_batch_request(
                 units=units_with_ids, document_name=document.filename,
                 version_id=job.parse_version_id, batch_index=index + 1,
-                batch_total=len(plan.batches))
+                batch_total=len(plan.batches), extraction_options=plan.extraction_options,
+                max_items=self.settings.analysis_max_items_per_batch)
 
             def step_payload(raw: str, _units=units_with_ids, _batch_id=batch_id):
                 """校验一批提取并返回检查点 payload；批内编号与引述一并保存。"""
                 validated = extraction_module.validate_batch(
                     raw, units=_units, batch_id=_batch_id,
                     max_items=self.settings.analysis_max_items_per_batch)
+                validate_requested_selection(validated.items, plan.extraction_options)
                 return validated, _extraction_checkpoint(validated)
 
             validated, failure = self._run_batch_call(
@@ -303,15 +315,29 @@ class AnalysisWorker:
         for index, batch in enumerate(batches):
             lookup.remember(index, batch.quotes)  # type: ignore[attr-defined]
         items, citations = extraction_module.merge_batches(batches, unit_lookup=lookup)
+        validate_requested_selection(items, plan.extraction_options)
         sections = extraction_module.section_statuses(items, batches)
+        metrics = metric_coverage(items, plan.extraction_options)
+        # 合并后的引用编号重新绑定到原始结构，只使用服务器保存的行列信息。
+        from dataclasses import replace
+        by_block = {unit.block_id: unit for unit in plan.units}
+        final_units = [replace(by_block[citation["block_id"]],
+                               batch_local_id=citation["reference_id"])
+                       for citation in citations if citation.get("block_id") in by_block]
         payload = {
             "items": [_extraction_item_payload(item) for item in items],
             "sections": sections,
             "citations": citations,
+            "options": plan.extraction_options,
+            "metric_coverage": metrics,
+            "table_checks": validate_table_bindings(items, final_units),
         }
         coverage = _coverage(plan, len(plan.batches), reduce_completed=False, complete=True,
                              citations=citations)
         limitations = extraction_module.collect_limitations(batches) + list(plan.limitations)
+        if metrics["status"] == "incomplete":
+            limitations.append(f"指定指标核对 {metrics['matched_count']}/{metrics['required_count']}；"
+                               "未匹配项仍未确认，输入处理完成不代表这些指标已提取完整")
         self._publish(job, token, plan, payload=payload, coverage=coverage,
                       limitations=limitations, kind="extraction")
 
@@ -355,8 +381,13 @@ class AnalysisWorker:
             batches.append(validated)
             batch_units.append(units_with_ids)
 
-        limitations = _dedupe([text for batch in batches for text in batch.limitations]
-                              + list(plan.limitations))
+        # 多批的“本批未包含”不能被展示成全文缺失。只补服务端已知的批次范围，
+        # 保留模型原句；不改中间条目或汇总请求，不丢掉相同文字的不同批次限制。
+        limitations = _dedupe([
+            (f"第{index + 1}/{len(batches)}批局部限制：{text}"
+             if len(batches) > 1 else text)
+            for index, batch in enumerate(batches) for text in batch.limitations
+        ] + list(plan.limitations))
         # 批内编号 -> 原文引用的解析器：引述来自各批已校验检查点。
         entry_lookup = _entry_lookup(batch_units)
         for index, batch in enumerate(batches):
@@ -468,6 +499,7 @@ class AnalysisWorker:
                  if role == "reduce" else self.settings.analysis_input_max_chars)
         if len(system_prompt) + len(user_prompt) > limit:
             return None, ("input_budget_exceeded", "完整请求超过输入预算，未发起新的请求", False)
+        self.runtime.check()
         sequence = self.repository.claim_analysis_budget(job.id, token, role=role,
                                                         step_id=step_id)
         if sequence is None:
@@ -609,7 +641,7 @@ def _units_with_local_ids(units: list[InputUnit]) -> list[InputUnit]:
             unit_id=unit.unit_id, batch_local_id=position, block_id=unit.block_id,
             order_index=unit.order_index, kind=unit.kind, block_type=unit.block_type,
             text=unit.text, heading_path=unit.heading_path, sources=list(unit.sources),
-            source_ids=list(unit.source_ids)))
+            source_ids=list(unit.source_ids), table_structure=unit.table_structure))
     return copied
 
 
@@ -831,6 +863,7 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, worker.request_stop)
     if args.job:
+        worker.runtime.prepare_database(settings.allow_database_upgrade)
         worker.repository.initialize()
         worker.run_job(args.job)
         return 0

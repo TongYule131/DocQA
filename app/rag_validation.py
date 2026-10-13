@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -51,6 +52,7 @@ REASON_CODE_NAMES = {
     "missing_quote",
     "empty_quote",
     "quote_not_found",
+    "mixed_user_source",
 }
 
 # 数量与长度上限（对应任务书 6.2）。
@@ -324,6 +326,30 @@ def validate_model_output(raw: str, evidence: EvidencePack) -> ValidatedOutput:
     return result
 
 
+def validate_user_condition_boundary(output: ValidatedOutput, evidence: EvidencePack,
+                                     *, question: str) -> None:
+    """拒绝把明确复述的用户条件混入带文档引用的事实条目。
+
+    只检查至少四字符的成对引号内容：它逐字来自本次问题、却不存在于本条
+    refs 的任一原文时，不能让文档编号承担用户原话的来源。短术语、书名号、
+    未加引号的转述与 clarification_questions 不在此确定性检查范围内。
+    这不是数字或语义校验；同一原句也确实出现在当前引用的资料中时仍可使用。
+    不改写输出、不补引用、不追加模型调用，失败交给服务层返回安全错误。
+    """
+    quoted_user_text = re.compile(
+        r'“([^“”\r\n]{4,})”|‘([^‘’\r\n]{4,})’|'
+        r'「([^「」\r\n]{4,})」|『([^『』\r\n]{4,})』|"([^"\r\n]{4,})"')
+    normalized_question = question.replace("\r\n", "\n")
+    for fact in output.conclusion + output.explanation:
+        cited_texts = [item.text.replace("\r\n", "\n") for ref in fact.refs
+                       if (item := evidence.item_by_ref(ref)) is not None]
+        for match in quoted_user_text.finditer(fact.text):
+            quoted = next(value for value in match.groups() if value is not None)
+            if quoted in normalized_question and not any(quoted in text for text in cited_texts):
+                raise ModelOutputError("mixed_user_source",
+                                       "文档事实条目混入仅由用户问题提供的原句")
+
+
 def render_markdown(output: ValidatedOutput) -> str:
     """由**已校验结构**生成用户可见 Markdown。
 
@@ -375,4 +401,5 @@ __all__ = [
     "parse_model_output",
     "render_markdown",
     "validate_model_output",
+    "validate_user_condition_boundary",
 ]

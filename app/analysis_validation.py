@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -61,6 +62,10 @@ REASON_CODE_NAMES = {
     "empty_quote",
     "quote_not_found",
     "field_not_in_quote",
+    "uncertain_fragment_claimed",
+    "unknown_table_number",
+    "table_binding_mismatch",
+    "unrequested_item",
     "number_not_in_quote",
     "section_mismatch",
     "points_too_many",
@@ -313,6 +318,9 @@ def validate_extraction_batch(raw: str, *, units: list[Any], batch_id: str,
     items = [_parse_extraction_item(raw_item, units_by_ref=units_by_ref, batch_id=batch_id,
                                     index=position, quote_text=quotes)
              for position, raw_item in enumerate(items_raw, start=1)]
+    _check_extraction_consistency(items, limitations, units)
+    from app.analysis_table_validation import validate_table_bindings
+    validate_table_bindings(items, units)
     # sections 必须与实际条目一致：有该类条目却写 none（或反之）会让“某类不存在”失去意义。
     for kind in ALLOWED_KINDS:
         has_kind = any(item.kind == kind for item in items)
@@ -325,6 +333,41 @@ def validate_extraction_batch(raw: str, *, units: list[Any], batch_id: str,
                                    limitations=limitations)
     _check_quote_usage(validated, units_by_ref=units_by_ref)
     return validated
+
+
+def _check_extraction_consistency(items: list[ValidatedItem], limitations: list[str],
+                                  units: list[Any]) -> None:
+    """拒绝可机械核对的矛盾；不纠正 OCR，也不代替事实与条件的人工验收。"""
+    squash = lambda text: "".join(text.split())
+    # 仅处理模型自己明确判为不能解释、且逐字引出的原文片段。其它完整句子仍可提取，
+    # 不因同一个单元有局部残句就拒绝整单元。原句只在 limitations 中展示。
+    for limitation in limitations:
+        for sentence in re.split(r"[。！？\n]", limitation):
+            if not re.search(
+                r"无法(?:完全)?可靠(?:解释|判断|确定)|(?:OCR|排版)(?:缺字|错序|残句)",
+                squash(sentence), re.IGNORECASE
+            ):
+                continue
+            local_refs = {int(ref) for ref in re.findall(r"(?:ref|单元)\s*(\d+)", sentence, re.IGNORECASE)}
+            for fragment in re.findall(r"[“「『]([^”」』]+)[”」』]", sentence):
+                compact = squash(fragment)
+                if len(compact) < 4 or not any(compact in squash(unit.text) for unit in units):
+                    continue
+                if any(compact in squash(item.content)
+                       and (not local_refs or local_refs.intersection(item.refs)) for item in items):
+                    raise AnalysisOutputError(
+                        "uncertain_fragment_claimed", "已标为无法可靠解释的原文片段不能同时作为提取事实")
+
+    # ref 与“表编号”不同。只在来源显式给出编号时核对，不对普通叙述臆造表格元数据。
+    known_tables = {
+        int(number) for unit in units
+        for number in re.findall(r"(?m)^表编号[：:]\s*(\d+)\s*$", unit.text)
+    }
+    if known_tables:
+        for text in [item.content for item in items] + limitations:
+            mentioned = {int(number) for number in re.findall(r"表\s*(\d+)(?![\d.])", text)}
+            if mentioned - known_tables:
+                raise AnalysisOutputError("unknown_table_number", "提取结果提及本次输入不存在的表编号")
 
 
 # ----------------------------------------------------------------------

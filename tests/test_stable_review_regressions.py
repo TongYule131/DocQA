@@ -112,7 +112,7 @@ def test_changed_model_does_not_execute_old_job(tmp_path):
 
 def test_retry_cannot_bypass_total_item_limit(tmp_path):
     settings, repo, service, outcome, job = setup_job(
-        tmp_path, "extraction", analysis_batch_max_chars=420,
+        tmp_path, "extraction", analysis_batch_max_chars=900,
         analysis_max_requests=12, analysis_max_items_per_batch=1, analysis_max_items_total=1)
     with repo.connect() as db:
         db.execute("UPDATE analysis_jobs SET max_requests=12 WHERE id=?", (job.id,))
@@ -151,7 +151,7 @@ def test_reduce_sees_all_full_original_evidence():
 
 def test_reduce_budget_rejected_before_any_request(tmp_path):
     settings = fixture_settings(tmp_path, deepseek_api_key="offline-fake",
-                                analysis_batch_max_chars=420, analysis_reduce_max_chars=100)
+                                analysis_batch_max_chars=900, analysis_reduce_max_chars=100)
     repo = Repository(tmp_path / "docqa.db")
     doc, _ = seed_document(repo)
     outcome = AnalysisJobService(settings, repo).build_plan(doc, "summary")

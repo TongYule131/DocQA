@@ -29,7 +29,7 @@ from app.config import Settings  # noqa: E402
 from app.deepseek import DeepSeekModel  # noqa: E402
 from app.embedding import APIEmbedding  # noqa: E402
 from app.rag_prompts import PROMPT_VERSION
-from app.rag import RagError, RagService  # noqa: E402
+from app.rag import RagService  # noqa: E402
 from app.repository import Repository, now_iso  # noqa: E402
 from app.schemas import Document, ParseTask  # noqa: E402
 from app.vector_index import DocumentIndex  # noqa: E402
@@ -257,6 +257,9 @@ def main() -> int:
     args = parser.parse_args()
     if not args.allow_online:
         parser.error('默认不调用在线服务；如需验收请显式传入 --allow-online')
+    # 历史预算不能由 Counter 重建后归零；在目录、配置和数据库操作之前拒绝。
+    parser.error('此历史 RAG 阶段的在线入口已关闭；新验收必须绑定当前冻结计划和累计账本，'
+                 '不能用 --max-requests 重新授权。')
     if args.max_requests < 1:
         parser.error('--max-requests 必须为正整数')
 

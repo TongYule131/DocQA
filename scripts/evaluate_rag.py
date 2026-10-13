@@ -602,6 +602,11 @@ def main() -> int:
     parser.add_argument("--reuse-index", action="store_true", help="复用已存在的样本索引")
     args = parser.parse_args()
 
+    if args.allow_online:
+        # 历史阶段额度已结清；旧入口只有进程内计数，重启会重新获得额度。
+        parser.error("此历史 RAG 阶段的在线入口已关闭；新验收必须绑定当前冻结计划和累计账本，"
+                     "不能用 --max-requests 重新授权。离线评估仍可运行。")
+
     from scripts.rag_eval_safety import RequestBudget, validate_online_dir
     if args.max_requests < 1 or args.max_cases < 1:
         parser.error('请求数和用例数上限必须为正整数')

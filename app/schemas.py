@@ -7,7 +7,7 @@
 # 任何一组状态都不再用 documents.status 一个枚举表达。
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # 支持的输入格式：TXT 在本地解析，其余交给 Docling。
 DocumentFormat = Literal["txt", "pdf", "docx", "xlsx"]
@@ -472,6 +472,63 @@ class AnalysisPlanLimits(BaseModel):
     max_items_total: int
 
 
+class ExtractionMetric(BaseModel):
+    """一个待核对的指标；条件为原文字面匹配，不支持任意输出模板。"""
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=200)
+    subject: str | None = Field(default=None, max_length=200)
+    period: str | None = Field(default=None, max_length=200)
+    scope: str | None = Field(default=None, max_length=200)
+
+    @field_validator("name", "subject", "period", "scope")
+    @classmethod
+    def trim_criterion(cls, value):
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("指标名称和条件不能是空白，请省略未指定的条件")
+        return value
+
+
+class ExtractionOptions(BaseModel):
+    """指定指标优先，剩余额度可补充重点；空清单表示自动提取重点。"""
+    model_config = ConfigDict(extra="forbid")
+    required_metrics: list[ExtractionMetric] = Field(default_factory=list, max_length=12)
+    include_highlights: bool = True
+
+    @model_validator(mode="after")
+    def validate_selection(self):
+        if not self.required_metrics and not self.include_highlights:
+            raise ValueError("请指定至少一个指标或启用自动补充重点")
+        keys = [tuple("".join((getattr(metric, key) or "").split())
+                      for key in ("name", "subject", "period", "scope"))
+                for metric in self.required_metrics]
+        if len(keys) != len(set(keys)):
+            raise ValueError("指定指标及其条件不能重复")
+        return self
+
+
+class ExtractionMetricCheck(ExtractionMetric):
+    metric_id: str
+    status: Literal["matched", "unresolved"]
+    item_ids: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class ExtractionMetricCoverage(BaseModel):
+    """仅核对已校验数据项字段；不是模型自评或全文事实穷举证明。"""
+    status: Literal["not_requested", "complete", "incomplete"] = "not_requested"
+    required_count: int = 0
+    matched_count: int = 0
+    metrics: list[ExtractionMetricCheck] = Field(default_factory=list)
+
+
+class AnalysisPlanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    extraction_options: ExtractionOptions | None = None
+
+
 class AnalysisPlan(BaseModel):
     """POST /analysis-plan 的响应：零外部调用，只做本地输入规划。"""
     document_id: str
@@ -492,12 +549,13 @@ class AnalysisPlan(BaseModel):
     limitations: list[str] = Field(default_factory=list)
     # 不可执行时的稳定原因码：文档过大、批次预算过小、请求数超预算等。
     blocked_reason: str | None = None
+    extraction_options: ExtractionOptions | None = None
 
 
 class AnalysisJobRequest(BaseModel):
     """创建分析任务的最小请求体。
 
-    只接受解析版本、计划指纹与幂等键；审核类型由 summary／extract 入口决定。
+    接受解析版本、计划指纹、幂等键及受限的提取指标；类型由 summary／extract 入口决定。
     模型端点、system 提示、证据正文与文件路径都不允许由前端提交。
     """
     model_config = ConfigDict(extra="forbid")
@@ -507,6 +565,7 @@ class AnalysisJobRequest(BaseModel):
     idempotency_key: str | None = Field(default=None, max_length=200)
     # 明确重新生成：必须由用户操作产生，会创建新的结果版本。
     regenerate: bool = False
+    extraction_options: ExtractionOptions | None = None
 
 
 class AnalysisJob(BaseModel):
@@ -618,6 +677,9 @@ class AnalysisExtractionResult(BaseModel):
     items: list[AnalysisExtractionItem] = Field(default_factory=list)
     sections: dict[str, SectionStatus] = Field(default_factory=dict)
     citations: list[AnalysisCitation] = Field(default_factory=list)
+    options: ExtractionOptions | None = None
+    metric_coverage: ExtractionMetricCoverage | None = None
+    table_checks: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class AnalysisSummaryPoint(BaseModel):

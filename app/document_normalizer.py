@@ -12,6 +12,7 @@
 """
 import logging
 import re
+from collections import deque
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
@@ -22,7 +23,7 @@ from app.schemas import Block, QualityWarning, SourceLocation
 logger = logging.getLogger(__name__)
 
 # 结果结构版本：Docling 结构变化或规范化规则调整时递增，便于识别历史版本产物。
-RESULT_SCHEMA_VERSION = "docqa-normalized-3"
+RESULT_SCHEMA_VERSION = "docqa-normalized-4"
 
 # Docling 文本标签到业务块类型的映射；未识别的标签会显式告警。
 _LABEL_TO_TYPE = {
@@ -229,13 +230,20 @@ def _table_plain_text(table: dict[str, Any]) -> str:
             if not isinstance(row, list):
                 continue
             values: list[str] = []
+            merged_anchors: set[tuple[int, int]] = set()
             for cell in row:
                 if not isinstance(cell, dict):
                     continue
                 text = _cell_text(cell).strip()
-                # 合并单元格的重复占位不重复输出文本，避免放大内容。
-                if values and text and values[-1] == text:
+                # 相邻同值可能是独立事实；只有同一合并锚点再次出现才是占位。
+                anchor = (cell.get("start_row_offset_idx"), cell.get("start_col_offset_idx"))
+                merged = ((cell.get("row_span") or 1) > 1 or (cell.get("col_span") or 1) > 1)
+                valid_anchor = all(type(value) is int and value >= 0 for value in anchor)
+                if merged and valid_anchor and anchor in merged_anchors:
+                    values.append("↳")
                     continue
+                if merged and valid_anchor:
+                    merged_anchors.add(anchor)
                 values.append(text)
             lines.append(" | ".join(values))
     if not lines:
@@ -315,18 +323,17 @@ def normalize_docling_result(document_id: str, payload: dict[str, Any], fmt: str
     table_no = 0
     # 使用队列展开 body 顺序：分组（如 XLSX 的 sheet、PDF 的 list）在遇到时把子节点
     # 追加到队首，从而在保持阅读顺序的同时递归处理分组内部的表格与文本。
-    queue: list[str] = []
+    queue: deque[str] = deque()
     for child in children:
         ref = ref_key(child)
         if ref:
             queue.append(ref)
-    guard = 0
     # 已处理过的引用：Docling 可能同时把节点挂在父节点和 body.children 下，
     # 必须去重，避免同一内容被索引两次。
     processed: set[str] = set()
-    while queue and guard < 200000:
-        guard += 1
-        child_ref = queue.pop(0)
+    # processed 防止环与重复展开；无需按访问次数截断，否则会静默丢失尾部正文。
+    while queue:
+        child_ref = queue.popleft()
         if child_ref in processed:
             continue
         processed.add(child_ref)
@@ -389,7 +396,7 @@ def normalize_docling_result(document_id: str, payload: dict[str, Any], fmt: str
             for nested in reversed(node.get("children") or []):
                 nested_ref = ref_key(nested)
                 if nested_ref and nested_ref not in table_child_refs:
-                    queue.insert(0, nested_ref)
+                    queue.appendleft(nested_ref)
         elif child_ref in tables:
             table = tables[child_ref]
             label = str(table.get("label") or "table")
@@ -463,7 +470,7 @@ def normalize_docling_result(document_id: str, payload: dict[str, Any], fmt: str
             # 分组本身不产生内容：递归其子节点以保持阅读顺序。
             # XLSX 的 sheet 分组在这里递归，使表格与文本块都能继承工作表名；
             # PDF 的 list 分组同样递归，避免丢失列表项。
-            queue[0:0] = [ref_key(nested) for nested in (group.get("children") or [])]
+            queue.extendleft(ref_key(nested) for nested in reversed(group.get("children") or []))
         else:
             warnings.append(QualityWarning(
                 code="unresolved_node_reference", severity="warning", scope="document",

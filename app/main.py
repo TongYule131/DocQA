@@ -13,7 +13,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import Body, FastAPI, File, Header, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app import migrations
@@ -28,13 +28,14 @@ from app.parsing import ParseError, chunk_pages, parse_document
 from app.rag import RagError, RagService
 from app.rag_prompts import PROMPT_VERSION
 from app.repository import Repository, TaskConflict, now_iso
+from app.runtime import RuntimeGuard, RuntimeMismatch
 from app.schemas import (
     AnalysisJob,
     AnalysisJobRequest,
     AnalysisPlan,
+    AnalysisPlanRequest,
     AnalysisResult,
     AnalysisResultSummary,
-    AnalysisSubmitResponse,
     Answer,
     Chunk,
     Document,
@@ -46,7 +47,6 @@ from app.schemas import (
     Question,
     RagAnswer,
     SearchRequest,
-    Summary,
     UploadResponse,
 )
 from app.vector_index import DocumentIndex
@@ -60,6 +60,7 @@ _SNIFF_BYTES = 1024 * 1024
 def create_app(settings: Settings | None = None) -> FastAPI:
     # 应用工厂支持注入配置，测试可使用独立临时目录而不污染实际资料。
     settings = settings or Settings.from_env()
+    runtime = RuntimeGuard(settings.data_dir, "web")
     model = DeepSeekModel(settings)
     repository = Repository(settings.data_dir / "docqa.db")
     embedding = APIEmbedding(settings)
@@ -74,6 +75,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # 在服务启动阶段准备目录并执行数据库迁移；yield 后进入服务关闭阶段。
+        runtime.prepare_database(settings.allow_database_upgrade)
         upload_dir.mkdir(parents=True, exist_ok=True)
         try:
             summary = repository.initialize()
@@ -83,10 +85,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise
         if summary.get("applied"):
             logger.info("数据库迁移完成：%s（备份 %s）", summary["applied"], summary.get("backup"))
+        runtime.mark_ready()
         yield
 
     app = FastAPI(title="智能文档分析与知识问答系统", version="0.2.0", lifespan=lifespan)
+    app.state.runtime_guard = runtime
     app.mount("/static", StaticFiles(directory=web_dir), name="static")
+
+    @app.middleware("http")
+    async def require_compatible_runtime(request, call_next):
+        # 代码更新或库被外部替换后，旧进程不得继续提交/领取收费任务。
+        if request.url.path == "/" or request.url.path.startswith(("/api/", "/static/")):
+            try:
+                runtime.check()
+            except RuntimeMismatch as exc:
+                return JSONResponse(status_code=503, content={
+                    "status": "not_ready", "code": "runtime_mismatch", "detail": str(exc)})
+        response = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            # 本地升级后普通刷新也必须拿到当前页面，不能继续复用旧 JS/CSS。
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.exception_handler(EmbeddingError)
     async def embedding_error_handler(request, exc: EmbeddingError):
@@ -139,12 +158,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/", include_in_schema=False)
     def home():
         # HTML 和静态资源与 API 同源，前端使用相对路径调用后端。
-        return FileResponse(web_dir / "index.html")
+        html = (web_dir / "index.html").read_text(encoding="utf-8")
+        for asset in ("app.js", "style.css"):
+            html = html.replace(f'"/static/{asset}"', f'"/static/{asset}?v={runtime.fingerprint}"')
+        return HTMLResponse(html)
 
     @app.get("/api/health")
     def health():
-        # 仅报告应用可响应，不代表外部模型或检索服务可用。
-        return {"status": "ok", "version": "0.2.0"}
+        # 报告真正运行的代码、数据目录及结构版本；不探测外部模型账号。
+        return {"status": "ok", "version": "0.2.0", "runtime": runtime.check()}
+
+    @app.get("/api/runtime/status")
+    def runtime_status():
+        # 只展示经过进程创建标识核实的就绪状态，陈旧 ready 文件不能冒充活跃 worker。
+        return JSONResponse(runtime.service_status(), headers={"Cache-Control": "no-store"})
 
     @app.get("/api/model/status")
     def model_status():
@@ -332,12 +359,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "该文档尚无成功解析版本")
         version = require_version(document_id, target)
         blocks = repository.blocks(target, limit=limit, offset=offset)
+        # legacy 版本只有旧分块，不能伪造结构块或可靠来源；只读兼容展示原有文本。
+        legacy_chunks = repository.chunks(document_id, target) if version.is_legacy else []
+        visible_legacy = legacy_chunks[offset:offset + limit]
         return {
             "document_id": document_id,
             "version": version,
             "is_active_version": target == document.active_parse_version_id,
             "offset": offset, "limit": limit,
-            "returned": len(blocks), "total": version.block_count,
+            "content_mode": "legacy_chunks" if version.is_legacy else "structured",
+            "returned": len(visible_legacy) if version.is_legacy else len(blocks),
+            "total": len(legacy_chunks) if version.is_legacy else version.block_count,
+            "legacy_chunks": visible_legacy,
             "blocks": blocks,
         }
 
@@ -367,12 +400,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         document = require_document(document_id)
         request = payload or ParseRequest()
         key = (request.idempotency_key or idempotency_key or "").strip() or None
+        if key and len(key) > 200:
+            raise HTTPException(422, "幂等键不能超过200个字符")
         fingerprint = _request_fingerprint(request)
 
         if key:
             existing = repository.find_task_by_idempotency(document_id, key)
             if existing is not None:
-                stored = (existing.request_summary or {}).get("fingerprint")
+                stored = repository.parse_request_fingerprint(existing, key)
                 if stored and stored != fingerprint:
                     raise HTTPException(409, "该幂等键已用于不同的解析请求，请更换幂等键或改用原请求参数")
                 return JSONResponse(status_code=202, content=ParseSubmitResponse(
@@ -381,13 +416,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         if document.active_parse_version_id and not request.force:
             # 已有有效结果且未要求重新解析：明确复用，不调用解析服务。
+            version = repository.get_parse_version(document.active_parse_version_id)
+            task = repository.get_task(version.task_id) if version and version.task_id else None
+            if key and task:
+                task = repository.bind_parse_request_key(task.id, document_id, key, fingerprint)
             return ParseSubmitResponse(
-                task=repository.latest_task(document_id), document=document, reused=True,
+                task=task, document=document, reused=True,
                 message="该文档已有成功解析版本；如需重新解析请使用“重新解析”并传入 force=true")
 
         active = repository.find_active_task(document_id)
         if active is not None:
             # 活动任务重复点击：复用同一个任务，不产生第二次上游提交。
+            if key:
+                active = repository.bind_parse_request_key(active.id, document_id, key, fingerprint)
             return JSONResponse(status_code=202, content=ParseSubmitResponse(
                 task=active, document=document, reused=True,
                 message="该文档已有正在排队或执行的解析任务，已复用该任务").model_dump())
@@ -431,6 +472,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "解析任务不存在")
         if task.status in {"queued", "running"}:
             raise HTTPException(409, "该任务仍在排队或执行中，无需重试")
+        if task.status == "succeeded":
+            raise HTTPException(409, "该任务已成功；如需重新解析请使用重新解析入口并传入 force=true")
         document = require_document(task.document_id)
         # 暂停、网络中断和本地失败可复用已保存的远端 ID；远端失败/过期才新提交。
         resume_id = task.upstream_task_id if task.error_code in {
@@ -516,13 +559,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/documents/{document_id}/analysis-plan", response_model=AnalysisPlan)
     def analysis_plan(document_id: str, kind: str = Query("extraction", pattern="^(extraction|summary)$"),
-                      version_id: str | None = None):
+                      version_id: str | None = None,
+                      payload: AnalysisPlanRequest | None = Body(default=None)):
         """只做本地输入规划：返回版本、范围、批次、请求数上界与是否可执行。
 
         该接口零外部调用：不生成、不 embedding、不解析、不建索引。
         """
         analysis_ready()
-        outcome = analysis.build_plan(document_id, kind, version_id)
+        outcome = analysis.build_plan(document_id, kind, version_id,
+                                      payload.extraction_options if payload else None)
         return analysis.plan_response(outcome, kind)
 
     def submit_analysis(document_id: str, kind: str, payload: AnalysisJobRequest | None,
@@ -534,6 +579,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """
         request = payload or AnalysisJobRequest()
         if idempotency_key and not request.idempotency_key:
+            # model_copy不重新验证字段；Header必须遵守与请求体相同的长度限制。
+            if len(idempotency_key) > 200:
+                raise HTTPException(422, "幂等键不能超过200个字符")
             request = request.model_copy(update={"idempotency_key": idempotency_key})
         response, status = analysis.submit(document_id, kind, request)
         return JSONResponse(status_code=status, content=response.model_dump())

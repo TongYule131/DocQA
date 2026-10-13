@@ -571,7 +571,7 @@ def test_completed_job_resubmission_reuses_without_calls(tmp_path):
         kind="extraction", status="queued", stage="queued", plan_fingerprint=outcome.plan.fingerprint,
         request_upper_bound=outcome.plan.request_upper_bound,
         max_requests=outcome.plan.request_upper_bound, steps_total=1,
-        prompt_version="docqa-extract-v1", protocol_version="docqa-extract-protocol-v1",
+        prompt_version=outcome.plan.prompt_version, protocol_version="docqa-extract-protocol-v1",
         model_signature=__import__("app.analysis_jobs", fromlist=["x"]).analysis_model_signature(settings),
         created_at=now_iso(), updated_at=now_iso())
     created, _ = repository.create_analysis_job(job, plan={"batches": []}, input_hash="h",
@@ -586,7 +586,7 @@ def test_completed_job_resubmission_reuses_without_calls(tmp_path):
         created.id, "test-holder", result_id="res-job-done", kind="extraction",
         payload={"items": [], "sections": {"data": "none", "conclusion": "none",
                                            "viewpoint": "none"}, "citations": []},
-        coverage={"complete": True}, warnings=[], limitations=[], prompt_version="docqa-extract-v1",
+        coverage={"complete": True}, warnings=[], limitations=[], prompt_version=created.prompt_version,
         protocol_version="docqa-extract-protocol-v1",
         model_signature=created.model_signature, requests_used=1) is True
     with repository.connect() as db:

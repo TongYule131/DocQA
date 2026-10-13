@@ -796,13 +796,19 @@ def test_t13_xlsx_sheet_names_and_real_cell_coordinates():
     cells = []
     for row in range(3):
         for col in range(3):
+            # B3:C3 是同一合并格；覆盖位置不能再声明独立单元格。
+            if row == 0 and col == 1:
+                continue
+            span = 2 if (row == 0 and col == 0) else 1
             cells.append({"text": f"r{row}c{col}", "row_span": 1,
-                          "col_span": 2 if (row == 0 and col == 0) else 1,
+                          "col_span": span,
                           "start_row_offset_idx": row, "end_row_offset_idx": row + 1,
-                          "start_col_offset_idx": col, "end_col_offset_idx": col + 1,
+                          "start_col_offset_idx": col, "end_col_offset_idx": col + span,
                           "column_header": row == 0, "bbox": None})
     xlsx['tables'][0]['data']['table_cells'] = cells
-    xlsx['tables'][0]['data']['grid'] = [[cells[0]], [cells[3]], [cells[6]]]
+    by_position = {(cell['start_row_offset_idx'], col): cell for cell in cells
+                   for col in range(cell['start_col_offset_idx'], cell['end_col_offset_idx'])}
+    xlsx['tables'][0]['data']['grid'] = [[by_position[(row, col)] for col in range(3)] for row in range(3)]
     xlsx['tables'][1]['data']['table_cells'] = [
         {"text": "日期", "row_span": 1, "col_span": 1, "start_row_offset_idx": 0,
          "end_row_offset_idx": 1, "start_col_offset_idx": 0, "end_col_offset_idx": 1,

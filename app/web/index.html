@@ -13,6 +13,15 @@
   <main>
     <section class="intro"><div class="eyebrow">文档知识工作台 / DOCLING 0.2</div><h1>让知识，从文档开始。</h1><p>集中管理资料，异步解析文档内容，为智能分析和有据可循的问答做好准备。</p></section>
     <div class="notice">支持 PDF（含扫描件 OCR）、DOCX、XLSX 与 UTF-8 TXT。解析为异步任务：提交后由独立 worker 执行，页面每 2—3 秒查询任务阶段。问答已接入：选中文档并在建立有效索引后可基于原文提问，回答附逐条引用。摘要与信息提取基于**解析版本**（不需要向量索引），由独立分析 worker 执行，结果会持久化保存。</div>
+    <!-- 本地角色就绪情况来自只读状态接口，独立于模型配置和外部服务探测。 -->
+    <section class="runtime-panel" aria-labelledby="runtime-title">
+      <div class="panel-title"><h2 id="runtime-title">本地服务状态</h2><button id="refresh-runtime" type="button" class="secondary">刷新服务状态</button></div>
+      <p id="runtime-summary" role="status" aria-live="polite">正在读取本地角色的真实就绪状态…</p>
+      <p id="runtime-schema" class="muted"></p>
+      <div id="runtime-roles" class="runtime-roles"></div>
+      <p id="runtime-checked" class="muted"></p>
+      <p class="muted">页面可见时每 15 秒查询本地状态；查询不会创建任务或调用模型。模型是否已配置、外部服务能否连接，请分别查看下方信息。</p>
+    </section>
     <!-- 配置由服务端读取；页面不收集或显示 API Key。连接测试只发送固定短消息。 -->
     <section class="model-panel" aria-label="模型连接">
       <div><strong>DeepSeek 模型连接</strong><p id="model-status" class="muted">正在读取配置…</p></div>
@@ -69,6 +78,14 @@
             </div>
           </div>
           <p class="muted">基于所选**解析版本**的完整合格输入，不需要向量索引。生成由独立 worker 执行（<code>python -m app.analysis_worker</code>）；查询状态、查看历史与导出都不会触发生成。</p>
+          <fieldset class="extraction-settings">
+            <legend>信息提取设置</legend>
+            <label for="extraction-metrics">需要逐项核对的指标（可选，每行一项，最多 12 项）</label>
+            <textarea id="extraction-metrics" rows="4" maxlength="6000" aria-describedby="extraction-metrics-help" placeholder="营业收入 | 华东 | 2024年度 | 主营业务&#10;营业收入 | 华东 | 2024年度 | 其他业务"></textarea>
+            <p id="extraction-metrics-help" class="muted">每行可写“指标名称 | 对象 | 期间 | 口径”，只填指标名称也可以。名称与条件请沿用原文词语；多级表头可分别填入指标和口径，不拼新名称。每行对应一项匹配核对；未填对象或期间，不表示穷举全部记录。未确认的指标会明确列出。</p>
+            <label class="checkbox-label" for="extraction-highlights"><input id="extraction-highlights" type="checkbox" checked>同时自动补充文档重点</label>
+            <p class="muted">不填写指标时，自动挑选重点。取消自动补充后，只提取指定数据指标。修改设置后须重新查看分析范围；摘要不使用这些设置。</p>
+          </fieldset>
           <p id="analysis-status" class="muted" aria-live="polite">尚未选择文档。</p>
           <div id="analysis-plan-panel"></div>
           <div class="actions">

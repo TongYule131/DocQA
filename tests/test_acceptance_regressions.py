@@ -356,3 +356,31 @@ def test_candidate_crash_expires_without_invalidating_old_index(tmp_path):
     index.build('review-doc', rebuild=True)
     with repo.connect() as db:
         assert db.execute('SELECT status FROM index_attempts WHERE id=?', (attempt,)).fetchone()[0] == 'failed'
+
+
+def test_index_attempts_remain_unique_with_same_clock_tick(tmp_path, monkeypatch):
+    """粗精度系统时钟下相邻构建不能因主键碰撞失败，也不能覆盖原索引。"""
+    from datetime import datetime, timezone
+    import app.repository as repository_module
+
+    _, repo, emb, index = setup(tmp_path)
+    old_id = index.status('review-doc')['index_id']
+    version = repo.get('review-doc').active_parse_version_id
+    fixed = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    class FrozenClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed if tz else fixed.replace(tzinfo=None)
+    monkeypatch.setattr(repository_module, 'datetime', FrozenClock)
+    attempts = []
+    for candidate in ('candidate-a', 'candidate-b'):
+        repo.create_index_record('review-doc', candidate, version, emb.signature)
+        attempts.append(repo.begin_index_attempt('review-doc', candidate, version, emb.signature))
+        repo.fail_index_attempt(attempts[-1], code='synthetic_failure',
+                                message='合成失败', document_id='review-doc')
+    assert attempts[0] != attempts[1]
+    with repo.connect() as db:
+        rows = db.execute("SELECT index_id, started_at FROM index_attempts WHERE id IN (?,?)", attempts).fetchall()
+    assert {row['index_id'] for row in rows} == {'candidate-a', 'candidate-b'}
+    assert len({row['started_at'] for row in rows}) == 1
+    assert index.status('review-doc')['index_id'] == old_id

@@ -285,16 +285,18 @@ class Repository:
             # 检查与写入处于同一写事务，避免两个 HTTP 请求同时穿过预检查。
             db.execute("BEGIN IMMEDIATE")
             if task.idempotency_key:
-                old = db.execute("SELECT * FROM parse_tasks WHERE document_id=? AND idempotency_key=?",
-                                 (task.document_id, task.idempotency_key)).fetchone()
+                old = self._parse_task_by_key(db, task.document_id, task.idempotency_key)
                 if old:
                     previous = self._task_from_row(old)
-                    if (previous.request_summary or {}).get('fingerprint') != (task.request_summary or {}).get('fingerprint'):
+                    if self.parse_request_fingerprint(previous, task.idempotency_key) != (task.request_summary or {}).get('fingerprint'):
                         raise TaskConflict("幂等键已用于不同请求，请更换幂等键")
                     return previous
             active = db.execute("SELECT * FROM parse_tasks WHERE document_id=? AND status IN ('queued','running')",
                                 (task.document_id,)).fetchone()
             if active:
+                if task.idempotency_key:
+                    active = self._bind_parse_key(db, active, task.idempotency_key,
+                                                  (task.request_summary or {}).get("fingerprint"))
                 return self._task_from_row(active)
             db.execute(
                 """INSERT INTO parse_tasks
@@ -335,11 +337,55 @@ class Repository:
 
     def find_task_by_idempotency(self, document_id: str, key: str) -> ParseTask | None:
         with self.connect() as db:
-            row = db.execute(
-                """SELECT t.*
-                   FROM parse_tasks t WHERE t.document_id=? AND t.idempotency_key=?""",
-                (document_id, key)).fetchone()
+            row = self._parse_task_by_key(db, document_id, key)
         return self._task_from_row(row) if row else None
+
+    @staticmethod
+    def parse_request_fingerprint(task: ParseTask, key: str) -> str | None:
+        summary = task.request_summary or {}
+        if task.idempotency_key == key:
+            return summary.get("fingerprint")
+        aliases = summary.get("idempotency_aliases") or {}
+        return aliases.get(key) if isinstance(aliases, dict) else None
+
+    def _parse_task_by_key(self, db: sqlite3.Connection, document_id: str, key: str):
+        row = db.execute("SELECT * FROM parse_tasks WHERE document_id=? AND idempotency_key=?",
+                         (document_id, key)).fetchone()
+        if row is not None:
+            return row
+        # 沿用现有摘要列保存被合并请求的键，避免为修复重复提交要求升级正式库。
+        # 所有绑定都在同一写事务中检查整个文档，别名不会被后续任务重新占用。
+        for candidate in db.execute("SELECT * FROM parse_tasks WHERE document_id=?", (document_id,)):
+            summary = self._json_or_none(candidate["request_summary"]) or {}
+            aliases = summary.get("idempotency_aliases") or {}
+            if isinstance(aliases, dict) and key in aliases:
+                return candidate
+        return None
+
+    def _bind_parse_key(self, db: sqlite3.Connection, row, key: str, fingerprint: str | None):
+        if row["idempotency_key"] != key:
+            summary = self._json_or_none(row["request_summary"]) or {}
+            aliases = summary.setdefault("idempotency_aliases", {})
+            aliases[key] = fingerprint
+            db.execute("UPDATE parse_tasks SET request_summary=? WHERE id=?",
+                       (json.dumps(summary, ensure_ascii=False), row["id"]))
+        return db.execute("SELECT * FROM parse_tasks WHERE id=?", (row["id"],)).fetchone()
+
+    def bind_parse_request_key(self, task_id: str, document_id: str, key: str,
+                               fingerprint: str) -> ParseTask:
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            previous = self._parse_task_by_key(db, document_id, key)
+            if previous is not None:
+                task = self._task_from_row(previous)
+                if self.parse_request_fingerprint(task, key) != fingerprint:
+                    raise TaskConflict("幂等键已用于不同请求，请更换幂等键")
+                return task
+            row = db.execute("SELECT * FROM parse_tasks WHERE id=? AND document_id=?",
+                             (task_id, document_id)).fetchone()
+            if row is None:
+                raise TaskConflict("解析任务已变化，请刷新后重试")
+            return self._task_from_row(self._bind_parse_key(db, row, key, fingerprint))
 
     def claim_next_task(self, worker_id: str, lease_seconds: int, *, task_id: str | None = None) -> ParseTask | None:
         """原子领取一个可执行任务。
@@ -510,6 +556,9 @@ class Repository:
                 # 过期执行者不得写入或切换活动版本。
                 logger.warning("任务 %s 的租约已失效，丢弃本次结果", task_id)
                 return None, False
+            # 与取消操作共用写事务，补上规范化/落盘期间发生的取消竞争窗口。
+            if db.execute("SELECT cancel_requested FROM parse_tasks WHERE id=?", (task_id,)).fetchone()[0]:
+                return None, False
             if version.result_hash:
                 existing = db.execute(
                     "SELECT id FROM parse_versions WHERE document_id=? AND result_hash=?",
@@ -677,7 +726,7 @@ class Repository:
             blocks.append(Block(
                 id=row["id"], document_id=row["document_id"], parse_version_id=row["parse_version_id"],
                 order_index=row["order_index"], block_type=row["block_type"], label=row["label"],
-                text=row["text"], heading_path=row["heading_path"], table=table,
+                text=row["text"], heading_path=row["heading_path"], table=table, sheet_name=row["sheet_name"],
                 sources=by_block.get(row["id"], []), char_count=row["char_count"]))
         return blocks
 
@@ -836,7 +885,8 @@ class Repository:
     def begin_index_attempt(self, document_id: str, index_id: str, target_version_id: str,
                             model_signature: str) -> str:
         """登记一次索引构建尝试，并把索引置为 indexing；失败不改变已有成功索引的可用状态。"""
-        attempt_id = f"idx-{document_id}-{datetime.now(timezone.utc).timestamp()}"
+        # Windows 的时钟精度可能使相邻尝试取得同一时间戳；主键不能依赖时钟唯一性。
+        attempt_id = f"idx-{document_id}-{uuid4().hex}"
         with self.connect() as db:
             db.execute(
                 """INSERT INTO index_attempts(id, document_id, index_id, target_parse_version_id,

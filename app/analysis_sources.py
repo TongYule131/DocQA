@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import Any
@@ -32,10 +33,11 @@ from app.analysis_prompts import (
 )
 from app.rag_context import normalize_text
 from app.schemas import Block, QualityWarning, SourceLocation
+from app.extraction_requirements import normalize_options
 
 # 输入协议版本：单元编号语义、序列化字段含义发生变化时必须递增，
 # 历史结果据此判断“当时按什么口径生成”。
-INPUT_PROTOCOL_VERSION = "docqa-analysis-input-v1"
+INPUT_PROTOCOL_VERSION = "docqa-analysis-input-v2"
 
 # 不进入可分析单元的块类型：页眉页脚属于版面噪声，图片未做语义解析，
 # 空白块没有可核对内容。它们仍保留在预览中，并单独计入“排除的非正文单元”。
@@ -61,6 +63,10 @@ UNIT_KIND_FORMULA = "formula_placeholder"
 # 单批预算必须至少容纳“最长单元 + 包装开销”，否则规划不可执行。
 _MIN_BATCH_SLACK_CHARS = 400
 
+# 只展开有界网格；损坏的跨度/声明尺寸不能让投影分配巨大矩阵。
+_MAX_TABLE_GRID_POSITIONS = 10_000
+_MAX_TABLE_CELLS = 10_000
+
 
 @dataclass
 class InputUnit:
@@ -76,17 +82,32 @@ class InputUnit:
     sources: list[SourceLocation] = field(default_factory=list)
     # 每个来源在 sources 中的下标：引用卡片按该下标定位，避免模型提供坐标。
     source_ids: list[int] = field(default_factory=list)
+    # 派生结构只用于行列核对，不替代 text 的原文引述；解析块本身始终不改。
+    table_structure: dict[str, Any] | None = None
 
     def payload(self) -> dict[str, Any]:
         """序列化为送入模型的数据对象；只含可引用字段与服务端分配的编号。
 
-        不包含块 ID、文档 ID、页码、坐标或文件路径：模型看不到内部标识，
+        不包含块 ID、文档 ID、页码、版面坐标或文件路径：模型看不到内部标识，
         也就不可能伪造它们；引用卡片的定位信息全部由后端从本映射复制。
         """
         entry: dict[str, Any] = {"ref": self.batch_local_id, "content": self.text}
         if self.heading_path:
             entry["heading"] = self.heading_path
         entry["unit_kind"] = self.kind
+        if self.table_structure is not None:
+            # content 已完整保留逐行逐列文字；重复全量 cells/facts 会挤占预算。
+            # 模型只需列路径、相对网格尺寸与合并关系，服务端保留完整格用于核对。
+            structure = self.table_structure
+            keys = ("status", "reason", "rows", "cols", "header_rows", "header_basis",
+                    "column_paths")
+            entry["table_structure"] = {key: structure[key] for key in keys if key in structure}
+            if structure.get("status") == "available":
+                entry["table_structure"]["merged_cells"] = [
+                    {key: cell[key] for key in ("row", "col", "row_span", "col_span",
+                                              "text", "column_header", "row_header")}
+                    for cell in structure["cells"]
+                    if cell["row_span"] > 1 or cell["col_span"] > 1]
         return entry
 
 
@@ -117,6 +138,10 @@ def render_table_text(block: Block) -> str:
     单元格范围与公式缓存状态；公式没有保存缓存时明确写“缺失（不能当作 0）”，
     绝不补 0，也不让模型据表达式推算新值。
     """
+    return _render_table_text(block, _table_projection(block)[0])
+
+
+def _render_table_text(block: Block, rows: str) -> str:
     table = block.table or {}
     parts: list[str] = []
     captions = [str(item).strip() for item in (table.get("captions") or []) if str(item).strip()]
@@ -124,8 +149,9 @@ def render_table_text(block: Block) -> str:
         parts.append("表格标题：" + " / ".join(captions))
     if table.get("footnotes"):
         parts.append("注释：" + " / ".join(str(note) for note in table["footnotes"]))
-    if block.sheet_name:
-        parts.append(f"工作表：{block.sheet_name}")
+    sheet_name = block.sheet_name or table.get("sheet_name")
+    if sheet_name:
+        parts.append(f"工作表：{sheet_name}")
     if table.get("table_no"):
         parts.append(f"表编号：{table['table_no']}")
     if table.get("cell_range"):
@@ -138,7 +164,6 @@ def render_table_text(block: Block) -> str:
             cached = str(cache) if info.get("has_cache") else "缺失（不能当作 0）"
             entries.append(f"{coordinate}={info.get('formula')}（缓存：{cached}）")
         parts.append("公式：" + "；".join(entries))
-    rows = _table_rows(block)
     if rows:
         parts.append("表格内容：\n" + rows)
     elif (block.text or "").strip():
@@ -148,25 +173,180 @@ def render_table_text(block: Block) -> str:
 
 def _table_rows(block: Block) -> str:
     """按行渲染表格；区分真实空白（空）与合并单元格占位（↳）。"""
+    return _table_projection(block)[0]
+
+
+def _cell_text(value: Any) -> str:
+    return "" if value is None else str(value).strip()
+
+
+def _coordinate(value: Any, *, minimum: int = 0) -> bool:
+    # bool 是 int 的子类，但 True/False 不能成为合法行列或跨度。
+    return type(value) is int and value >= minimum
+
+
+def _unavailable_table(block: Block, cells: list[Any], reason: str) -> tuple[str, dict[str, Any]]:
+    """损坏的网格不猜位置、不覆盖单元格；逐条保留文本并明确禁止行列核对。"""
+    lines = [f"表格结构不可用于行列核对：{reason}"]
+    for cell in cells:
+        if not isinstance(cell, dict):
+            lines.append("结构异常单元格：" + _cell_text(cell))
+            continue
+        # 这里是原始元数据的说明，不能被当作已验证的相对坐标。
+        lines.append(f"原始行列({cell.get('row')},{cell.get('col')})"
+                     f"跨度({cell.get('row_span', 1)},{cell.get('col_span', 1)})："
+                     + (_cell_text(cell.get("text")) or "（空）"))
+    # 非法结构中的未知键不能作为正文（也可能含内部定位信息）；保留块原文本兜底。
+    if block.text.strip():
+        lines.append(block.text.strip())
+    return "\n".join(lines), {"status": "unavailable", "reason": reason,
+                              "cells": [], "column_paths": [], "facts": []}
+
+
+def _table_projection(block: Block) -> tuple[str, dict[str, Any] | None]:
+    """从不可变单元格构建可引用矩阵及仅供语义核对的派生结构。
+
+    相对行列从 1 起计；合并格只在锚点保留文字，覆盖位置为 ↳。
+    缺列和空格均保留（空），不会把两个相邻同值合并。
+    """
     table = block.table or {}
     cells = table.get("cells") or []
+    if not isinstance(cells, list):
+        return _unavailable_table(block, [cells], "invalid_cells")
     if not cells:
-        return "\n".join(line for line in (block.text or "").splitlines() if line.strip())
-    by_row: dict[int, list[tuple[int, str]]] = {}
+        return "\n".join(line for line in (block.text or "").splitlines() if line.strip()), None
+    if len(cells) > _MAX_TABLE_CELLS:
+        return _unavailable_table(block, cells, "table_grid_too_large")
+    normalized: list[dict[str, Any]] = []
+    inferred_rows = inferred_cols = 0
     for cell in cells:
-        row = cell.get("row")
-        if not isinstance(row, int):
-            continue
-        col = cell.get("col") if isinstance(cell.get("col"), int) else 0
-        by_row.setdefault(row, []).append((col, (cell.get("text") or "").strip()))
-    lines: list[str] = []
-    for row_index in sorted(by_row):
-        values: list[str] = []
-        for _col, text in sorted(by_row[row_index]):
-            # 相邻数值相同不代表合并单元格；必须保留每一列的独立事实。
-            values.append(text if text != "" else "（空）")
+        if not isinstance(cell, dict):
+            return _unavailable_table(block, cells, "invalid_cell")
+        row, col = cell.get("row"), cell.get("col")
+        row_span, col_span = cell.get("row_span", 1), cell.get("col_span", 1)
+        if not (_coordinate(row) and _coordinate(col)
+                and _coordinate(row_span, minimum=1) and _coordinate(col_span, minimum=1)):
+            return _unavailable_table(block, cells, "invalid_cell_coordinates")
+        inferred_rows = max(inferred_rows, row + row_span)
+        inferred_cols = max(inferred_cols, col + col_span)
+        normalized.append({"row": row + 1, "col": col + 1,
+                           "row_span": row_span, "col_span": col_span,
+                           "text": _cell_text(cell.get("text")),
+                           "column_header": cell.get("column_header") is True,
+                           "row_header": cell.get("row_header") is True})
+    dimensions = []
+    for name, inferred in (("num_rows", inferred_rows), ("num_cols", inferred_cols)):
+        declared = table.get(name)
+        if declared is not None and not _coordinate(declared, minimum=1):
+            return _unavailable_table(block, cells, "invalid_table_dimensions")
+        if declared is not None and declared < inferred:
+            return _unavailable_table(block, cells, "cell_outside_table_dimensions")
+        dimensions.append(declared if declared is not None else inferred)
+    rows, cols = dimensions
+    if rows * cols > _MAX_TABLE_GRID_POSITIONS:
+        return _unavailable_table(block, cells, "table_grid_too_large")
+    # 位置 -> 原始锚点；不展开文本副本，也不以相同文本来推断合并关系。
+    grid: dict[tuple[int, int], dict[str, Any]] = {}
+    for cell in normalized:
+        for row in range(cell["row"], cell["row"] + cell["row_span"]):
+            for col in range(cell["col"], cell["col"] + cell["col_span"]):
+                if (row, col) in grid:
+                    return _unavailable_table(block, cells, "overlapping_cells")
+                grid[(row, col)] = cell
+    normalized.sort(key=lambda cell: (cell["row"], cell["col"]))
+    lines = []
+    for row in range(1, rows + 1):
+        values = []
+        for col in range(1, cols + 1):
+            cell = grid.get((row, col))
+            if cell is None:
+                values.append("（空）")
+            elif (row, col) != (cell["row"], cell["col"]):
+                values.append("↳")
+            else:
+                values.append(cell["text"] or "（空）")
         lines.append(" | ".join(values))
-    return "\n".join(lines)
+    header_rows, basis = _table_header_rows(normalized, grid, rows, cols)
+    paths = []
+    for col in range(1, cols + 1):
+        path, anchors = [], set()
+        for row in header_rows:
+            cell = grid.get((row, col))
+            if cell is None or not cell["text"]:
+                continue
+            anchor = (cell["row"], cell["col"])
+            if anchor not in anchors:
+                # 同一合并格不重复，但不同层级恰好同词仍必须保留。
+                path.append(cell["text"])
+                anchors.add(anchor)
+        if path:
+            paths.append({"col": col, "path": path})
+    paths_by_col = {entry["col"]: entry["path"] for entry in paths}
+    facts = [{"row": cell["row"], "col": cell["col"], "value": cell["text"],
+              "column_path": list(paths_by_col[cell["col"]])}
+             for cell in normalized
+             if cell["row"] not in header_rows and not cell["column_header"]
+             and cell["row_span"] == cell["col_span"] == 1
+             and cell["text"] and cell["col"] in paths_by_col]
+    structure = {"status": "available", "rows": rows, "cols": cols,
+                 "header_rows": header_rows, "header_basis": basis,
+                 "cells": normalized, "column_paths": paths, "facts": facts}
+    return "\n".join(lines), structure
+
+
+def _table_header_rows(cells: list[dict[str, Any]],
+                       grid: dict[tuple[int, int], dict[str, Any]],
+                       rows: int, cols: int) -> tuple[list[int], str]:
+    """保守识别显式表头，以及几何上完整细分的未标记子表头。
+
+    不猜首行；未标记行只有在合并列组被完整细分、其它列为空时才可补入。
+    普通数据行的对象列、数值或不完整子标题会阻止这一补全。
+    """
+    explicit = {row for cell in cells if cell["column_header"]
+                for row in range(cell["row"], cell["row"] + cell["row_span"])}
+    if not explicit or 1 not in explicit:
+        return [], "none"
+    last = max(explicit)
+    if explicit != set(range(1, last + 1)):
+        return [], "none"
+    header_rows = list(range(1, last + 1))
+    basis = "explicit"
+    # 每次仅检查紧邻的下一层，最多检查实际行数；大小已受网格上限控制。
+    while last < rows:
+        groups = [cell for cell in cells
+                  if cell["row"] == last and cell["col_span"] > 1
+                  and cell["row_span"] == 1 and cell["text"]]
+        if not groups:
+            break
+        grouped_cols = {col for group in groups
+                        for col in range(group["col"], group["col"] + group["col_span"])}
+        candidate = last + 1
+        # 组外有任何原文内容，说明可能已进入数据行，不能认作子表头。
+        if any(grid.get((candidate, col), {}).get("text")
+               for col in range(1, cols + 1) if col not in grouped_cols):
+            break
+        valid = True
+        for group in groups:
+            children: dict[tuple[int, int], dict[str, Any]] = {}
+            for col in range(group["col"], group["col"] + group["col_span"]):
+                child = grid.get((candidate, col))
+                if (child is None or not child["text"] or child["row"] != candidate
+                        or child["row_span"] != 1 or child["col"] < group["col"]
+                        or child["col"] + child["col_span"] > group["col"] + group["col_span"]
+                        or child["row_header"]
+                        or re.search(r"\d", child["text"])):
+                    valid = False
+                    break
+                children[(child["row"], child["col"])] = child
+            if not valid or len({child["text"] for child in children.values()}) < 2:
+                valid = False
+                break
+        if not valid:
+            break
+        header_rows.append(candidate)
+        last = candidate
+        basis = "explicit_and_grouped_subheaders"
+    return header_rows, basis
 
 
 def build_units(blocks: list[Block]) -> tuple[list[InputUnit], dict[str, int]]:
@@ -179,9 +359,11 @@ def build_units(blocks: list[Block]) -> tuple[list[InputUnit], dict[str, int]]:
     for block in blocks:
         block_type = block.block_type or "unknown"
         text = ""
+        table_structure = None
         kind = UNIT_KIND_BLOCK_TYPE
         if block_type == "table" or block_type == "document_index":
-            text = render_table_text(block)
+            rows, table_structure = _table_projection(block)
+            text = _render_table_text(block, rows)
             kind = UNIT_KIND_TABLE
         elif block_type == "formula":
             # 公式内容缺失：保留占位单元并标注缺失，模型不得据此推算或补值。
@@ -204,6 +386,7 @@ def build_units(blocks: list[Block]) -> tuple[list[InputUnit], dict[str, int]]:
             heading_path=block.heading_path,
             sources=list(block.sources),
             source_ids=list(range(len(block.sources))),
+            table_structure=table_structure,
         ))
     return units, excluded
 
@@ -267,6 +450,7 @@ class AnalysisPlanResult:
     request_upper_bound: int
     limitations: list[str] = field(default_factory=list)
     blocked_reason: str | None = None
+    extraction_options: dict | None = None
 
     @property
     def executable(self) -> bool:
@@ -290,7 +474,8 @@ def _documents_payload(*, kind: str, document_name: str, version_id: str,
 
 def batch_message_chars(*, kind: str, document_name: str, version_id: str,
                         units: list[InputUnit], system_prompt_chars: int,
-                        batch_index: int = 1, batch_total: int = 1) -> int:
+                        batch_index: int = 1, batch_total: int = 1,
+                        extraction_options: dict | None = None, max_items: int = 15) -> int:
     """单批实际消息字符数：system + user（含真实 JSON 序列化与转义）。
 
     预算是**实际消息长度**，不是估算值；规划阶段与执行阶段必须使用同一口径，
@@ -300,14 +485,16 @@ def batch_message_chars(*, kind: str, document_name: str, version_id: str,
     payload_units = [{**unit.payload(), "ref": index + 1} for index, unit in enumerate(units)]
     user_chars = len(build_batch_user_prompt(
         kind=kind, document_name=document_name, version_id=version_id, units=payload_units,
-        batch_index=batch_index, batch_total=batch_total))
+        batch_index=batch_index, batch_total=batch_total,
+        extraction_options=extraction_options, max_items=max_items))
     return system_prompt_chars + user_chars
 
 
 def build_plan(*, kind: str, blocks: list[Block], document_name: str, version_id: str,
                settings: Settings, prompt_version: str, system_prompt_chars: int,
                parse_quality_status: str | None = None,
-               parse_is_legacy: bool = False) -> AnalysisPlanResult:
+               parse_is_legacy: bool = False,
+               extraction_options: dict | None = None) -> AnalysisPlanResult:
     """构建完整输入规划，并判定是否可执行。
 
     不可执行的原因保持稳定且可由用户消除：
@@ -316,6 +503,7 @@ def build_plan(*, kind: str, blocks: list[Block], document_name: str, version_id
     - no_analyzable_content：没有可分析单元；
     - request_budget_exceeded：分批 + 汇总请求数超过任务预算或配置上界。
     """
+    extraction_options = normalize_options(extraction_options) if kind == "extraction" else None
     units, excluded = build_units(blocks)
     total_chars = sum(len(unit.text) for unit in units)
     excluded_units = sum(excluded.values())
@@ -324,6 +512,7 @@ def build_plan(*, kind: str, blocks: list[Block], document_name: str, version_id
     if parse_quality_status == "invalid":
         return AnalysisPlanResult(
             kind=kind, prompt_version=prompt_version, protocol_version=INPUT_PROTOCOL_VERSION,
+            extraction_options=extraction_options,
             fingerprint="", units=[], batches=[], batch_message_chars=[], excluded_counts=excluded,
             excluded_units=excluded_units, total_chars=total_chars, unplannable=[],
             reduce_required=False, request_upper_bound=0,
@@ -334,6 +523,7 @@ def build_plan(*, kind: str, blocks: list[Block], document_name: str, version_id
         # 这里不补造来源，直接如实拒绝。
         return AnalysisPlanResult(
             kind=kind, prompt_version=prompt_version, protocol_version=INPUT_PROTOCOL_VERSION,
+            extraction_options=extraction_options,
             fingerprint="", units=[], batches=[], batch_message_chars=[], excluded_counts=excluded,
             excluded_units=excluded_units, total_chars=total_chars, unplannable=[],
             reduce_required=False, request_upper_bound=0,
@@ -342,6 +532,7 @@ def build_plan(*, kind: str, blocks: list[Block], document_name: str, version_id
     if not units:
         return AnalysisPlanResult(
             kind=kind, prompt_version=prompt_version, protocol_version=INPUT_PROTOCOL_VERSION,
+            extraction_options=extraction_options,
             fingerprint="", units=[], batches=[], batch_message_chars=[], excluded_counts=excluded,
             excluded_units=excluded_units, total_chars=total_chars, unplannable=[],
             reduce_required=False, request_upper_bound=0,
@@ -350,6 +541,7 @@ def build_plan(*, kind: str, blocks: list[Block], document_name: str, version_id
     if total_chars > settings.analysis_max_document_chars:
         return AnalysisPlanResult(
             kind=kind, prompt_version=prompt_version, protocol_version=INPUT_PROTOCOL_VERSION,
+            extraction_options=extraction_options,
             fingerprint="", units=units, batches=[], batch_message_chars=[], excluded_counts=excluded,
             excluded_units=excluded_units, total_chars=total_chars, unplannable=[],
             reduce_required=False, request_upper_bound=0,
@@ -359,7 +551,9 @@ def build_plan(*, kind: str, blocks: list[Block], document_name: str, version_id
     message_chars = [batch_message_chars(kind=kind, document_name=document_name,
                                          version_id=version_id, units=batch,
                                          system_prompt_chars=system_prompt_chars,
-                                         batch_index=index + 1, batch_total=len(batches))
+                                         batch_index=index + 1, batch_total=len(batches),
+                                         extraction_options=extraction_options,
+                                         max_items=settings.analysis_max_items_per_batch)
                      for index, batch in enumerate(batches)]
     # 消息长度同样必须落在总输入预算内；超出说明批次预算或固定包装过大。
     over_budget = [(index, chars) for index, chars in enumerate(message_chars)
@@ -367,6 +561,7 @@ def build_plan(*, kind: str, blocks: list[Block], document_name: str, version_id
     if over_budget:
         return AnalysisPlanResult(
             kind=kind, prompt_version=prompt_version, protocol_version=INPUT_PROTOCOL_VERSION,
+            extraction_options=extraction_options,
             fingerprint="", units=units, batches=batches, batch_message_chars=message_chars,
             excluded_counts=excluded, excluded_units=excluded_units, total_chars=total_chars,
             unplannable=unplannable, reduce_required=False, request_upper_bound=0,
@@ -379,6 +574,7 @@ def build_plan(*, kind: str, blocks: list[Block], document_name: str, version_id
             "本次规划不完整，请调大 DOCQA_ANALYSIS_BATCH_MAX_CHARS 或缩小分块后重试")
         return AnalysisPlanResult(
             kind=kind, prompt_version=prompt_version, protocol_version=INPUT_PROTOCOL_VERSION,
+            extraction_options=extraction_options,
             fingerprint="", units=units, batches=batches, batch_message_chars=message_chars,
             excluded_counts=excluded, excluded_units=excluded_units, total_chars=total_chars,
             unplannable=unplannable, reduce_required=False, request_upper_bound=0,
@@ -393,6 +589,7 @@ def build_plan(*, kind: str, blocks: list[Block], document_name: str, version_id
             "第一版不提供“只处理前几批却称为全文”的降级，也不自动拆成多个收费任务")
         return AnalysisPlanResult(
             kind=kind, prompt_version=prompt_version, protocol_version=INPUT_PROTOCOL_VERSION,
+            extraction_options=extraction_options,
             fingerprint="", units=units, batches=batches, batch_message_chars=message_chars,
             excluded_counts=excluded, excluded_units=excluded_units, total_chars=total_chars,
             unplannable=unplannable, reduce_required=reduce_required,
@@ -408,6 +605,7 @@ def build_plan(*, kind: str, blocks: list[Block], document_name: str, version_id
         if reduce_bound > min(settings.analysis_reduce_max_chars, settings.analysis_input_max_chars):
             return AnalysisPlanResult(
                 kind=kind, prompt_version=prompt_version, protocol_version=INPUT_PROTOCOL_VERSION,
+                extraction_options=extraction_options,
                 fingerprint="", units=units, batches=batches, batch_message_chars=message_chars,
                 excluded_counts=excluded, excluded_units=excluded_units, total_chars=total_chars,
                 unplannable=unplannable, reduce_required=True, request_upper_bound=request_upper_bound,
@@ -425,9 +623,11 @@ def build_plan(*, kind: str, blocks: list[Block], document_name: str, version_id
 
     fingerprint = plan_fingerprint(kind=kind, version_id=version_id, units=units,
                                    batches=batches, settings=settings,
-                                   prompt_version=prompt_version)
+                                   prompt_version=prompt_version,
+                                   extraction_options=extraction_options)
     return AnalysisPlanResult(
         kind=kind, prompt_version=prompt_version, protocol_version=INPUT_PROTOCOL_VERSION,
+        extraction_options=extraction_options,
         fingerprint=fingerprint, units=units, batches=batches, batch_message_chars=message_chars,
         excluded_counts=excluded, excluded_units=excluded_units, total_chars=total_chars,
         unplannable=unplannable, reduce_required=reduce_required,
@@ -436,13 +636,16 @@ def build_plan(*, kind: str, blocks: list[Block], document_name: str, version_id
 
 def plan_fingerprint(*, kind: str, version_id: str, units: list[InputUnit],
                      batches: list[list[InputUnit]], settings: Settings,
-                     prompt_version: str) -> str:
+                     prompt_version: str, extraction_options: dict | None = None) -> str:
     """计划指纹：版本、单元内容与顺序、分批结果和相关预算的稳定摘要。
 
     创建任务时固定它；若期间解析版本切换或预算配置变化导致指纹不一致，
     接口返回 409 并要求重新展示计划，避免静默扩大费用。
     """
     digest = sha256()
+    if kind == "extraction":
+        digest.update(json.dumps(normalize_options(extraction_options), ensure_ascii=False,
+                                 sort_keys=True, separators=(",", ":")).encode())
     digest.update(f"kind={kind};protocol={INPUT_PROTOCOL_VERSION};prompt={prompt_version};"
                   f"version={version_id};batch={settings.analysis_batch_max_chars};"
                   f"reduce={settings.analysis_reduce_max_chars};"
@@ -455,7 +658,12 @@ def plan_fingerprint(*, kind: str, version_id: str, units: list[InputUnit],
         digest.update(b"|batch")
         for unit in batch:
             digest.update(unit.unit_id.encode())
-            digest.update(unit.text.encode())
+            # 表头层级/合并关系变化也必须使计划失效，即使可见文字碰巧相同。
+            payload = {**unit.payload(), "ref": 0}
+            digest.update(json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                                     separators=(",", ":")).encode())
+            digest.update(json.dumps(unit.table_structure, ensure_ascii=False, sort_keys=True,
+                                     separators=(",", ":")).encode())
     digest.update(f"units={len(units)}".encode())
     return digest.hexdigest()
 

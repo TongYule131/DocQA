@@ -8,8 +8,10 @@
 # 4. 旧库的文档、分块 ID、向量、维度、提供方签名和索引状态全部保留；旧内容建立
 #    legacy 解析版本，不重新 OCR、不调用 embedding。
 import logging
+import re
 import shutil
 import sqlite3
+from functools import lru_cache
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -489,11 +491,12 @@ def _migrate_legacy_content(db: sqlite3.Connection, now: str) -> None:
 
 def _migrate_legacy_index(db, doc_id, version_id, chunk_rows, now):
     """迁移旧索引记录：保留签名与维度，验证完整性后再决定是否仍可用。"""
-    row = db.execute("SELECT * FROM embedding_indexes WHERE document_id=?", (doc_id,)).fetchone()
+    cursor = db.execute("SELECT * FROM embedding_indexes WHERE document_id=?", (doc_id,))
+    row = cursor.fetchone()
     if row is None:
         return
-    columns = _columns(db, "embedding_indexes")
-    record = dict(zip(columns, row)) if not isinstance(row, sqlite3.Row) else dict(row)
+    # 默认 sqlite3 行是元组，必须按 SELECT 的列序解码；集合没有列序。
+    record = dict(zip((column[0] for column in cursor.description), row)) if not isinstance(row, sqlite3.Row) else dict(row)
     status = record.get("status")
     index_id = f"legacy-index-{doc_id}"
     vector_rows = db.execute(
@@ -744,6 +747,74 @@ def _apply_v4(db: sqlite3.Connection) -> None:
 MIGRATIONS = {1: _apply_v1, 2: _apply_v2, 3: _apply_v3, 4: _apply_v4}
 
 
+def _index_shapes(db: sqlite3.Connection) -> dict:
+    shapes = {}
+    for name, table, sql in db.execute("SELECT name, tbl_name, sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL"):
+        listing = {row[1]: row for row in db.execute(f'PRAGMA index_list("{table}")')}
+        columns = tuple(row[2] for row in db.execute(f'PRAGMA index_info("{name}")'))
+        where = re.split(r"\bWHERE\b", sql, maxsplit=1, flags=re.I)
+        predicate = re.sub(r'\s+|"', '', where[1]).lower() if len(where) == 2 else ''
+        shapes[name] = (table, bool(listing[name][2]), columns, predicate)
+    return shapes
+
+
+@lru_cache(maxsize=None)
+def _required_schema(version: int) -> tuple[dict, dict, dict]:
+    """从同一套迁移生成结构基准，避免另维护一份易过时的表/列清单。"""
+    with closing(sqlite3.connect(":memory:", isolation_level=None)) as expected:
+        expected.row_factory = sqlite3.Row
+        expected.execute("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+        for number in range(1, version + 1):
+            MIGRATIONS[number](expected)
+        tables = {
+            row[0]: {column[1]: (column[2].upper(), bool(column[3]), column[5])
+                     for column in expected.execute(f'PRAGMA table_info("{row[0]}")')}
+            for row in expected.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+        }
+        indexes = _index_shapes(expected)
+        constraints = {table: _table_constraints(expected, table) for table in tables}
+        return tables, indexes, constraints
+
+
+def _table_constraints(db: sqlite3.Connection, table: str) -> tuple:
+    # 主键序号由列契约检查；外键及内联 UNIQUE 也属于数据完整性要求，不能只查列名。
+    foreign_keys = tuple(sorted(tuple(row)[1:] for row in db.execute(f'PRAGMA foreign_key_list("{table}")')))
+    unique_columns = tuple(sorted(
+        tuple(column[2] for column in db.execute(f'PRAGMA index_info("{row[1]}")'))
+        for row in db.execute(f'PRAGMA index_list("{table}")') if row[3] == 'u'))
+    return foreign_keys, unique_columns
+
+
+def validate_schema(db: sqlite3.Connection, *, version: int | None = None) -> int:
+    """拒绝未来库、断裂的版本登记及缺失结构；本函数只读，不修补旧数据。"""
+    current = detect_version(db)
+    target = SCHEMA_VERSION if version is None else version
+    if current != target:
+        raise MigrationError(f"数据库版本 v{current} 与代码要求 v{target} 不一致，请使用匹配代码并完成受控升级")
+    if current == 0:
+        return current
+    registered = [row[0] for row in db.execute("SELECT version FROM schema_migrations ORDER BY version")]
+    if registered != list(range(1, current + 1)):
+        raise MigrationError("数据库迁移登记不连续，拒绝继续启动或写入")
+    required, required_indexes, required_constraints = _required_schema(current)
+    missing = []
+    for name, columns in required.items():
+        present = {row[1]: (row[2].upper(), bool(row[3]), row[5])
+                   for row in db.execute(f'PRAGMA table_info("{name}")')}
+        mismatched = {column for column, shape in columns.items() if present.get(column) != shape}
+        if mismatched:
+            missing.append(name + ":" + ",".join(sorted(mismatched)))
+        if _table_constraints(db, name) != required_constraints[name]:
+            missing.append(name + ":外键或唯一约束")
+    indexes = _index_shapes(db)
+    mismatched_indexes = {name for name, shape in required_indexes.items() if indexes.get(name) != shape}
+    if mismatched_indexes:
+        missing.append("索引:" + ",".join(sorted(mismatched_indexes)))
+    if missing:
+        raise MigrationError("数据库结构与版本登记不一致，缺少 " + "; ".join(missing))
+    return current
+
+
 def run_migrations(db: sqlite3.Connection, *, backup_dir: Path | None = None,
                    db_path: Path | None = None) -> dict:
     """执行所有未应用的迁移，返回执行摘要。
@@ -751,7 +822,11 @@ def run_migrations(db: sqlite3.Connection, *, backup_dir: Path | None = None,
     任何一步失败都会回滚该版本的改动并抛出 MigrationError；调用方据此停止启动。
     """
     current = detect_version(db)
-    if current >= SCHEMA_VERSION:
+    if current > SCHEMA_VERSION:
+        raise MigrationError(f"数据库 v{current} 高于代码支持的 v{SCHEMA_VERSION}，拒绝以旧代码启动")
+    if current:
+        validate_schema(db, version=current)
+    if current == SCHEMA_VERSION:
         return {"from": current, "to": current, "applied": [], "backup": None}
     backup_path = None
     if backup_dir is not None and db_path is not None:
@@ -767,6 +842,8 @@ def run_migrations(db: sqlite3.Connection, *, backup_dir: Path | None = None,
     try:
         db.execute("BEGIN IMMEDIATE")
         locked_version = detect_version(db)
+        if locked_version > SCHEMA_VERSION:
+            raise MigrationError("等待迁移锁期间数据库已升级到更高版本，拒绝继续")
         for version in range(locked_version + 1, SCHEMA_VERSION + 1):
             migration = MIGRATIONS.get(version)
             if migration is None:
@@ -778,6 +855,7 @@ def run_migrations(db: sqlite3.Connection, *, backup_dir: Path | None = None,
             applied.append(version)
         if db.execute("PRAGMA foreign_key_check").fetchone():
             raise MigrationError("迁移后外键校验失败")
+        validate_schema(db)
         db.execute("COMMIT")
     except Exception as exc:
         if db.in_transaction:

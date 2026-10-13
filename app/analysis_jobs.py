@@ -33,6 +33,7 @@ from app.analysis_sources import (
     build_plan,
 )
 from app.config import Settings
+from app.extraction_requirements import normalize_options
 from app.rag_context import RagError
 from app.repository import Repository, TaskConflict, now_iso
 from app.schemas import (
@@ -125,8 +126,10 @@ class AnalysisJobService:
         return version
 
     def build_plan(self, document_id: str, kind: str,
-                   version_id: str | None = None) -> AnalysisPlanOutcome:
+                   version_id: str | None = None, extraction_options=None) -> AnalysisPlanOutcome:
         """只做本地输入规划，零外部调用。"""
+        if kind != "extraction" and extraction_options is not None:
+            raise RagError(422, "unexpected_extraction_options", "摘要任务不能指定提取指标")
         document = self.require_document(document_id)
         version = self.resolve_version(document, version_id)
         blocks = self.repository.blocks(version.id)
@@ -137,7 +140,8 @@ class AnalysisJobService:
                           version_id=version.id, settings=self.settings,
                           prompt_version=prompt_version, system_prompt_chars=system_chars,
                           parse_quality_status=version.quality_status,
-                          parse_is_legacy=version.is_legacy)
+                          parse_is_legacy=version.is_legacy,
+                          extraction_options=extraction_options)
         return AnalysisPlanOutcome(plan=plan, version_id=version.id, document=document,
                                    is_active_version=bool(
                                        document.active_parse_version_id == version.id))
@@ -176,7 +180,8 @@ class AnalysisJobService:
                 max_items_total=self.settings.analysis_max_items_total),
             batches=batches, reduce_required=plan.reduce_required,
             request_upper_bound=plan.request_upper_bound, executable=plan.executable,
-            limitations=limitations, blocked_reason=plan.blocked_reason)
+            limitations=limitations, blocked_reason=plan.blocked_reason,
+            extraction_options=plan.extraction_options if kind == "extraction" else None)
 
     @staticmethod
     def _plan_limitations(plan: AnalysisPlanResult) -> list[str]:
@@ -211,6 +216,8 @@ class AnalysisJobService:
         **本方法不发起任何模型调用**，只写数据库。
         """
         request = payload or AnalysisJobRequest()
+        if kind != "extraction" and request.extraction_options is not None:
+            raise RagError(422, "unexpected_extraction_options", "摘要任务不能指定提取指标")
         document = self.require_document(document_id)
         # 前置检查顺序：文档存在 → 有可用解析版本 → 生成模型已配置。
         # 因此“不存在”是 404、“没有可用解析版本”是 409、缺配置是 503，
@@ -224,6 +231,7 @@ class AnalysisJobService:
         if key:
             existing = self.repository.find_analysis_job_by_idempotency(document_id, key)
             if existing is not None:
+                self._check_options(existing.id, kind, request.extraction_options)
                 stored = self.repository.analysis_job_fingerprint(existing.id, key)
                 if stored and existing.plan_fingerprint:
                     expected = request_fingerprint(
@@ -244,7 +252,8 @@ class AnalysisJobService:
             probe_version = self.resolve_version(document, request.parse_version_id)
             prompt_version_probe, protocol_probe = KIND_VERSIONS[kind]
             reuse = self._reusable_result(document_id, kind, probe_version.id, signature_probe,
-                                         prompt_version_probe, protocol_probe)
+                                         prompt_version_probe, protocol_probe,
+                                         request.extraction_options)
             if reuse is not None:
                 job = self.repository.get_analysis_job(reuse["job_id"])
                 if job is not None:
@@ -262,7 +271,7 @@ class AnalysisJobService:
 
         if not self.ready()[0]:
             raise RagError(503, "provider_not_configured", self.ready()[1])
-        outcome = self.build_plan(document_id, kind, request.parse_version_id)
+        outcome = self.build_plan(document_id, kind, request.parse_version_id, request.extraction_options)
         plan = outcome.plan
         version = self.repository.get_parse_version(outcome.version_id)
         prompt_version, protocol_version = KIND_VERSIONS[kind]
@@ -343,6 +352,7 @@ class AnalysisJobService:
             "excluded_units": plan.excluded_units,
             "total_chars": plan.total_chars,
             "limitations": plan.limitations,
+            "extraction_options": plan.extraction_options,
             "batches": [
                 {"batch_id": f"b{index + 1}", "order_index": index,
                  "unit_ids": [unit.unit_id for unit in batch],
@@ -362,8 +372,9 @@ class AnalysisJobService:
         return digest.hexdigest()
 
     def _reusable_result(self, document_id: str, kind: str, version_id: str, model_signature: str,
-                         prompt_version: str, protocol_version: str) -> dict | None:
-        """查找同文档、同解析版本、同 Prompt／协议／模型配置的成功结果。"""
+                         prompt_version: str, protocol_version: str, extraction_options=None) -> dict | None:
+        """只复用与当前输入、预算及输出限制相符的成功结果。"""
+        current_plan = None
         for summary in self.repository.list_analysis_results(document_id, kind):
             if summary.parse_version_id != version_id:
                 continue
@@ -374,8 +385,23 @@ class AnalysisJobService:
             row = self.repository.get_analysis_result_row(summary.id)
             if row is None or row["model_signature"] != model_signature:
                 continue
+            if kind == "extraction" and not self._same_options(row["job_id"], extraction_options):
+                continue
+            if current_plan is None:
+                current_plan = self.build_plan(document_id, kind, version_id, extraction_options).plan
+            job = self.repository.get_analysis_job(row["job_id"])
+            if not current_plan.executable or job is None or job.plan_fingerprint != current_plan.fingerprint:
+                continue
             return row
         return None
+
+    def _same_options(self, job_id: str, options) -> bool:
+        stored = self.repository.analysis_job_plan(job_id) or {}
+        return normalize_options(stored.get("extraction_options")) == normalize_options(options)
+
+    def _check_options(self, job_id: str, kind: str, options) -> None:
+        if kind == "extraction" and not self._same_options(job_id, options):
+            raise TaskConflict("该幂等键已用于不同的提取指标，请重新查看计划并使用新键")
 
     def get_job(self, job_id: str) -> AnalysisJob:
         job = self.repository.get_analysis_job(job_id)
@@ -469,7 +495,9 @@ class AnalysisJobService:
             result.extraction = AnalysisExtractionResult(
                 items=[AnalysisExtractionItem(**item) for item in payload.get("items", [])],
                 sections=payload.get("sections", {}),
-                citations=[AnalysisCitation(**item) for item in payload.get("citations", [])])
+                citations=[AnalysisCitation(**item) for item in payload.get("citations", [])],
+                options=payload.get("options"), metric_coverage=payload.get("metric_coverage"),
+                table_checks=payload.get("table_checks", []))
         else:
             result.summary = AnalysisSummaryResult(
                 topic_overview=payload.get("topic_overview", ""),
@@ -528,6 +556,10 @@ class AnalysisJobService:
                 "items": [item.model_dump() for item in result.extraction.items],
                 "sections": result.extraction.sections,
                 "citations": [citation.model_dump() for citation in result.extraction.citations],
+                "options": result.extraction.options.model_dump() if result.extraction.options else None,
+                "metric_coverage": (result.extraction.metric_coverage.model_dump()
+                                    if result.extraction.metric_coverage else None),
+                "table_checks": result.extraction.table_checks,
             }
         if result.summary is not None:
             payload["summary"] = {
@@ -593,6 +625,19 @@ class AnalysisJobService:
             labels = {"data": "数据", "conclusion": "结论", "viewpoint": "观点"}
             items = result.extraction.items if result.extraction else []
             sections = result.extraction.sections if result.extraction else {}
+            metrics = result.extraction.metric_coverage if result.extraction else None
+            if metrics and metrics.required_count:
+                lines.append("## 指定指标核对")
+                lines.append(f"字段匹配 {metrics.matched_count}/{metrics.required_count}；"
+                             "未确认不代表原文不存在，匹配不代替事实语义复核。")
+                for check in metrics.metrics:
+                    conditions = "；".join(f"{key}：{esc(getattr(check, key))}"
+                                           for key in ("subject", "period", "scope")
+                                           if getattr(check, key))
+                    lines.append(f"- {esc(check.name)}{('（' + conditions + '）') if conditions else ''}："
+                                 + ("已匹配" if check.status == "matched" else "未确认")
+                                 + f"；{esc(check.reason)}")
+                lines.append("")
             for kind in ("data", "conclusion", "viewpoint"):
                 lines.append(f"## {labels[kind]}")
                 group = [item for item in items if item.kind == kind]

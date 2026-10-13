@@ -91,6 +91,8 @@ async function waitFor(fn, { timeout = 120000, interval = 500, label = '条件' 
 }
 
 async function main() {
+  // 历史入口会直接触发真实提问，未绑定持久化额度；保留源码供核对旧证据。
+  throw new Error('历史 RAG 网页在线入口已关闭；新验收须使用当前冻结计划及累计账本。');
   if (!DOC) throw new Error('必须用 --doc 指定已建索引的文档 ID')
   await mkdir(OUT, { recursive: true })
   const profile = await mkdtemp(join(tmpdir(), 'docqa-rag-chrome-'))

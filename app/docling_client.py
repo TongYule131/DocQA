@@ -169,18 +169,23 @@ class DoclingClient:
     # ------------------------------------------------------------------
     # 查询与领取
     # ------------------------------------------------------------------
-    def poll(self, task_id: str) -> dict[str, Any]:
+    def poll(self, task_id: str, *, deadline=None, should_stop=None) -> dict[str, Any]:
         """查询任务状态；可有限重试并退避。"""
-        return self._get_with_retry(f"/v1/status/poll/{task_id}", "查询解析任务状态")
+        return self._get_with_retry(f"/v1/status/poll/{task_id}", "查询解析任务状态",
+                                    deadline=deadline, should_stop=should_stop)
 
-    def fetch_result(self, task_id: str) -> dict[str, Any]:
+    def fetch_result(self, task_id: str, *, deadline=None, should_stop=None) -> dict[str, Any]:
         """领取结果；结果不存在或过期返回稳定错误码，不重试无意义请求。"""
+        self._check_wait(deadline, should_stop)
         try:
-            response = self._client.get(f"/v1/result/{task_id}")
+            response = self._client.get(f"/v1/result/{task_id}", timeout=self._request_timeout(deadline))
         except httpx.TimeoutException as exc:
+            self._check_wait(deadline, should_stop)
             raise DoclingError(ERROR_READ_TIMEOUT, "领取解析结果超时，可稍后重试", retryable=True) from exc
         except httpx.HTTPError as exc:
+            self._check_wait(deadline, should_stop)
             raise DoclingError(ERROR_CONNECT, "领取解析结果时网络错误", retryable=True) from exc
+        self._check_wait(deadline, should_stop)
         if response.status_code == 404:
             raise DoclingError(ERROR_RESULT_MISSING,
                                "解析服务中没有该任务的结果（可能已过期或服务重启后任务被清除）")
@@ -198,14 +203,8 @@ class DoclingClient:
         s = self.settings
         deadline = self._clock() + s.docling_total_timeout_seconds
         while True:
-            if should_stop is not None and should_stop():
-                raise DoclingError(ERROR_CANCELLED, "已请求停止本次等待，上游任务编号已保留，可稍后恢复")
-            if self._clock() > deadline:
-                # 超时只是本次等待超时，不代表远端一定停止；上游 task_id 必须保留。
-                raise DoclingError(ERROR_DEADLINE,
-                                   "等待解析结果超过配置的整体期限；上游任务可能仍在执行，"
-                                   "已保留任务编号，不会自动新建重复任务")
-            task = self.poll(task_id)
+            self._check_wait(deadline, should_stop)
+            task = self.poll(task_id, deadline=deadline, should_stop=should_stop)
             task_status = str(task.get("task_status") or "").lower()
             if on_poll is not None:
                 on_poll(task_status)
@@ -215,21 +214,48 @@ class DoclingClient:
                 raise DoclingError(ERROR_TASK_FAILED, self._task_failure_message(task))
             if task_status not in {"pending", "started", "running", "queued", "in_progress", ""}:
                 # 未知状态不猜测为成功；保留原始状态供诊断。
-                logger.warning("Docling 返回未知任务状态：%s", task_status)
-            self._sleep(min(s.docling_poll_interval_seconds,
-                            max(0.05, deadline - self._clock())))
-        return self._build_result(task_id, task)
+                logger.warning("Docling 返回未知任务状态，继续有限等待")
+            self._wait_delay(s.docling_poll_interval_seconds, deadline, should_stop)
+        return self._build_result(task_id, task, deadline=deadline, should_stop=should_stop)
 
     # ------------------------------------------------------------------
     # 内部工具
     # ------------------------------------------------------------------
-    def _get_with_retry(self, path: str, action: str) -> dict[str, Any]:
-        """带有限重试与退避的 GET；整体期限由调用方控制。"""
+    def _check_wait(self, deadline, should_stop) -> None:
+        if should_stop is not None and should_stop():
+            raise DoclingError(ERROR_CANCELLED, "已请求停止本次等待，上游任务编号已保留，可稍后恢复")
+        if deadline is not None and self._clock() >= deadline:
+            raise DoclingError(ERROR_DEADLINE,
+                               "等待解析结果超过配置的整体期限；上游任务可能仍在执行，"
+                               "已保留任务编号，不会自动新建重复任务")
+
+    def _request_timeout(self, deadline) -> httpx.Timeout:
+        timeout = self._client.timeout
+        if deadline is None:
+            return timeout
+        remaining = max(0.001, deadline - self._clock())
+        return httpx.Timeout(**{part: min(getattr(timeout, part), remaining)
+                                for part in ("connect", "read", "write", "pool")})
+
+    def _wait_delay(self, delay, deadline, should_stop) -> None:
+        # 退避与轮询共用剩余期限；有取消回调时分段等待以便及时停止。
+        while delay > 0:
+            self._check_wait(deadline, should_stop)
+            step = min(delay, 0.25) if should_stop is not None else delay
+            if deadline is not None:
+                step = min(step, max(0, deadline - self._clock()))
+            self._sleep(step)
+            delay -= step
+        self._check_wait(deadline, should_stop)
+
+    def _get_with_retry(self, path: str, action: str, *, deadline=None, should_stop=None) -> dict[str, Any]:
+        """带有限重试与退避的 GET；所有重试共享本次等待的期限。"""
         s = self.settings
         last_error: DoclingError | None = None
         for attempt in range(s.docling_max_retries + 1):
+            self._check_wait(deadline, should_stop)
             try:
-                response = self._client.get(path)
+                response = self._client.get(path, timeout=self._request_timeout(deadline))
             except httpx.TimeoutException as exc:
                 last_error = DoclingError(ERROR_READ_TIMEOUT, f"{action}超时", retryable=True)
                 last_error.__cause__ = exc
@@ -237,6 +263,7 @@ class DoclingClient:
                 last_error = DoclingError(ERROR_CONNECT, f"{action}时网络错误", retryable=True)
                 last_error.__cause__ = exc
             else:
+                self._check_wait(deadline, should_stop)
                 if response.status_code == 404:
                     raise DoclingError(ERROR_RESULT_MISSING,
                                        "解析服务中不存在该任务（可能已过期或服务重启后任务被清除）")
@@ -248,14 +275,15 @@ class DoclingClient:
                                        status_code=response.status_code)
                 else:
                     return self._json_or_error(response, action)
+            self._check_wait(deadline, should_stop)
             if attempt < s.docling_max_retries:
-                self._sleep(s.docling_retry_backoff_seconds * (attempt + 1))
+                self._wait_delay(s.docling_retry_backoff_seconds * (attempt + 1), deadline, should_stop)
         raise last_error or DoclingError(ERROR_HTTP, f"{action}失败")
 
-    def _build_result(self, task_id: str, task: dict[str, Any]) -> ConversionResult:
+    def _build_result(self, task_id: str, task: dict[str, Any], *, deadline=None, should_stop=None) -> ConversionResult:
         """领取结果并区分任务状态与转换状态。"""
         try:
-            payload = self.fetch_result(task_id)
+            payload = self.fetch_result(task_id, deadline=deadline, should_stop=should_stop)
         except DoclingError as exc:
             if exc.code == ERROR_RESULT_MISSING:
                 # 任务成功但没有结果：可能是结果已过期，保留任务信息供诊断。

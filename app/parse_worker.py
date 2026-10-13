@@ -50,6 +50,7 @@ from app.docling_client import (
     DoclingError,
 )
 from app.repository import Repository, now_iso
+from app.runtime import RuntimeGuard
 from app.schemas import ParseTask, ParseVersion
 
 logger = logging.getLogger("docqa.worker")
@@ -69,6 +70,7 @@ class ParseWorker:
                  client: DoclingClient | None = None, *, worker_id: str | None = None,
                  sleep=time.sleep):
         self.settings = settings
+        self.runtime = RuntimeGuard(settings.data_dir, "parse-worker")
         self.repository = repository or Repository(settings.data_dir / "docqa.db")
         self.client = client or DoclingClient(settings)
         self.worker_id = worker_id or f"{os.getpid()}-{int(time.time())}"
@@ -88,8 +90,11 @@ class ParseWorker:
     def run_forever(self, *, max_tasks: int | None = None) -> int:
         """串行循环领取任务；max_tasks 用于测试与一次性运行。"""
         processed = 0
+        self.runtime.prepare_database(self.settings.allow_database_upgrade)
         self.repository.initialize()
+        self.runtime.mark_ready()
         while not self.stop_requested:
+            self.runtime.check()
             task = self.repository.claim_next_task(self.worker_id, self.settings.worker_lease_seconds)
             if task is None:
                 if max_tasks is not None:
@@ -104,6 +109,7 @@ class ParseWorker:
 
     def run_task(self, task_id: str) -> bool:
         """显式执行指定任务（测试与手动恢复使用）。"""
+        self.runtime.check()
         task = self.repository.claim_next_task(self.worker_id, self.settings.worker_lease_seconds,
                                                task_id=task_id)
         if task is None:
@@ -126,7 +132,7 @@ class ParseWorker:
                                                        self.settings.worker_lease_seconds):
                         return
                 except Exception:
-                    logger.exception("任务 %s 续租失败，后续发布仍须通过租约检查", task.id)
+                    logger.error("任务 %s 续租失败，后续发布仍须通过租约检查", task.id)
                     return
 
         thread = Thread(target=heartbeat, daemon=True)
@@ -139,6 +145,7 @@ class ParseWorker:
 
     def _process_task(self, task: ParseTask) -> None:
         """执行一个任务：提交/恢复 → 等待 → 领取 → 规范化 → 分块 → 发布。"""
+        self.runtime.check()
         token = task.lease_token or ""
         logger.info("开始处理任务 %s（文档 %s，阶段 %s，上游 %s）",
                     task.id, task.document_id, task.stage, task.upstream_task_id or "无")
@@ -181,8 +188,8 @@ class ParseWorker:
                           origin_hash=origin_hash, parser_version=None, source="docling")
         except DoclingError as exc:
             self._handle_docling_error(task, token, exc)
-        except Exception:  # noqa: BLE001 - worker 必须把任意异常转换为任务终态
-            logger.exception("任务 %s 处理失败", task.id)
+        except Exception as exc:  # noqa: BLE001 - worker 必须把任意异常转换为任务终态
+            logger.error("任务 %s 处理失败，异常类型 %s", task.id, type(exc).__name__)
             self.repository.finish_task(
                 task.id, token, status="failed", stage="done",
                 error_code=ERROR_LOCAL_IO,
@@ -270,29 +277,35 @@ class ParseWorker:
                                         error_code=ERROR_RESULT_INVALID, error_message=str(exc))
             return
         text = content.decode("utf-8-sig")
+        # TXT 不能永远作为一个全文块：长文件会因此无法进入分析分批。
+        # 仅在原有空白行边界分段，不裁切句子、改写字符或丢弃尾部；长单段仍由预算受控拒绝。
+        spans = _text_paragraph_spans(text)
+        nodes = [{"self_ref": f"#/texts/{index}", "label": "text", "text": text[start:end],
+                  "parent": {"$ref": "#/body"},
+                  "prov": [{"page_no": 1, "charspan": [start, end]}]}
+                 for index, (start, end) in enumerate(spans)]
         payload = {
             "schema_name": "local-text",
             "version": "1",
-            "body": {"self_ref": "#/body", "children": [{"$ref": "#/texts/0"}]},
-            "texts": [{"self_ref": "#/texts/0", "label": "text", "text": text,
-                       "parent": {"$ref": "#/body"}, "prov": [{"page_no": 1, "charspan": [0, len(text)]}]}],
+            "body": {"self_ref": "#/body", "children": [{"$ref": node["self_ref"]} for node in nodes]},
+            "texts": nodes,
             "tables": [], "groups": [], "pictures": [],
             "pages": {"1": {"page_no": 1}},
         }
         self.repository.update_task_progress(task.id, token, stage="normalizing")
         normalized = normalize_docling_result(document.id, payload, "txt",
-                                             parser_version="local-text-1")
+                                             parser_version="local-text-2")
         # 补充 TXT 的行范围来源，并说明其页码不是物理 PDF 页码。
         lines = text.splitlines()
-        for block in normalized.blocks:
+        for block, (start, end) in zip(normalized.blocks, spans, strict=True):
             for source in block.sources:
-                source.line_start = 1
-                source.line_end = max(1, len(lines))
-                source.note = "TXT 逻辑页，不是物理 PDF 页码；行范围为全文行号"
+                source.line_start = len(text[:start].splitlines()) + 1
+                source.line_end = max(source.line_start, len(text[:end].rstrip('\r\n').splitlines()))
+                source.note = "TXT 逻辑页，不是物理 PDF 页码；行范围和字符范围对应原文段落"
         normalized.warnings.append(
             _txt_warning(len(lines)))
         self._publish(task, token, document, payload, text, origin_hash=origin_hash,
-                      parser_version="local-text-1", source="local",
+                      parser_version="local-text-2", source="local",
                       normalized=normalized)
 
     # ------------------------------------------------------------------
@@ -302,6 +315,10 @@ class ParseWorker:
                  md_content: str | None, *, origin_hash: str, parser_version: str | None,
                  source: str, normalized=None) -> None:
         """规范化 → 分块 → 写文件 → 短事务发布。"""
+        if self.repository.task_cancelled(task.id):
+            self.repository.mark_task_needs_attention(
+                task.id, token, "waiting_paused", "等待已暂停，上游任务编号保留，可明确恢复")
+            return
         self.repository.update_task_progress(task.id, token, stage="normalizing")
         fmt = document.format or self._format_from_name(document.filename)
         if normalized is None:
@@ -386,6 +403,10 @@ class ParseWorker:
         published, created = self.repository.publish_parse_version(
             task.id, token, version, normalized.blocks, chunks, normalized.warnings)
         if published is None:
+            if self.repository.task_cancelled(task.id):
+                self.repository.mark_task_needs_attention(
+                    task.id, token, "waiting_paused", "等待已暂停，上游任务编号保留，可明确恢复")
+                return
             # 令牌失效：本次结果不发布；结果文件保留待清理，不生成重复版本。
             logger.warning("任务 %s 发布时令牌失效，未发布版本 %s", task.id, version_id)
             return
@@ -409,8 +430,13 @@ class ParseWorker:
         json_rel = f"parse-results/{version_id}/document.json"
         md_rel = f"parse-results/{version_id}/document.md" if md_content is not None else None
         marker = target_dir / "completed.json"
-        if marker.exists():
+        required = [target_dir / "document.json", target_dir / "normalized.json"]
+        if md_content is not None:
+            required.append(target_dir / "document.md")
+        if marker.is_file() and all(path.is_file() for path in required):
             return json_rel, md_rel
+        # 兼容旧实现先写标记后中断留下的目录；不让旧标记遮蔽正文缺失。
+        marker.unlink(missing_ok=True)
         self.results_dir.mkdir(parents=True, exist_ok=True)
         tmp_dir = Path(tempfile.mkdtemp(prefix=f".{version_id}-", dir=self.results_dir))
         try:
@@ -430,8 +456,10 @@ class ParseWorker:
                 json.dumps({"version_id": version_id, "schema": RESULT_SCHEMA_VERSION,
                             "written_at": now_iso()}, ensure_ascii=False), encoding="utf-8")
             target_dir.mkdir(parents=True, exist_ok=True)
-            for item in sorted(tmp_dir.iterdir()):
+            for item in sorted(path for path in tmp_dir.iterdir() if path.name != marker.name):
                 os.replace(item, target_dir / item.name)
+            # 标记必须最后替换；字母序会把 completed.json 排在 document.json 前面。
+            os.replace(tmp_dir / marker.name, marker)
             # 清理可能存在的旧临时目录（上次中断留下的），不影响已发布版本。
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
@@ -488,6 +516,24 @@ class ParseWorker:
                                     error_code=exc.code, error_message=exc.message)
 
 
+def _text_paragraph_spans(text: str) -> list[tuple[int, int]]:
+    """按原文空白行划分连续范围；拼接所有范围必须能逐字还原全文。"""
+    spans: list[tuple[int, int]] = []
+    start = offset = 0
+    for line in text.splitlines(keepends=True):
+        offset += len(line)
+        if not line.strip() and text[start:offset].strip():
+            spans.append((start, offset))
+            start = offset
+    if start < len(text):
+        if text[start:].strip() or not spans:
+            spans.append((start, len(text)))
+        else:
+            # 最后的空白仍属于原文，不因分段而消失。
+            spans[-1] = (spans[-1][0], len(text))
+    return spans
+
+
 def _txt_warning(line_count: int):
     from app.schemas import QualityWarning
     return QualityWarning(
@@ -516,6 +562,7 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, worker.request_stop)
     if args.task:
+        worker.runtime.prepare_database(settings.allow_database_upgrade)
         worker.repository.initialize()
         worker.run_task(args.task)
         return 0

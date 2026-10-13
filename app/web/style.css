@@ -16,6 +16,21 @@ p{line-height:1.7}
 /* 模型状态和测试按钮；窄屏允许自动换行。 */
 .model-panel{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;padding:16px 18px;margin-top:16px;border:1px solid #dce3db;border-radius:8px;background:white}
 .model-panel p{margin:6px 0 0}
+/* 集中显示实际角色状态，配置存在不能代替就绪与运行一致性证据。 */
+.runtime-panel{padding:16px 18px;margin-top:16px;border:1px solid #dce3db;border-radius:8px;background:white}
+.runtime-panel h2{margin:0}
+.runtime-panel p{margin:10px 0 0;font-size:13px}
+.runtime-roles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:14px}
+.runtime-role{min-width:0;border:1px solid #e0e7dc;border-radius:8px;padding:12px;background:#fafcf8}
+.runtime-role h3{margin:0;font-size:14px}
+.runtime-role .runtime-state{font-weight:600;margin:6px 0}
+.runtime-role dl{display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;margin:10px 0 0}
+.runtime-role dt{color:#65776a}
+.runtime-role dd{margin:0;text-align:right;overflow-wrap:anywhere}
+.runtime-role [data-kind=ok],#runtime-summary[data-kind=ok]{color:#32644c}
+.runtime-role [data-kind=error],#runtime-summary[data-kind=error]{color:#8d3733}
+.runtime-role [data-kind=unknown],#runtime-summary[data-kind=unknown]{color:#856722}
+.runtime-role p{overflow-wrap:anywhere}
 /* 桌面双栏工作区：文档库与内容详情 */
 .workspace{display:grid;grid-template-columns:310px minmax(0,1fr);gap:22px;margin-top:20px}
 .panel{background:#fff;border:1px solid #e0e5dd;border-radius:12px;padding:24px;min-width:0}
@@ -98,6 +113,16 @@ button.ref{background:#e8f1e6;color:#2f5a44;padding:1px 6px;margin-left:3px;font
 .analysis h4{font-size:14px;margin:14px 0 6px;color:#3c6a50}
 .analysis p{margin:8px 0;line-height:1.7;overflow-wrap:anywhere}
 .analysis code{background:#eef3ec;border-radius:4px;padding:1px 4px;font-size:12px}
+.extraction-settings{margin:14px 0;border:1px solid #dce5d8;border-radius:8px;padding:12px 14px;min-width:0;background:#fff}
+.extraction-settings legend{font-size:13px;color:#45694f;padding:0 6px}
+.extraction-settings label{margin:6px 0 8px}
+.extraction-settings textarea{display:block;width:100%;min-height:96px;resize:vertical;font:inherit;font-size:13px;line-height:1.6;border:1px solid #d9e2d8;border-radius:6px;padding:10px}
+.extraction-settings .checkbox-label{display:flex;align-items:center;gap:8px;margin-top:12px}
+.extraction-settings input[type=checkbox]{width:16px;height:16px;padding:0;flex:none}
+.metric-coverage{margin:12px 0;padding:10px 12px;border:1px solid #dce5d8;border-radius:6px;background:#f8faf6}
+.metric-coverage[data-status=incomplete]{border-color:#ddc991;background:#fdfaf1}
+.metric-coverage ul{padding-left:20px}
+.extraction-origin{color:#657e6c;font-size:12px}
 .plan-batches{margin:6px 0;padding-left:20px;font-size:12px;color:#5c6b5f}
 .plan-batches li{line-height:1.7}
 .analysis-results{margin-top:8px}
@@ -115,6 +140,7 @@ footer{text-align:center;color:#98a092;font-size:11px;padding:12px 0 32px}
 /* 窄屏适配：双栏改为单栏，缩小外边距和字号 */
 @media(max-width:760px){header{padding:0 20px}
 main{padding:28px 18px}
+.runtime-roles{grid-template-columns:1fr}
 .workspace{grid-template-columns:1fr}
 h1{font-size:28px}
 .panel{padding:18px}

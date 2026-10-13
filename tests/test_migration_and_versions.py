@@ -117,7 +117,7 @@ def test_t01_legacy_upgrade_preserves_ids_and_keeps_index_searchable(tmp_path, m
             [[1.0, 0.0] if '苹果' in text else [0.0, 1.0] for text in texts]))
 
     mock_gateway(monkeypatch, handler)
-    settings = Settings(data_dir=tmp_path, embedding_api_key='k')
+    settings = Settings(data_dir=tmp_path, allow_database_upgrade=True, embedding_api_key='k')
     db_path = tmp_path / 'docqa.db'
     legacy = build_legacy_db(db_path, provider_signature=provider_signature_of(settings))
 
@@ -162,7 +162,7 @@ def test_t01_legacy_upgrade_preserves_ids_and_keeps_index_searchable(tmp_path, m
 def test_t01_legacy_index_incomplete_is_not_migrated_as_valid(tmp_path, monkeypatch):
     """旧索引缺少向量或维度时必须迁移为失败，不能伪装成可用索引。"""
     mock_gateway(monkeypatch, lambda request: httpx.Response(500))
-    settings = Settings(data_dir=tmp_path, embedding_api_key='k')
+    settings = Settings(data_dir=tmp_path, allow_database_upgrade=True, embedding_api_key='k')
     db_path = tmp_path / 'docqa.db'
     build_legacy_db(db_path, provider_signature=provider_signature_of(settings), with_vectors=False)
     with TestClient(create_app(settings)) as client:
@@ -176,7 +176,7 @@ def test_t01_legacy_index_incomplete_is_not_migrated_as_valid(tmp_path, monkeypa
 def test_t01_legacy_index_with_other_model_is_stale(tmp_path, monkeypatch):
     """旧索引的提供方签名与当前配置不一致时仍判为过期。"""
     mock_gateway(monkeypatch, lambda request: httpx.Response(500))
-    settings = Settings(data_dir=tmp_path, embedding_api_key='k')
+    settings = Settings(data_dir=tmp_path, allow_database_upgrade=True, embedding_api_key='k')
     db_path = tmp_path / 'docqa.db'
     build_legacy_db(db_path, provider_signature='other-provider-signature')
     with TestClient(create_app(settings)) as client:
@@ -187,7 +187,7 @@ def test_t01_legacy_index_with_other_model_is_stale(tmp_path, monkeypatch):
 
 def test_t01_legacy_interrupted_status_not_forced_to_failed(tmp_path):
     """旧库的 parsing 状态不会被启动逻辑统一改成失败（改为保留可恢复语义）。"""
-    settings = Settings(data_dir=tmp_path)
+    settings = Settings(data_dir=tmp_path, allow_database_upgrade=True)
     db_path = tmp_path / 'docqa.db'
     build_legacy_db(db_path, provider_signature='sig', status='parsing')
     with TestClient(create_app(settings)) as client:
@@ -201,7 +201,7 @@ def test_t01_legacy_interrupted_status_not_forced_to_failed(tmp_path):
 # T02：迁移中途异常
 # ---------------------------------------------------------------------------
 def test_t02_migration_failure_rolls_back_and_keeps_backup(tmp_path, monkeypatch):
-    settings = Settings(data_dir=tmp_path)
+    settings = Settings(data_dir=tmp_path, allow_database_upgrade=True)
     db_path = tmp_path / 'docqa.db'
     legacy = build_legacy_db(db_path, provider_signature='sig')
 
@@ -264,7 +264,7 @@ def test_t02_migration_is_idempotent_on_empty_database(tmp_path):
 
 def test_t02_backup_uses_sqlite_backup_api_with_wal(tmp_path):
     """备份必须包含 WAL 中已提交的数据，不能只复制主库文件。"""
-    settings = Settings(data_dir=tmp_path)
+    settings = Settings(data_dir=tmp_path, allow_database_upgrade=True)
     db_path = tmp_path / 'docqa.db'
     build_legacy_db(db_path, provider_signature='sig')
     # 打开 WAL 并写入未 checkpoint 的数据。
@@ -322,7 +322,7 @@ def test_t16_failed_reparse_keeps_old_version_searchable(tmp_path, monkeypatch):
             [[1.0, 0.0] if '苹果' in text else [0.0, 1.0] for text in texts]))
     mock_gateway(monkeypatch, handler)
 
-    with TestClient(create_app(Settings(data_dir=tmp_path, embedding_api_key='k'))) as client:
+    with TestClient(create_app(Settings(data_dir=tmp_path, allow_database_upgrade=True, embedding_api_key='k'))) as client:
         repository = _seed_indexed_document(client, tmp_path, monkeypatch)
         document_id = 'doc-a'
         version_a = client.get(f'/api/documents/{document_id}').json()['active_parse_version_id']
@@ -334,7 +334,7 @@ def test_t16_failed_reparse_keeps_old_version_searchable(tmp_path, monkeypatch):
         upstream = FakeDocling()
         upstream.wait_for_result = lambda task_id, **kwargs: (_ for _ in ()).throw(
             DoclingError(ERROR_TASK_FAILED, '解析服务报告任务失败'))
-        worker = ParseWorker(Settings(data_dir=tmp_path), repository=repository, client=upstream,
+        worker = ParseWorker(Settings(data_dir=tmp_path, allow_database_upgrade=True), repository=repository, client=upstream,
                              sleep=lambda _s: None)
         worker.run_forever(max_tasks=1)
 
@@ -357,7 +357,7 @@ def test_t16_failed_reparse_keeps_old_version_searchable(tmp_path, monkeypatch):
         assert submitted.status_code == 202
         changed = docling_payload(text='第二版正文内容。',
                                   extra_texts=[{"text": "第二版新增段落。", "page": 2}])
-        worker = ParseWorker(Settings(data_dir=tmp_path), repository=repository,
+        worker = ParseWorker(Settings(data_dir=tmp_path, allow_database_upgrade=True), repository=repository,
                              client=FakeDocling(result=changed), sleep=lambda _s: None)
         worker.run_forever(max_tasks=1)
         document = client.get(f'/api/documents/{document_id}').json()
@@ -394,7 +394,7 @@ def test_t17_embedding_failure_keeps_old_index_and_success_switches(tmp_path, mo
     fail_next = [False]
     mock_gateway(monkeypatch, handler)
 
-    settings = Settings(data_dir=tmp_path, embedding_api_key='k', embedding_batch_size=1)
+    settings = Settings(data_dir=tmp_path, allow_database_upgrade=True, embedding_api_key='k', embedding_batch_size=1)
     with TestClient(create_app(settings)) as client:
         # 先让“A 已解析并已索引”（此时允许网关成功）。
         repository = _seed_indexed_document(client, tmp_path, monkeypatch)
