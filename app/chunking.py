@@ -22,7 +22,7 @@ from app.schemas import Block, Chunk, SourceLocation
 logger = logging.getLogger(__name__)
 
 # 分块算法标识：写入索引记录，便于判断旧索引由哪种规则生成。
-CHUNKING_ALGO = "structured-heading-table-v3"
+CHUNKING_ALGO = "structured-heading-table-v4"
 
 # 分块类型：正文 / 表格行组 / 目录 / 公式占位 / 单行超长续切。
 CHUNK_TYPE_TEXT = "text"
@@ -31,6 +31,8 @@ CHUNK_TYPE_INDEX = "document_index"
 CHUNK_TYPE_FORMULA = "formula_placeholder"
 CHUNK_TYPE_OVERFLOW = "long_line"
 
+# caption 与相邻同章节正文进入同一流，不把标题前缀写进原文引述；
+# 章节恢复与可疑上游标题降级从 normalized-5 引入，旧解析版本不会在分块时重写。
 # 可合并进正文流的块类型：页眉页脚不参与，避免污染检索。
 _FLOW_TYPES = {"paragraph", "list_item", "caption", "footnote", "code", "reference"}
 

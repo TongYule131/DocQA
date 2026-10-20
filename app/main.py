@@ -12,7 +12,7 @@ from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import Body, FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi import Body, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -26,6 +26,7 @@ from app.embedding import APIEmbedding, EmbeddingError
 from app.file_detect import FORMAT_MIME, UploadFormatError, detect_format, sanitize_filename
 from app.parsing import ParseError, chunk_pages, parse_document
 from app.rag import RagError, RagService
+from app.question_jobs import QuestionJobService
 from app.rag_prompts import PROMPT_VERSION
 from app.repository import Repository, TaskConflict, now_iso
 from app.runtime import RuntimeGuard, RuntimeMismatch
@@ -45,6 +46,8 @@ from app.schemas import (
     ParseTask,
     ParseVersion,
     Question,
+    QuestionJobRequest,
+    QuestionRetryRequest,
     RagAnswer,
     SearchRequest,
     UploadResponse,
@@ -69,6 +72,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     rag = RagService(settings, repository, index, model)
     # 分析任务服务只做规划与任务生命周期；生成由独立 worker 进程执行。
     analysis = AnalysisJobService(settings, repository)
+    questions = QuestionJobService(settings, repository, rag)
     upload_dir = settings.data_dir / "uploads"
     web_dir = Path(__file__).parent / "web"
 
@@ -90,10 +94,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="智能文档分析与知识问答系统", version="0.2.0", lifespan=lifespan)
     app.state.runtime_guard = runtime
+    app.state.question_service = questions
     app.mount("/static", StaticFiles(directory=web_dir), name="static")
 
     @app.middleware("http")
     async def require_compatible_runtime(request, call_next):
+        request.state.request_id = f"req-{uuid4().hex}"
         # 代码更新或库被外部替换后，旧进程不得继续提交/领取收费任务。
         if request.url.path == "/" or request.url.path.startswith(("/api/", "/static/")):
             try:
@@ -102,6 +108,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return JSONResponse(status_code=503, content={
                     "status": "not_ready", "code": "runtime_mismatch", "detail": str(exc)})
         response = await call_next(request)
+        response.headers["X-Request-ID"] = request.state.request_id
         if request.url.path == "/" or request.url.path.startswith("/static/"):
             # 本地升级后普通刷新也必须拿到当前页面，不能继续复用旧 JS/CSS。
             response.headers["Cache-Control"] = "no-store"
@@ -696,9 +703,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # 本阶段没有持久化幂等保证：两个独立合法 POST 会产生两次费用。
             "idempotent": False,
             "persists_history": False,
+            "question_jobs": {"available": True, "idempotent": True, "persists_history": True,
+                              "max_requests": settings.question_max_requests,
+                              "requires_worker": "analysis-worker"},
         }
 
-    @app.post("/api/documents/{document_id}/questions", response_model=RagAnswer)
+    @app.post("/api/documents/{document_id}/question-jobs")
+    def submit_question_job(document_id: str, payload: QuestionJobRequest, request: Request):
+        # 新入口只固定本地快照并入队；保留下面原同步 /questions 契约。
+        body, code = questions.submit(document_id, payload, request_id=request.state.request_id)
+        return JSONResponse(status_code=code, content=body,
+                            headers={"Location": f"/api/question-jobs/{body['job']['id']}"})
+
+    @app.get("/api/documents/{document_id}/question-jobs")
+    def question_history(document_id: str):
+        return questions.list_jobs(document_id)
+
+    @app.get("/api/question-jobs/{job_id}")
+    def question_job(job_id: str):
+        return questions.get_job(job_id)
+
+    @app.post("/api/question-jobs/{job_id}/cancel")
+    def cancel_question_job(job_id: str, payload: QuestionRetryRequest | None = Body(default=None)):
+        return questions.cancel_job(job_id, payload)
+
+    @app.post("/api/question-jobs/{job_id}/retry")
+    def retry_question_job(job_id: str, payload: QuestionRetryRequest):
+        return questions.retry_job(job_id, payload)
+
+    @app.get("/api/question-results/{result_id}")
+    def question_result(result_id: str):
+        return questions.get_result(result_id)
+
+    @app.get("/api/question-results/{result_id}/export")
+    def question_export(result_id: str, fmt: str = Query(default="markdown", alias="format")):
+        body, media_type, filename = questions.export(result_id, fmt)
+        return Response(content=body, media_type=media_type,
+                        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{_quote(filename)}"})
+
+    @app.post("/api/documents/{document_id}/questions", response_model=RagAnswer,
+              response_model_exclude={"answer_parts": True, "citations": {"__all__": {"table_structure"}},
+                                      "conclusion": {"__all__": {"context"}},
+                                      "explanation": {"__all__": {"context"}}})
     def ask(document_id: str, payload: Question):
         """问答接口：单文档、单轮、非流式，回答带逐事实引用。
 

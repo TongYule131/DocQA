@@ -35,7 +35,7 @@
     <!-- 解析服务可达性单独显示：可达不等于模型已预热或内容质量合格。 -->
     <section class="model-panel" aria-label="解析服务状态">
       <div><strong>Docling 解析服务</strong><p id="parsing-status" class="muted">正在探测解析服务…</p><p class="muted">服务地址只来自后端配置，页面不能修改。</p></div>
-      <div><p class="muted">扫描 PDF 会使用 OCR；识别缺陷（错字、目录页码、阅读顺序）会在质量告警中提示。</p></div>
+      <div><p class="muted">扫描 PDF 可使用 OCR；识别准确性尚未逐页验证。已发现的结构异常与未解析图表分别提示，请结合原件核对。</p></div>
     </section>
     <!-- 统一状态提示区；aria-live 让辅助阅读工具感知提示更新。 -->
     <div id="message" role="status" aria-live="polite"></div>
@@ -99,8 +99,18 @@
         <div id="chunks" class="chunks"><div class="empty"><span>01 / 导入资料</span><h3>建立你的文档知识库</h3><p>从左侧上传 PDF、TXT、DOCX 或 XLSX 文档，提交解析任务后查看带来源的结构化内容。</p></div></div>
         <form id="question-form"><label for="question">基于当前文档提问</label><div class="question-row"><input id="question" placeholder="这份文档的核心结论是什么？" maxlength="4000" required disabled><button id="ask" disabled>提问</button></div>
           <!-- 首次使用必须说明哪些内容会离开本机：问题发给 Embedding 网关，入选片段与问题发给 DeepSeek。 -->
-          <p class="muted">首次使用提示：提问时，您的问题会发送给已配置的 Embedding 服务用于检索；本次入选的文档片段与问题会发送给已配置的 DeepSeek 服务用于生成回答，因此点击“提问”会发生在线调用并可能产生费用。答案只依据本次检索到的片段，并附逐条引用。本阶段为单文档、单轮问答：不保存会话历史，刷新页面后答案会清空。</p>
+          <p class="muted">提问会将问题发送给已配置的 Embedding 服务，并将问题和入选片段发送给生成模型，可能产生费用。任务与结果保存于本机；刷新、查询进度、重开历史和导出只读取已有记录，不调用模型。每次提问独立处理，不把历史答案作为事实发送。</p>
         </form>
+        <section class="question-tasks" aria-label="问答任务与历史">
+          <div class="actions">
+            <button id="question-refresh" class="subtle" type="button">刷新问答任务与历史</button>
+            <button id="question-cancel" class="subtle" type="button" hidden>取消问答任务</button>
+            <button id="question-retry" class="secondary" type="button" hidden>明确重试任务（可能计费）</button>
+            <button id="question-confirm" class="secondary" type="button" hidden>确认原提交（复用请求键）</button>
+          </div>
+          <div id="question-job" aria-live="polite"></div>
+          <div id="question-history"></div>
+        </section>
         <!-- 问答结果区：由脚本按已校验结构渲染，全部使用 textContent 等安全 API。 -->
         <section id="answer-panel" class="answer" hidden>
           <div class="answer-head">
@@ -108,6 +118,7 @@
             <span id="answer-meta" class="muted"></span>
           </div>
           <p id="answer-waiting" class="muted" hidden>正在检索资料并生成回答…</p>
+          <div id="answer-actions" class="actions"></div>
           <div id="answer-body"></div>
           <div id="answer-questions"></div>
           <div id="answer-warnings"></div>

@@ -14,6 +14,8 @@ import hashlib
 import json
 import logging
 import sqlite3
+import time
+import math
 from uuid import uuid4
 from threading import Event, Thread
 
@@ -88,6 +90,12 @@ def source_signature(chunks: list[Chunk], *, version_id: str | None = None,
 def compute_signature(chunks: list[Chunk], version_id: str | None, algo: str | None) -> str:
     """兼容旧调用名：按算法版本计算签名。"""
     return source_signature(chunks, version_id=version_id, algo=algo)
+
+
+def evidence_signature(chunks: list[Chunk]) -> str:
+    """任务快照额外绑定定位信息，防止正文未改但页码／坐标或章节被替换。"""
+    payload = [chunk.model_dump(mode="json") for chunk in chunks]
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
 class DocumentIndex:
@@ -259,7 +267,70 @@ class DocumentIndex:
             if info["status"] == "stale":
                 raise EmbeddingError(409, f"{info['error'] or '索引已过期'}，请重新建立索引")
             raise EmbeddingError(409, "请先为当前模型和文档建立有效索引")
+        return self._search_info(document_id, query, top_k, info)
+
+    def verify_snapshot(self, document_id: str, snapshot: dict) -> dict:
+        """只读验证排队时固定的索引；活动指针变化不使历史有效索引失效。"""
+        with self.repository.connect() as db:
+            state = db.execute(
+                "SELECT * FROM embedding_indexes WHERE document_id=? AND id=? AND status='indexed'",
+                (document_id, snapshot.get("index_id"))).fetchone()
+        if state is None or state["parse_version_id"] != snapshot.get("parse_version_id"):
+            raise EmbeddingError(409, "问答固定索引已不可用，请创建新任务")
+        if state["provider_signature"] != self.embedding.signature:
+            raise EmbeddingError(409, "问答固定索引的模型已变化，请创建新任务")
+        for key in ("source_signature", "source_signature_algo", "provider_signature"):
+            if snapshot.get(key) != state[key]:
+                raise EmbeddingError(409, "问答固定索引的签名已变化，请创建新任务")
+        chunks = self.repository.chunks(document_id, state["parse_version_id"])
+        algo = state["source_signature_algo"] or SIGNATURE_ALGO_VERSIONED
+        if (len(chunks) != state["chunk_count"] or
+                compute_signature(chunks, state["parse_version_id"], algo) != state["source_signature"]):
+            raise EmbeddingError(409, "问答固定版本的原文已变化，已停止处理")
+        if snapshot.get("evidence_signature") != evidence_signature(chunks):
+            raise EmbeddingError(409, "问答固定版本的来源定位已变化，已停止处理")
+        version = self.repository.get_parse_version(state["parse_version_id"])
+        return {"index_id": state["id"], "parse_version_id": state["parse_version_id"],
+                "is_legacy": bool(version and version.is_legacy),
+                "status": "indexed"}
+
+    def search_snapshot(self, document_id: str, query: str, top_k: int, *, snapshot: dict,
+                        include_scores: bool = False) -> dict:
+        info = self.verify_snapshot(document_id, snapshot)
+        return self._search_info(document_id, query, top_k, info, include_scores=include_scores)
+
+    def validate_checkpoint(self, document_id: str, snapshot: dict, checkpoint: dict) -> dict:
+        """恢复无需新embedding，但候选必须仍与固定版本中的真实块一一对应。"""
+        self.verify_snapshot(document_id, snapshot)
+        if (checkpoint.get("index_id") != snapshot.get("index_id") or
+                checkpoint.get("parse_version_id") != snapshot.get("parse_version_id") or
+                not isinstance(checkpoint.get("results"), list)):
+            raise EmbeddingError(409, "检索检查点与问答固定范围不一致")
+        chunks = {chunk.id: chunk for chunk in self.repository.chunks(document_id, snapshot["parse_version_id"])}
+        seen = set()
+        for hit in checkpoint["results"]:
+            chunk = chunks.get(hit.get("chunk_id")) if isinstance(hit, dict) else None
+            if (chunk is None or chunk.id in seen or hit.get("document_id") != document_id or
+                    hit.get("parse_version_id") != snapshot["parse_version_id"] or
+                    hit.get("text") != chunk.text or hit.get("page") != chunk.page or
+                    hit.get("block_id") != chunk.block_id or
+                    hit.get("chunk_type") != chunk.chunk_type or
+                    type(hit.get("order_index")) is not type(chunk.order_index) or
+                    hit.get("order_index") != chunk.order_index or
+                    hit.get("heading_path") != chunk.heading_path or
+                    hit.get("sources") != [source.model_dump() for source in chunk.sources]):
+                raise EmbeddingError(409, "检索检查点的原文或来源不一致，已停止处理")
+            score = hit.get("score")
+            if type(score) not in (int, float) or not math.isfinite(score):
+                raise EmbeddingError(409, "检索检查点的排序分值无效")
+            seen.add(chunk.id)
+        return checkpoint
+
+    def _search_info(self, document_id: str, query: str, top_k: int, info: dict, *, include_scores: bool = False) -> dict:
+        started = time.perf_counter()
         query_vector = self.embedding.embed([query])[0]
+        embedding_ms = max(0, round((time.perf_counter() - started) * 1000))
+        local_started = time.perf_counter()
         version_id = info["parse_version_id"]
         index_id = info["index_id"]
         # 一次读事务取得索引状态、对应版本分块与向量，防止切换期间读到不一致结果。
@@ -321,6 +392,10 @@ class DocumentIndex:
             "index_id": index_id, "parse_version_id": version_id,
             "is_old_version": is_old_version, "is_legacy": info["is_legacy"],
             "chunk_count": len(chunks),
+            # 仅供本地融合规划使用；复用已经计算的真实余弦分值，不能给词面补召回伪造0分。
+            **({"candidate_scores": {hit["chunk_id"]: hit["score"] for hit in results}} if include_scores else {}),
+            "timings_ms": {"query_embedding": embedding_ms,
+                           "local_search": max(0, round((time.perf_counter() - local_started) * 1000))},
             "message": ("检索结果来自历史解析版本，当前预览已更新；"
                         "如需检索最新版本请重建索引") if is_old_version else "检索结果来自当前预览版本",
             "results": results[:top_k],

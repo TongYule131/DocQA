@@ -24,6 +24,7 @@ from app.schemas import QualityWarning, SourceLocation
 
 # 证据包序列化格式版本：变更字段含义时必须同步提升，便于排查历史记录。
 EVIDENCE_SCHEMA_VERSION = "rag-evidence-v1"
+TASK_EVIDENCE_ORDER_VERSION = "source-order-v1"
 
 
 class RagError(Exception):
@@ -67,6 +68,12 @@ class EvidenceItem:
     order_index: int | None = None
     block_id: str | None = None
     score: float = 0.0
+    table_projection: dict | None = None
+    table_projection_included: bool = False
+    table_projection_omitted: str | None = None
+    qualifier_cues: list[dict] = field(default_factory=list)
+    qualifier_cues_included: bool = False
+    qualifier_cues_omitted: bool = False
 
     def payload(self) -> dict[str, Any]:
         """序列化为送入模型的数据对象；只包含可作为事实依据的字段。
@@ -85,6 +92,11 @@ class EvidenceItem:
             entry["block_type"] = self.chunk_type
         if source_labels:
             entry["locations"] = source_labels
+        if self.table_projection_included:
+            entry["table_structure"] = self.table_projection
+        if self.qualifier_cues_included:
+            from app.rag_qualifier_cues import cue_payload
+            entry["qualifier_cues"] = cue_payload(self.qualifier_cues)
         return entry
 
 
@@ -292,7 +304,10 @@ class EvidenceBuildResult:
 def build_evidence(search_result: dict, settings: Settings, *,
                    version_warnings: list[QualityWarning] | None = None,
                    context_cap: int | None = None,
-                   expected_document_id: str | None = None) -> EvidenceBuildResult:
+                   expected_document_id: str | None = None,
+                   payload_transform=None, table_blocks: list | None = None,
+                   table_prompt_overhead: int = 0, include_qualifier_cues: bool = False,
+                   preserve_document_order: bool = False) -> EvidenceBuildResult:
     """由一次检索结果构建本次证据包，并完成版本快照校验。
 
     - context_cap 由提示词实际序列化长度反推（见 app.rag），保证最终消息体不超限；
@@ -307,6 +322,11 @@ def build_evidence(search_result: dict, settings: Settings, *,
         raw_results = []
 
     candidates, drop_reasons = build_candidates(raw_results, min_score=settings.rag_min_score)
+    planned_order = search_result.get("evidence_order")
+    if isinstance(planned_order, list) and search_result.get("strategy") in {"hybrid-context-v1", "hybrid-context-v2"}:
+        # 融合排名和分问题上下文顺序仅来自服务端规划；原余弦分值仍用于可选阈值。
+        positions = {chunk_id: i for i, chunk_id in enumerate(planned_order) if isinstance(chunk_id, str)}
+        candidates.sort(key=lambda item: positions.get(item.chunk_id, len(positions)))
     # 先在**全部候选**上做归属检查：跨文档或跨版本时受控失败，
     # 而不是让“去重/预算”把这些块悄悄过滤掉。
     all_items = [_candidate_from_hit(item) for item in raw_results if isinstance(item, dict)]
@@ -326,13 +346,57 @@ def build_evidence(search_result: dict, settings: Settings, *,
     max_chars = max(max_chars, 0)
 
     def serialize(items: list[EvidenceItem]) -> str:
-        return json.dumps([item.payload() for item in items],
+        entries = [item.payload() for item in items]
+        return json.dumps(payload_transform(entries) if payload_transform else entries,
                           ensure_ascii=False, separators=(",", ":"))
 
     selected, truncated, context_chars, budget_reasons = pack_evidence(
         candidates, context_max_chars=max_chars, serialize=serialize,
         max_items=settings.rag_context_k)
     drop_reasons.extend(budget_reasons)
+    if table_blocks is not None:
+        from app.rag_table_projection import table_projection, TABLE_PROJECTION_MAX_CHARS
+        blocks = {block.id: block for block in table_blocks}
+        # 原文先装入；辅助结构仅用剩余预算，不能挤掉原本入选的块。
+        for item in selected:
+            item.table_projection = table_projection(item, blocks.get(item.block_id))
+            projection = item.table_projection
+            if projection is None:
+                continue
+            if projection["status"] != "available":
+                item.table_projection_omitted = projection["reason"]
+                continue
+            if len(json.dumps(projection, ensure_ascii=False, separators=(",", ":"))) > TABLE_PROJECTION_MAX_CHARS:
+                item.table_projection_omitted = "table_projection_capacity"
+                continue
+            item.table_projection_included = True
+            if len(serialize(selected)) + max(0, table_prompt_overhead) > max_chars:
+                item.table_projection_included = False
+                item.table_projection_omitted = "table_projection_budget"
+        if selected:
+            context_chars = len(serialize(selected))
+    if include_qualifier_cues:
+        from app.rag_qualifier_cues import qualifier_cues
+        overhead = max(0, table_prompt_overhead) if any(i.table_projection_included for i in selected) else 0
+        for item in selected:
+            item.qualifier_cues = qualifier_cues(item.text)
+            if not item.qualifier_cues:
+                continue
+            item.qualifier_cues_included = True
+            if len(serialize(selected)) + overhead > max_chars:
+                item.qualifier_cues_included = False
+                item.qualifier_cues_omitted = True
+        if selected:
+            context_chars = len(serialize(selected))
+    order_available = (all(type(item.order_index) is int for item in selected)
+                       and len({item.order_index for item in selected}) == len(selected))
+    if preserve_document_order and order_available:
+        # 相关性仍决定入选集合；仅在装入完成后恢复真实文档顺序，减少跨课时/阶段串接。
+        # 不补造标题父链，不把相邻位置当作条件适用关系；编号随最终展示顺序统一分配。
+        selected.sort(key=lambda item: item.order_index)
+        for number, item in enumerate(selected, 1):
+            item.reference_id = number
+        context_chars = len(serialize(selected)) if selected else 0
     # truncated 只表示“因为字符预算不足而舍弃了本可入选的整块”，
     # 不表示被 top_k 上限截断（那是检索条数上限，不是预算问题）。
 
@@ -342,6 +406,12 @@ def build_evidence(search_result: dict, settings: Settings, *,
 
     warnings = _relevant_warnings(version_warnings or [], selected)
     limitations: list[str] = []
+    if preserve_document_order and selected and not order_available:
+        limitations.append("原文块顺序信息不完整，保留检索顺序；阶段归属仍需核对正文")
+    if any(item.table_projection_omitted for item in selected):
+        limitations.append("部分表格片段未附行列辅助结构（结构无法核对或辅助预算不足），原文片段仍完整保留")
+    if any(item.qualifier_cues_omitted for item in selected):
+        limitations.append("部分限定语句索引因辅助预算不足未附入，原文片段仍完整保留；索引本身不验证适用范围")
     if truncated:
         limitations.append(
             "本次回答只使用了字符预算内的部分检索片段，证据集合不完整；"

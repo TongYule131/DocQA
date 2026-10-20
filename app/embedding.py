@@ -2,10 +2,12 @@
 import hashlib
 import json
 import math
+from contextvars import ContextVar
 
 from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError, OpenAI
 
 from app.config import Settings
+from app.provider_usage import response_metadata
 
 
 class EmbeddingError(Exception):
@@ -34,6 +36,11 @@ class APIEmbedding:
     """实现 providers.EmbeddingProvider；密钥仅发送到服务端配置的网关。"""
     def __init__(self, settings: Settings):
         self.settings = settings
+        self._call_metadata = ContextVar("embedding_call_metadata", default=None)
+
+    @property
+    def last_call_metadata(self) -> dict | None:
+        return self._call_metadata.get()
 
     @property
     def signature(self) -> str:
@@ -42,12 +49,14 @@ class APIEmbedding:
         return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
 
     def embed(self, texts: list[str]) -> list[list[float]]:
+        self._call_metadata.set(None)
         if not self.settings.embedding_api_key.strip():
             raise EmbeddingError(503, "尚未配置 EMBEDDING_API_KEY，请填写网关密钥并重启服务")
         if not texts or any(not isinstance(text, str) or not text.strip() for text in texts):
             raise EmbeddingError(422, "待向量化文本不能为空")
         vectors = []
         dimension = None
+        call_metadata = []
         try:
             # 关闭自动重试，避免上游已完成但响应丢失时产生重复计费。
             with OpenAI(api_key=self.settings.embedding_api_key,
@@ -57,6 +66,8 @@ class APIEmbedding:
                     batch = texts[offset:offset + self.settings.embedding_batch_size]
                     response = client.embeddings.create(
                         model=self.settings.embedding_model, input=batch, encoding_format="float")
+                    call_metadata.append(response_metadata(response))
+                    self._call_metadata.set({"calls": list(call_metadata)})
                     # 按响应 index 恢复输入顺序，不能依赖服务商返回数组的排列。
                     data = response.data
                     if not isinstance(data, list) or len(data) != len(batch):

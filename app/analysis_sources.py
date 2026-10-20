@@ -9,7 +9,8 @@
 
 设计要点：
 
-1. **单元 = 结构块**。块的正文、表格渲染文本与来源一起固定；引用编号由服务端在
+1. **单元 = 结构块或安全表格行组**。大表行组重复真实表头、标题与脚注，保持原始
+   行号映射和来源；覆盖计数按投影单元计，不能将重复表头计成重复数据。引用编号由服务端在
    每个批次内重新分配，编号只在本批有意义，跨批不共享（防止模型误映射）。
 2. **不截断任何单元**。单元放不进单批预算时，本次规划直接给出受限原因，而不是
    从尾部截掉表头、单位、脚注或例外条件。
@@ -30,6 +31,7 @@ from app.config import Settings
 from app.analysis_prompts import (
     build_batch_user_prompt, build_reduce_user_prompt, summary_reduce_system_prompt,
     SUMMARY_REDUCE_BATCH_MAX_CHARS, SUMMARY_REDUCE_PROMPT_VERSION,
+    MAX_QUOTE_CHARS,
 )
 from app.rag_context import normalize_text
 from app.schemas import Block, QualityWarning, SourceLocation
@@ -37,7 +39,7 @@ from app.extraction_requirements import normalize_options
 
 # 输入协议版本：单元编号语义、序列化字段含义发生变化时必须递增，
 # 历史结果据此判断“当时按什么口径生成”。
-INPUT_PROTOCOL_VERSION = "docqa-analysis-input-v2"
+INPUT_PROTOCOL_VERSION = "docqa-analysis-input-v3"
 
 # 不进入可分析单元的块类型：页眉页脚属于版面噪声，图片未做语义解析，
 # 空白块没有可核对内容。它们仍保留在预览中，并单独计入“排除的非正文单元”。
@@ -100,7 +102,7 @@ class InputUnit:
             # 模型只需列路径、相对网格尺寸与合并关系，服务端保留完整格用于核对。
             structure = self.table_structure
             keys = ("status", "reason", "rows", "cols", "header_rows", "header_basis",
-                    "column_paths")
+                    "column_paths", "original_rows", "row_group", "row_mapping")
             entry["table_structure"] = {key: structure[key] for key in keys if key in structure}
             if structure.get("status") == "available":
                 entry["table_structure"]["merged_cells"] = [
@@ -391,13 +393,183 @@ def build_units(blocks: list[Block]) -> tuple[list[InputUnit], dict[str, int]]:
     return units, excluded
 
 
-def _serialized_entry_chars(unit: InputUnit, *, quote_budget: int = 0) -> int:
+_CELL_ADDRESS = re.compile(r"\$?([A-Za-z]+)\$?([1-9]\d*)")
+
+
+def _table_origin(block: Block) -> tuple[int, int] | None:
+    """仅由明确单元格范围确定XLSX表起点；缺失或格式不明时不猜坐标。"""
+    table = block.table or {}
+    value = table.get("cell_range")
+    if not value:
+        ranges = {source.cell_range for source in block.sources
+                  if source.format == "xlsx" and source.cell_range}
+        value = next(iter(ranges)) if len(ranges) == 1 else None
+    if not isinstance(value, str):
+        return None
+    addresses = value.split(":")
+    if len(addresses) not in {1, 2} or any(_CELL_ADDRESS.fullmatch(address) is None for address in addresses):
+        return None
+    match = _CELL_ADDRESS.fullmatch(addresses[0])
+    column = 0
+    for char in match[1].upper():
+        column = column * 26 + ord(char) - ord("A") + 1
+    return int(match[2]), column
+
+
+def _column_label(column: int) -> str:
+    value = ""
+    while column:
+        column, remainder = divmod(column - 1, 26)
+        value = chr(ord("A") + remainder) + value
+    return value
+
+
+def _row_group_unit(unit: InputUnit, block: Block, start: int, end: int,
+                    formulas_by_row: dict[int, dict] | None) -> InputUnit:
+    """从原始表格投影派生行组，局部行号与原表行号同时保存，不修改块或原单元。"""
+    structure = unit.table_structure
+    headers = list(structure["header_rows"])
+    original_rows = headers + list(range(start, end + 1))
+    to_local = {row: index + 1 for index, row in enumerate(original_rows)}
+    cells = [{**cell, "row": to_local[cell["row"]], "original_row": cell["row"]}
+             for cell in structure["cells"] if cell["row"] in to_local]
+    facts = [{**fact, "row": to_local[fact["row"]], "original_row": fact["row"]}
+             for fact in structure["facts"] if start <= fact["row"] <= end]
+    local_structure = {**structure, "rows": len(original_rows), "cells": cells, "facts": facts,
+                       "original_rows": structure["rows"], "row_group": [start, end],
+                       "row_mapping": original_rows}
+    grid = {}
+    for cell in cells:
+        for row in range(cell["row"], cell["row"] + cell["row_span"]):
+            for col in range(cell["col"], cell["col"] + cell["col_span"]):
+                grid[(row, col)] = cell
+    lines = []
+    for row in range(1, len(original_rows) + 1):
+        values = []
+        for col in range(1, structure["cols"] + 1):
+            cell = grid.get((row, col))
+            values.append("（空）" if cell is None else "↳" if (row, col) != (cell["row"], cell["col"])
+                          else cell["text"] or "（空）")
+        lines.append(" | ".join(values))
+    table = dict(block.table or {})
+    if formulas_by_row is not None:
+        table["formulas"] = {coordinate: info for row in original_rows
+                             for coordinate, info in formulas_by_row.get(row, {}).items()}
+    origin = _table_origin(block)
+    if origin:
+        top, left = origin
+        right = _column_label(left + structure["cols"] - 1)
+        left_label = _column_label(left)
+        local_structure["source_cell_ranges"] = [
+            f"{left_label}{top}:{right}{top + len(headers) - 1}",
+            f"{left_label}{top + start - 1}:{right}{top + end - 1}"]
+    derived_block = block.model_copy(update={"table": table})
+    return InputUnit(unit_id=f"{unit.unit_id}::rows-{start}-{end}", batch_local_id=0,
+        block_id=unit.block_id, order_index=unit.order_index, kind=unit.kind,
+        block_type=unit.block_type, text=_render_table_text(derived_block, "\n".join(lines)),
+        heading_path=unit.heading_path, sources=list(unit.sources), source_ids=list(unit.source_ids),
+        table_structure=local_structure)
+
+
+def split_oversized_tables(units: list[InputUnit], blocks: list[Block], *, fits) -> tuple[list[InputUnit], list[str]]:
+    """只拆装不下的、表头明确的完整网格；每个数据行恰好出现一次。
+
+    合并格跨越的行不可从中间切开；无法容纳必要上下文和一个完整行组时保持原单元，
+    交由原有预算阻止逻辑拒绝整个计划，不产生部分覆盖成功。
+    """
+    by_id = {block.id: block for block in blocks}
+    expanded: list[InputUnit] = []
+    split_tables, derived_count = 0, 0
+    blocked: dict[str, int] = {}
+    for unit in units:
+        structure = unit.table_structure
+        if unit.kind != UNIT_KIND_TABLE or fits(unit):
+            expanded.append(unit)
+            continue
+        if (not isinstance(structure, dict) or structure.get("status") != "available"
+                or structure.get("header_basis") not in {"explicit", "explicit_and_grouped_subheaders"}
+                or not structure.get("header_rows")):
+            expanded.append(unit)
+            blocked["表格结构或真实表头不明确"] = blocked.get("表格结构或真实表头不明确", 0) + 1
+            continue
+        block = by_id[unit.block_id]
+        headers = structure["header_rows"]
+        first_data = max(headers) + 1
+        if headers != list(range(1, first_data)) or first_data > structure["rows"]:
+            expanded.append(unit)
+            blocked["必要表头或单元上下文超过预算"] = blocked.get("必要表头或单元上下文超过预算", 0) + 1
+            continue
+        formulas = (block.table or {}).get("formulas") or {}
+        formulas_by_row = None
+        if formulas:
+            origin = _table_origin(block)
+            formulas_by_row = {}
+            safe = origin is not None
+            for address, info in formulas.items():
+                match = _CELL_ADDRESS.fullmatch(address) if isinstance(address, str) else None
+                row = int(match[2]) - origin[0] + 1 if match and origin else 0
+                if not match or not 1 <= row <= structure["rows"]:
+                    safe = False
+                    break
+                formulas_by_row.setdefault(row, {})[address] = info
+            if not safe:
+                expanded.append(unit)
+                blocked["公式位置无法与原表行安全对应"] = blocked.get("公式位置无法与原表行安全对应", 0) + 1
+                continue
+        forbidden_cuts = {row for cell in structure["cells"]
+                          for row in range(cell["row"], cell["row"] + cell["row_span"] - 1)}
+        boundaries = [row for row in range(first_data, structure["rows"] + 1) if row not in forbidden_cuts]
+        groups: list[InputUnit] = []
+        start = first_data
+        safe = True
+        # 每次选取预算内最大的完整行组；输入、边界和预算相同则ID与分组完全可复现。
+        while start <= structure["rows"]:
+            eligible = [end for end in boundaries if end >= start]
+            if not eligible:
+                safe = False
+                break
+            smallest = _row_group_unit(unit, block, start, eligible[0], formulas_by_row)
+            # 派生组要能在同一连续引述中保留表头、数值行与必要脚注；
+            # 只满足输入预算会让组尾事实无法通过现有引用协议。
+            if len(smallest.text) > MAX_QUOTE_CHARS or not fits(smallest):
+                safe = False
+                break
+            best, low, high = smallest, 1, len(eligible) - 1
+            while low <= high:
+                middle = (low + high) // 2
+                trial = _row_group_unit(unit, block, start, eligible[middle], formulas_by_row)
+                if len(trial.text) <= MAX_QUOTE_CHARS and fits(trial):
+                    best, low = trial, middle + 1
+                else:
+                    high = middle - 1
+            groups.append(best)
+            start = best.table_structure["row_group"][1] + 1
+        if not safe:
+            expanded.append(unit)
+            reason = "单行、跨行合并组或必要上下文超过输入或连续引述预算"
+            blocked[reason] = blocked.get(reason, 0) + 1
+            continue
+        expanded.extend(groups)
+        split_tables += 1
+        derived_count += len(groups)
+    limitations = [f"有 {count} 个大表未安全拆分：{reason}；本次不截断表头、数据行或脚注"
+                   for reason, count in blocked.items()]
+    if split_tables:
+        limitations.append(f"{split_tables} 个大表按完整数据行安全拆为 {derived_count} 个行组；覆盖单元数按行组计，"
+                           "各组重复真实表头、标题与脚注作为上下文，数据行不重叠；字符数包含重复上下文")
+    return expanded, limitations
+
+
+def _serialized_entry_chars(unit: InputUnit, *, quote_budget: int = 0,
+                            reference_id: int | None = None) -> int:
     """单元连同可引用字段的序列化字符数（含 JSON 转义）。
 
     quote_budget 为最终会写回该编号的引述预留的字符数。分批阶段不需要预留，
     汇总阶段必须预留，否则“已校验检查点”可能在汇总时因包装超预算而无法装入。
     """
     entry = unit.payload()
+    if reference_id is not None:
+        entry["ref"] = reference_id
     if quote_budget:
         entry["quote"] = "x" * quote_budget
     return len(json.dumps(entry, ensure_ascii=False, separators=(",", ":")))
@@ -414,12 +586,12 @@ def plan_batches(units: list[InputUnit], *, batch_max_chars: int) -> tuple[list[
     current: list[InputUnit] = []
     current_chars = 2  # "[]" 两个字符
     for unit in units:
-        size = _serialized_entry_chars(unit)
+        size = _serialized_entry_chars(unit, reference_id=1)
         if size + 2 > batch_max_chars:
             # 单元本身超过整批预算：不允许从尾部截断，标记为无法规划。
             unplannable.append((unit, "unit_over_batch_budget"))
             continue
-        addition = size + (1 if current else 0)
+        addition = _serialized_entry_chars(unit, reference_id=len(current) + 1) + (1 if current else 0)
         if current and current_chars + addition > batch_max_chars:
             batches.append(current)
             current = []
@@ -546,6 +718,30 @@ def build_plan(*, kind: str, blocks: list[Block], document_name: str, version_id
             excluded_units=excluded_units, total_chars=total_chars, unplannable=[],
             reduce_required=False, request_upper_bound=0,
             blocked_reason="document_too_large")
+
+    # 表格仍以不可变原块为事实来源，只在输入层投影安全行组。固定包装也计入拆分判断，
+    # 避免行组本身能装下、加上真实文件名/指定指标后才在执行时超限。
+    upper_batches = max(1, len(units) + sum(
+        unit.table_structure.get("rows", 0) for unit in units
+        if isinstance(unit.table_structure, dict) and unit.table_structure.get("status") == "available"))
+
+    def fits(unit: InputUnit) -> bool:
+        return (_serialized_entry_chars(unit, reference_id=1) + 2 <= settings.analysis_batch_max_chars
+                and batch_message_chars(kind=kind, document_name=document_name, version_id=version_id,
+                    units=[unit], system_prompt_chars=system_prompt_chars,
+                    batch_index=upper_batches, batch_total=upper_batches,
+                    extraction_options=extraction_options, max_items=settings.analysis_max_items_per_batch)
+                <= settings.analysis_input_max_chars)
+
+    units, split_limitations = split_oversized_tables(units, blocks, fits=fits)
+    limitations.extend(split_limitations)
+    total_chars = sum(len(unit.text) for unit in units)
+    if total_chars > settings.analysis_max_document_chars:
+        return AnalysisPlanResult(kind=kind, prompt_version=prompt_version, protocol_version=INPUT_PROTOCOL_VERSION,
+            extraction_options=extraction_options, fingerprint="", units=units, batches=[], batch_message_chars=[],
+            excluded_counts=excluded, excluded_units=excluded_units, total_chars=total_chars, unplannable=[],
+            reduce_required=False, request_upper_bound=0, blocked_reason="document_too_large",
+            limitations=limitations + ["安全行组重复必要上下文后的输入总字符数超过文档分析上限，未省略任何数据行"])
 
     batches, unplannable = plan_batches(units, batch_max_chars=settings.analysis_batch_max_chars)
     message_chars = [batch_message_chars(kind=kind, document_name=document_name,
@@ -735,4 +931,5 @@ __all__ = [
     "reduce_batches",
     "relevant_warnings",
     "render_table_text",
+    "split_oversized_tables",
 ]

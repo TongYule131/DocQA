@@ -3,6 +3,8 @@ name: docqa-parser-lab
 services:
   parser:
     image: quay.io/docling-project/docling-serve-cu130:v1.34.0
+    # Docker 引擎恢复后拉起既有服务；显式手动停止仍保持停止，不重建模型缓存。
+    restart: unless-stopped
     ports:
       - "127.0.0.1:5001:5001"
     environment:

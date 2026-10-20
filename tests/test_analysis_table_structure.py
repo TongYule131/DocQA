@@ -217,4 +217,4 @@ def test_plan_fingerprint_changes_when_structure_metadata_changes():
     before = plan_fingerprint(**options)
     unit.table_structure["column_paths"][1]["path"] = ["不同层级"]
     assert plan_fingerprint(**options) != before
-    assert INPUT_PROTOCOL_VERSION == "docqa-analysis-input-v2"
+    assert INPUT_PROTOCOL_VERSION == "docqa-analysis-input-v3"

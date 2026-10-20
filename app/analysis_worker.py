@@ -71,6 +71,10 @@ class AnalysisWorker:
         self.worker_id = worker_id or f"{os.getpid()}-{int(time.time())}"
         self.sleep = sleep
         self.stop_requested = False
+        # 问答复用已有常驻执行角色，避免为每个功能再增加一个Windows服务进程。
+        from app.question_worker import QuestionWorker
+        self.question_worker = QuestionWorker(settings, self.repository, worker_id=self.worker_id + "-qa",
+                                               runtime=self.runtime)
         # 当前正在执行任务的输入计划：只用于失败时给出真实的覆盖口径。
         self._active_plan: AnalysisPlanResult | None = None
 
@@ -80,6 +84,7 @@ class AnalysisWorker:
     def request_stop(self, *_args) -> None:
         """SIGINT/SIGTERM 处理：只设置标记，让当前任务留下可恢复状态后退出。"""
         self.stop_requested = True
+        self.question_worker.request_stop()
         logger.warning("收到停止请求：当前任务将保留可恢复状态后退出")
 
     def run_forever(self, *, max_tasks: int | None = None) -> int:
@@ -87,16 +92,31 @@ class AnalysisWorker:
         self.runtime.prepare_database(self.settings.allow_database_upgrade)
         self.repository.initialize()
         self.runtime.mark_ready()
+        question_turn = True
         while not self.stop_requested:
             self.runtime.check()
+            # 轮换队列，持续问答不会让摘要／提取饥饿，反之亦然。
+            if question_turn and self.question_worker.run_once():
+                processed += 1
+                question_turn = False
+                if max_tasks is not None and processed >= max_tasks:
+                    break
+                continue
             job = self.repository.claim_next_analysis_job(self.worker_id,
                                                         self.settings.worker_lease_seconds)
             if job is None:
+                if not question_turn and self.question_worker.run_once():
+                    processed += 1
+                    question_turn = True
+                    if max_tasks is not None and processed >= max_tasks:
+                        break
+                    continue
                 if max_tasks is not None:
                     break
                 self.sleep(self.settings.worker_idle_sleep_seconds)
                 continue
             self.process_job(job)
+            question_turn = True
             processed += 1
             if max_tasks is not None and processed >= max_tasks:
                 break
@@ -320,10 +340,10 @@ class AnalysisWorker:
         metrics = metric_coverage(items, plan.extraction_options)
         # 合并后的引用编号重新绑定到原始结构，只使用服务器保存的行列信息。
         from dataclasses import replace
-        by_block = {unit.block_id: unit for unit in plan.units}
-        final_units = [replace(by_block[citation["block_id"]],
+        by_unit = {unit.unit_id: unit for unit in plan.units}
+        final_units = [replace(by_unit[citation.get("unit_id") or citation["block_id"]],
                                batch_local_id=citation["reference_id"])
-                       for citation in citations if citation.get("block_id") in by_block]
+                       for citation in citations if (citation.get("unit_id") or citation.get("block_id")) in by_unit]
         payload = {
             "items": [_extraction_item_payload(item) for item in items],
             "sections": sections,
@@ -661,6 +681,8 @@ def _entry_for(batch_index: int, ref: int, batch_units: list[list[InputUnit]],
     offset = normalized.find(quote)
     return {
         "block_id": unit.block_id,
+        "unit_id": unit.unit_id,
+        "offset_scope": "input_unit" if unit.unit_id != unit.block_id else "block",
         "source_index": unit.source_ids[0] if unit.source_ids else 0,
         "quote": quote,
         "sources": [source.model_dump() for source in unit.sources],
@@ -769,11 +791,12 @@ def _enrich_citation(citation: dict, lookup, batch_index: int) -> dict:
     entry = lookup(batch_index, ref)
     enriched = {key: value for key, value in citation.items() if key != "ref"}
     enriched.setdefault("quote", entry.get("quote", ""))
-    for key in ("block_id", "source_index", "sources", "char_start", "char_end", "block_type"):
+    for key in ("block_id", "unit_id", "offset_scope", "source_index", "sources", "char_start", "char_end", "block_type"):
         # 定位缺失时保持空值，不编造页码或坐标；block_id 缺失时用空串表示不可定位。
         value = entry.get(key)
         enriched[key] = "" if (key == "block_id" and value is None) else value
     enriched["source_index"] = enriched.get("source_index")
+    enriched["offset_scope"] = entry.get("offset_scope", "block")
     return enriched
 
 
@@ -782,7 +805,7 @@ def _renumber_citations(first: list[dict], second: list[dict]) -> list[dict]:
     index: dict[tuple, int] = {}
     merged: list[dict] = []
     for citation in list(first) + list(second):
-        key = (citation.get("block_id"), citation.get("source_index"), citation.get("quote"),
+        key = (citation.get("unit_id") or citation.get("block_id"), citation.get("source_index"), citation.get("quote"),
                citation.get("ref"))
         if key in index:
             continue

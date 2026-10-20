@@ -224,8 +224,12 @@ def test_v4_migration_backfills_keys_without_changing_jobs(tmp_path):
     _, repo, _, _, job = setup_job(tmp_path)
     with repo.connect() as db:
         before = [tuple(row) for row in db.execute("SELECT * FROM analysis_jobs")]
+        # 形成真实v3夹具：不能保留后续问答结构却只删除迁移登记来伪造旧库。
+        for table in ("question_results", "question_stage_events", "question_checkpoints",
+                      "question_calls", "question_attempts", "question_request_keys", "question_jobs"):
+            db.execute(f"DROP TABLE {table}")
         db.execute("DROP TABLE analysis_request_keys")
-        db.execute("DELETE FROM schema_migrations WHERE version=4")
+        db.execute("DELETE FROM schema_migrations WHERE version>=4")
     def fail_migration():
         raise RuntimeError("合成 v4 迁移故障")
     migrations.MigrationHook.register(4, fail_migration)
@@ -238,7 +242,7 @@ def test_v4_migration_backfills_keys_without_changing_jobs(tmp_path):
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='analysis_request_keys'").fetchone() is None
         assert before == [tuple(row) for row in db.execute("SELECT * FROM analysis_jobs")]
     migration = repo.initialize()
-    assert migration["applied"] == [4] and migration["backup"]
+    assert migration["applied"] == list(range(4, migrations.SCHEMA_VERSION + 1)) and migration["backup"]
     with repo.connect() as db:
         assert before == [tuple(row) for row in db.execute("SELECT * FROM analysis_jobs")]
     assert repo.find_analysis_job_by_idempotency("doc-1", "review-fixed-key").id == job.id

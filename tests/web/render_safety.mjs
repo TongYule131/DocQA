@@ -94,6 +94,8 @@ const containerIds = ['message', 'connection-status', 'documents', 'document-tit
   'search-results', 'chunks', 'model-status', 'embedding-status', 'embedding-gateway',
   'parsing-status', 'answer-panel', 'answer-status', 'answer-meta', 'answer-waiting',
   'answer-body', 'answer-questions', 'answer-warnings', 'answer-limitations', 'answer-citations',
+  'answer-actions', 'question-job', 'question-history', 'question-refresh', 'question-cancel',
+  'question-retry', 'question-confirm',
   'question', 'ask', 'summary', 'extract', 'parse', 'reparse', 'refresh', 'test-model',
   'test-embedding', 'build-index', 'rebuild-index', 'search-query', 'search', 'stop-task',
   'retry-task', 'upload-form', 'question-form', 'search-form', 'file',
@@ -217,6 +219,28 @@ const openedLinks = linkNodes.filter((node) => node.target === '_blank')
 check('R24-5', '外部打开均带 noopener', openedLinks.every((node) => node.rel === 'noopener noreferrer'),
   `target=_blank 数量 ${openedLinks.length}`)
 
+const tableCitation = structuredClone(payload.citations[0])
+tableCitation.table_structure = { version: 'table-coordinate-evidence-v1', status: 'available',
+  rows: [{ row: 1, values: ['项目', '金额'] }, { row: 4, values: ['<img src=x onerror=alert(1)>', '0'] },
+    { row: 5, values: ['补助', ''] }],
+  formulas: [{ cell: 'B6', cache_status: 'missing', cached_value: null },
+    { cell: 'C6', cache_status: 'saved', cached_value: 0 }],
+  footnotes: [{ text: '<script>假指令</script>部分项目未经审计', applicability: 'unresolved' }] }
+renderCitations([tableCitation], payload)
+const tableCard = elements.get('answer-citations')
+check('TABLE-UI-1', '表格行列仅作辅助，保留真实行号、空白和零',
+  tableCard.textContent.includes('表内第 4 行：<img') && tableCard.textContent.includes('补助 | （空）')
+    && tableCard.textContent.includes('可能超出本条引述范围') && tableCard.allNodes().some(n => n.tagName === 'DETAILS'),
+  tableCard.textContent.slice(0, 220))
+check('TABLE-UI-2', '公式缺缓存与缓存零分别显示，脚注范围保留未确认',
+  tableCard.textContent.includes('B6：公式缓存缺失') && tableCard.textContent.includes('C6：文件缓存值 0')
+    && tableCard.textContent.includes('表格注释（适用范围未确认）'), tableCard.textContent.slice(-220))
+check('TABLE-UI-3', '辅助表格和脚注中的 HTML 只作文字',
+  !tableCard.allNodes().some(n => ['IMG', 'SCRIPT'].includes(n.tagName)), '所有不可信值均使用textContent')
+renderCitations(payload.citations, payload)
+check('TABLE-UI-4', '旧结果无结构字段时保持引用卡片兼容',
+  !elements.get('answer-citations').allNodes().some(n => n.tagName === 'DETAILS'), '不补造旧表结构')
+
 // --- 分析结果渲染安全（摘要 / 提取） --------------------------------------
 // 与问答共用同一套受限渲染：模型文本、引述与文件名里的 HTML 只能作为文字出现。
 const analysisResult = {
@@ -326,6 +350,13 @@ check('QUALITY-UI-1', '旧版本没有独立告警时仍显示质量限制',
 hooks.renderWarnings([], { is_legacy: false, quality_status: 'ok' })
 check('QUALITY-UI-2', '空告警列表不表示已逐字核对',
   elements.get('quality-panel').textContent.includes('不表示内容已与原件逐字核对'),
+  elements.get('quality-panel').textContent)
+const originalOCRWarning = { code: 'ocr_limitation', severity: 'info', scope: 'document',
+  message: '扫描或混合PDF识别可能有错字。' }
+hooks.renderWarnings([originalOCRWarning])
+check('QUALITY-UI-3', '旧OCR通用提示解释为未验证，不误称识别失败且不改历史对象',
+  elements.get('quality-panel').textContent.includes('不表示检测到OCR失败')
+    && originalOCRWarning.message === '扫描或混合PDF识别可能有错字。',
   elements.get('quality-panel').textContent)
 
 const readyRole = (role) => ({ role, running: true, ready: true, code_match: true,
@@ -608,6 +639,7 @@ sandbox.fetch = async (url, options = {}) => {
   else if (url === '/api/analysis-results/closure-result') data = closureResult
   else if (url.endsWith('/analysis-results')) data = url.includes('/closure-a/') ? [closureSummary] : []
   else if (url.endsWith('/analysis-jobs')) data = []
+  else if (url.endsWith('/question-jobs')) data = []
   else if (url === '/api/analysis-jobs/closure-other-job') data = {
     id: 'closure-other-job', kind: 'extraction', status: 'succeeded', stage: 'done',
     requests_used: 1, max_requests: 8, steps_completed: 1, steps_total: 1,

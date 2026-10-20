@@ -30,6 +30,7 @@ from app.rag_context import EvidencePack, normalize_text
 
 # 校验失败原因码：进入日志与错误码，不含原文、完整输出与凭证。
 REASON_CODE_NAMES = {
+    "unsupported_contract_version",
     "invalid_json",
     "duplicate_key",
     "not_object",
@@ -53,6 +54,9 @@ REASON_CODE_NAMES = {
     "empty_quote",
     "quote_not_found",
     "mixed_user_source",
+    "coverage_missing", "fact_context_missing", "context_scope_mismatch", "context_not_in_quote",
+    "numeric_context_missing", "number_not_in_quote", "coverage_mismatch",
+    "unsupported_requirement", "coverage_status_conflict",
 }
 
 # 数量与长度上限（对应任务书 6.2）。
@@ -80,6 +84,7 @@ class ValidatedFact:
     """已校验的事实条目：text 与 refs 都通过结构与范围检查。"""
     text: str
     refs: list[int]
+    context: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -90,6 +95,9 @@ class ValidatedOutput:
     explanation: list[ValidatedFact] = field(default_factory=list)
     clarification_questions: list[str] = field(default_factory=list)
     quotes: dict[int, str] = field(default_factory=dict)
+    missing_points: list[str] = field(default_factory=list)
+    answer_parts: list[dict] = field(default_factory=list)
+    context_selection_count: int = 0
 
     def used_refs(self) -> set[int]:
         refs: set[int] = set()
@@ -243,13 +251,27 @@ def _parse_questions(raw_value: Any, *, total_chars: list[int]) -> list[str]:
     return questions
 
 
-def _parse_quotes(raw_value: Any, *, evidence: EvidencePack) -> dict[int, str]:
+def _parse_quotes(raw_value: Any, *, evidence: EvidencePack, quote_limit: int = MAX_QUOTE_CHARS,
+                  allow_spans: bool = False) -> dict[int, str]:
     """解析并校验引述：每条恰好对应一个编号，且必须是证据正文的连续子串。"""
     quotes: dict[int, str] = {}
     for raw in _require_list(raw_value):
         if not isinstance(raw, dict):
             raise ModelOutputError("bad_type", "引述条目必须是对象")
         keys = set(raw.keys())
+        if allow_spans and keys == {"ref", "span"}:
+            from app.quote_spans import quote_choices
+            ref = _parse_ref(raw["ref"])
+            item = evidence.item_by_ref(ref)
+            if item is None:
+                raise ModelOutputError("unknown_reference", "引述引用了本次证据范围之外的编号")
+            span = raw["span"]
+            spans = quote_choices(item.text)
+            if type(span) is not int or not 1 <= span <= len(spans):
+                raise ModelOutputError("bad_type", "引述编号必须属于本次证据中真实存在的候选")
+            # 回取原文而非修补模型字符串；长度、唯一编号和逐事实引用继续走原严格校验。
+            raw = {"ref": ref, "quote": spans[span - 1]}
+            keys = set(raw)
         if keys - {"ref", "quote"}:
             raise ModelOutputError("unknown_field", "引述条目包含未知字段")
         if keys != {"ref", "quote"}:
@@ -261,7 +283,7 @@ def _parse_quotes(raw_value: Any, *, evidence: EvidencePack) -> dict[int, str]:
         quote = _require_str(raw.get("quote")).replace("\r\n", "\n")
         if not quote.strip():
             raise ModelOutputError("empty_quote", "引述不能为空或纯空白")
-        if len(quote) > MAX_QUOTE_CHARS:
+        if len(quote) > quote_limit:
             raise ModelOutputError("quote_too_long", "引述超过单条长度上限")
         item = evidence.item_by_ref(ref)
         if item is None:
@@ -273,13 +295,14 @@ def _parse_quotes(raw_value: Any, *, evidence: EvidencePack) -> dict[int, str]:
     return quotes
 
 
-def validate_model_output(raw: str, evidence: EvidencePack) -> ValidatedOutput:
+def validate_model_output(raw: str, evidence: EvidencePack, *, task_protocol: bool = False) -> ValidatedOutput:
     """完整校验模型输出；任何偏差抛出 ModelOutputError（稳定原因码）。"""
     payload = parse_model_output(raw)
+    missing_raw = payload.pop("missing_points", []) if task_protocol else []
     _require_keys(payload)
 
     status = _require_str(payload.get("status"))
-    if status not in _ALLOWED_STATUS:
+    if status not in (_ALLOWED_STATUS | {"partial"} if task_protocol else _ALLOWED_STATUS):
         raise ModelOutputError("bad_status", "status 取值不在允许范围内")
 
     total_chars = [0]
@@ -287,11 +310,22 @@ def validate_model_output(raw: str, evidence: EvidencePack) -> ValidatedOutput:
                   for item in _require_list(payload.get("conclusion"))]
     explanation = [_parse_fact(item, evidence=evidence, total_chars=total_chars)
                    for item in _require_list(payload.get("explanation"))]
-    if len(conclusion) + len(explanation) > MAX_FACT_ITEMS:
+    if len(conclusion) + len(explanation) > (20 if task_protocol else MAX_FACT_ITEMS):
         raise ModelOutputError("facts_too_many", "事实条目总数超过上限")
     questions = _parse_questions(payload.get("clarification_questions"), total_chars=total_chars)
+    missing_points = []
+    for value in _require_list(missing_raw):
+        text = _require_str(value)
+        if not text.strip() or len(text) > 500:
+            raise ModelOutputError("text_too_long", "缺项说明为空或超过长度上限")
+        total_chars[0] += len(text)
+        missing_points.append(text)
+    if len(missing_points) > 8 or total_chars[0] > MAX_TOTAL_TEXT_CHARS:
+        raise ModelOutputError("text_too_long", "缺项说明或总文字超过上限")
+    if (status == "partial") != bool(missing_points):
+        raise ModelOutputError("status_conflict", "部分回答必须明确列出缺项，其他状态不得列缺项")
 
-    if status == "answered":
+    if status in {"answered", "partial"}:
         if not conclusion:
             raise ModelOutputError("empty_conclusion", "answered 至少需要一条结论事实")
         if questions:
@@ -307,12 +341,13 @@ def validate_model_output(raw: str, evidence: EvidencePack) -> ValidatedOutput:
         if conclusion or explanation or questions:
             raise ModelOutputError("status_conflict", "insufficient_evidence 的四个列表必须为空")
 
-    quotes = _parse_quotes(payload.get("evidence_quotes"), evidence=evidence)
+    quotes = _parse_quotes(payload.get("evidence_quotes"), evidence=evidence,
+                           quote_limit=600 if task_protocol else MAX_QUOTE_CHARS, allow_spans=task_protocol)
     if status == "insufficient_evidence" and quotes:
         raise ModelOutputError("status_conflict", "insufficient_evidence 的引述列表必须为空")
 
     result = ValidatedOutput(status=status, conclusion=conclusion, explanation=explanation,
-                             clarification_questions=questions, quotes=quotes)
+                             clarification_questions=questions, quotes=quotes, missing_points=missing_points)
     if status != "insufficient_evidence":
         used = result.used_refs()
         if not used:
@@ -331,7 +366,10 @@ def validate_user_condition_boundary(output: ValidatedOutput, evidence: Evidence
     """拒绝把明确复述的用户条件混入带文档引用的事实条目。
 
     只检查至少四字符的成对引号内容：它逐字来自本次问题、却不存在于本条
-    refs 的任一原文时，不能让文档编号承担用户原话的来源。短术语、书名号、
+    refs 的任一原文时，不能让文档编号承担用户原话的来源。含中文且不含数值的
+    短语允许仅比较中文相邻的排版空白，避免OCR题名被误认成用户经历；不合并
+    拉丁词间空格，不改数字、标点或大小写。此比较不改输出，也不适用于quote
+    连续原文校验。短术语、书名号、
     未加引号的转述与 clarification_questions 不在此确定性检查范围内。
     这不是数字或语义校验；同一原句也确实出现在当前引用的资料中时仍可使用。
     不改写输出、不补引用、不追加模型调用，失败交给服务层返回安全错误。
@@ -340,12 +378,20 @@ def validate_user_condition_boundary(output: ValidatedOutput, evidence: Evidence
         r'“([^“”\r\n]{4,})”|‘([^‘’\r\n]{4,})’|'
         r'「([^「」\r\n]{4,})」|『([^『』\r\n]{4,})』|"([^"\r\n]{4,})"')
     normalized_question = question.replace("\r\n", "\n")
+    def same_source_phrase(phrase: str, source: str) -> bool:
+        if phrase in source:
+            return True
+        if not re.search(r"[\u3400-\u9fff]", phrase) or any(char.isnumeric() for char in phrase):
+            return False
+        def layout_spaces(value):
+            return re.sub(r"(?<=[\u3400-\u9fff])\s+(?=\S)|(?<=\S)\s+(?=[\u3400-\u9fff])", "", value)
+        return layout_spaces(phrase) in layout_spaces(source)
     for fact in output.conclusion + output.explanation:
         cited_texts = [item.text.replace("\r\n", "\n") for ref in fact.refs
                        if (item := evidence.item_by_ref(ref)) is not None]
         for match in quoted_user_text.finditer(fact.text):
             quoted = next(value for value in match.groups() if value is not None)
-            if quoted in normalized_question and not any(quoted in text for text in cited_texts):
+            if quoted in normalized_question and not any(same_source_phrase(quoted, text) for text in cited_texts):
                 raise ModelOutputError("mixed_user_source",
                                        "文档事实条目混入仅由用户问题提供的原句")
 
@@ -361,11 +407,12 @@ def render_markdown(output: ValidatedOutput) -> str:
 
     def fact_line(fact: ValidatedFact) -> str:
         # 模型条目内的换行不能拆出没有引用的独立段落，引用始终跟随同一条目。
-        text = " ".join(fact.text.splitlines())
+        from app.rag_answer_contract import fact_display_text
+        text = " ".join(fact_display_text(fact).splitlines())
         return f"- {text}{marker(fact.refs)}"
 
     lines: list[str] = []
-    if output.status == "answered":
+    if output.status in {"answered", "partial"}:
         lines.append("## 结论")
         for fact in output.conclusion:
             lines.append(fact_line(fact))
@@ -374,6 +421,9 @@ def render_markdown(output: ValidatedOutput) -> str:
             lines.append("## 依据与说明")
             for fact in output.explanation:
                 lines.append(fact_line(fact))
+        if output.missing_points:
+            lines.extend(["", "## 本次尚缺少的依据"])
+            lines.extend("- " + " ".join(point.splitlines()) for point in output.missing_points)
     elif output.status == "clarification_needed":
         from app.rag_prompts import CLARIFICATION_LEAD
 

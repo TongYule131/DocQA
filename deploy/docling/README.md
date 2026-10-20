@@ -20,6 +20,8 @@ docker @dc logs --tail 60 parser
 
 models 命名卷首次创建时复制镜像缓存，重建时复用。不要用空宿主机目录覆盖缓存，也不要执行 down -v 删除模型卷。日常停止使用 `docker @dc stop`。
 
+服务采用 `restart: unless-stopped`：Docker 引擎重新可用后恢复服务，显式手动停止仍保持停止。已有容器可执行 `docker update --restart unless-stopped docqa-parser-lab-parser-1` 同步该策略，无需重建镜像或模型卷。该策略不能替代 Docker 引擎本身的启动，也不能保证解析任务在容器重启后仍保留；提交结果不明时继续按已保存任务编号核对，不盲目重投。
+
 ## 样本与自动验证
 
 ```powershell
@@ -72,3 +74,50 @@ No registered plugin EP device 警告不能独立证明 CPU 回退。总显存�
 当前实际样本 7 份。合成扫描件不能证明真实扫描件准确率。还需核对姓名、数字、表头、阅读顺序与来源位置，以及重连和重启恢复。Excel 缺公式缓存要与解析漏字区分；PDF 空白页不应拒绝整份文档。
 
 历史数字、GPU执行证据及质量边界统一见[阶段01](../../docs/阶段01-文档解析与OCR.md)，旧原报告完整保留在文档整理备份中。
+
+## small/medium隔离试验（2026-10-19）
+
+当前量化标准与结果见[阶段01](../../docs/阶段01-文档解析与OCR.md)，当时冻结原文见[OCR标准归档](../../docs/archive/2026-10-20/OCR识别量化标准与提升计划.md)。该轮medium通过Docling集成和真实CUDA节点验证，但保留集关键术语出现新增错误，未通过默认切换门槛，正式5001仍用small。大分辨率方案也未通过；不要仅因模型更大而全局替换缓存。
+
+新增工具不读取`.env`或访问生成/embedding供应商：
+
+- `scripts/download_ocr_medium.py --output <隔离模型目录>` 默认只展示计划，显式`--download`才下载固定URL，校验两个ONNX文件的官方SHA256；已有失败文件不覆盖。
+- `scripts/evaluate_ocr_quality.py --corpus <已冻结目录> --predictions <保存结果> --output <新报告>` 只做离线评分。追加`--baseline <同保留集small结果>`会运行默认切换关卡，不合格返回1，不能把正常生成评分报告当作质量通过。
+- `scripts/run_ocr_profile.py`在镜像内执行区域对照；原始图/模型哈希、框、文字、置信分、初始化/预热/区域耗时和NVML设备显存均留档。不同profile用独立容器，实验时避免其他GPU任务。高细节配置本轮淘汰，不建议在8GB设备继续运行。
+- `scripts/convert_with_ocr_profile.py`在镜像内提供small/medium的1至4页隔离转换，保留Docling JSON坐标和Markdown；不是正式业务API的模型切换入口。
+
+复现一页集成的示例使用本轮已经复制的本地资料、只读缓存及既有镜像；输出目录必须是新的。`--probe`只用于执行证据，影响耗时：
+
+```powershell
+$ocrRoot = (Resolve-Path 'data/ocr-quality-20261019').Path
+$ocrScripts = (Resolve-Path 'scripts').Path
+docker run --rm --pull never --gpus all --network none `
+  --mount "type=bind,source=$ocrRoot,target=/work" `
+  --mount "type=bind,source=$ocrScripts,target=/project-scripts,readonly" `
+  --mount 'type=volume,source=docqa-parser-lab_models,target=/cache,readonly' `
+  --env 'LD_LIBRARY_PATH=/opt/app-root/lib/python3.12/site-packages/nvidia/cu13/lib:/opt/app-root/lib/python3.12/site-packages/nvidia/cudnn/lib' `
+  docqa/docling-ocr-gpu:1.34.0-ort1.30.0 python /project-scripts/convert_with_ocr_profile.py `
+  --input /work/sources/curriculum.pdf --models /work/models `
+  --output /work/integration-medium-new --profile medium --start-page 8 --end-page 8 --probe
+```
+
+这会真实运行本地OCR，不消耗供应商请求额度。默认保留可用PDF文字层；`--force-ocr`只适用于已确认要重新识别的选定页，不能对所有文件一律开启。该入口不自动上传、建索引或发布解析版本。
+
+## 整页、局部与分流验证工具
+
+10月19日整页批的冻结原文见[整页计划](../../docs/archive/2026-10-20/OCR整页与分流验证计划.md)和[候选保护v2](../../docs/archive/2026-10-20/OCR整页分流候选保护-v2.md)。该批完成8页、100次局部识别，不应在原输出目录重复推理。10月20日新增用户PDF分流及后续代码修复统一见阶段01/05；两批均未通过默认升级，这些实验脚本未接入正式问答页面。
+
+```powershell
+# 默认只显示计划，不加载模型或创建输出。
+.\.venv\Scripts\python.exe scripts/run_ocr_layout.py `
+  --inputs data/ocr-layout-20261019/inputs --profile routed --split holdout
+
+# 只读已有结果重评分；使用新的报告路径，无OCR和供应商调用。
+.\.venv\Scripts\python.exe scripts/evaluate_ocr_layout_grid.py `
+  --root data/ocr-layout-20261019 --profile routed-guarded --split holdout `
+  --output data/ocr-layout-20261019/replay-new.json
+```
+
+真实运行需要在隔离Docker中显式`--execute`；只挂载inputs图像/无答案计划、只读模型缓存和隔离输出，禁网，不挂gold或业务库。运行时选框只看实际Docling框和置信分，中文/数字按冻结规则走medium，拉丁路径复用small。`guard_ocr_layout.py`只从已有候选离线派生保护结果，数字/限制词/表格文字分歧保留原值并待复核。
+
+最终评分用`evaluate_ocr_layout_grid.py`：按官方`TableData.grid`还原稀疏空白，不补非空内容、不修复行列跨度。早期`score-*`未还原空格，原样保留为计分缺陷证据；`score-grid-*`经18个真实表与安装版本官方实现对照。不要将计分修正当作模型质量提升。

@@ -6,7 +6,7 @@
 // - 成功与失败分支都校验请求序号与当前选中文档，迟到响应不得覆盖新状态；
 // - 答案、澄清问题、依据不足提示与引用卡片全部用 createElement/textContent 渲染，
 //   只支持有限 Markdown（标题/列表/加粗），不解析任意 HTML、图片或外链；
-// - 问答期间禁用重复点击和 Enter 重复提交，错误后可手动重试；不会自动重发请求。
+// - 问答持久化为任务：只读轮询、历史与刷新不产生生成调用；提交不明时保留原请求键。
 const $ = (id) => document.getElementById(id);
 
 // 文档状态：status 表示“内容是否可用”，task_status 表示“本次任务进展”，两者分开显示。
@@ -44,10 +44,20 @@ let activeVersionId = null;    // 当前预览使用的解析版本。
 let indexVersionId = null;     // 当前可用索引绑定的解析版本。
 let searchMeta = null;
 let requestSeq = 0;            // 请求序号：用于丢弃切换文档后才返回的过期响应。
-let answerBusy = false;        // 问答进行中：用于禁用重复提交与 Enter 重复触发。
+let answerBusy = false;        // 仅当前文档的问答变更请求在途；不占用工作台全局 busy。
 let answerWaitTimer = null;    // 等待计时器：只显示真实等待时间，不伪造进度。
 let answerStartedAt = 0;
-let answerPayload = null;      // 最近一次问答结果（仅存于内存，刷新后清空）。
+let answerPayload = null;
+let questionJobId = null;
+let questionJobState = null;
+let questionJobs = [];
+let questionResult = null;
+let questionPollTimer = null;
+let questionPollDelay = 2500;
+let questionPollFailures = 0;
+let questionMutationSeq = 0;
+let questionViewSeq = 0;       // 同文档手动刷新或历史重开也使旧查询失效。
+const questionActiveStatuses = ['queued', 'running', 'cancel_requested'];
 // 验收记录：每次真正发出的问答请求及其结果，用于证明“每个有效提交只对应一次请求”。
 let askRequestCount = 0;
 const askRequests = [];
@@ -129,11 +139,23 @@ function controls() {
   $('rebuild-index').disabled = busy || !embeddingConfigured || !hasVersion || indexState === 'indexing';
   for (const id of ['search-query', 'search']) $(id).disabled = busy || !embeddingConfigured || indexState !== 'indexed';
   // 问答需要：有效索引 + 两个模型已配置 + 没有正在进行的问答请求。
+  const pendingQuestion = readQuestionSession(selectedId);
+  const questionActive = questionJobState && questionActiveStatuses.includes(questionJobState.status);
   for (const id of ['question', 'ask']) {
-    $(id).disabled = busy || answerBusy || !hasVersion || indexState !== 'indexed' || !ragConfigured;
+    $(id).disabled = busy || answerBusy || questionActive || Boolean(pendingQuestion?.uncertain)
+      || !hasVersion || indexState !== 'indexed' || !ragConfigured;
   }
+  $('question-cancel').disabled = answerBusy || !questionActive || Boolean(questionJobState?.cancel_requested);
+  $('question-cancel').hidden = !questionActive;
+  $('question-retry').hidden = !questionJobState
+    || !['failed', 'needs_attention'].includes(questionJobState.status);
+  $('question-retry').disabled = answerBusy || Boolean(pendingQuestion?.uncertain) || !questionJobState
+    || questionJobState.requests_used >= questionJobState.max_requests;
+  $('question-confirm').hidden = !pendingQuestion?.uncertain;
+  $('question-confirm').disabled = answerBusy;
+  $('question-refresh').disabled = answerBusy || !doc;
   $('stop-task').disabled = busy || !currentTaskId || !taskActive;
-  for (const button of $('documents').querySelectorAll('button')) button.disabled = busy || answerBusy;
+  for (const button of $('documents').querySelectorAll('button')) button.disabled = busy;
 }
 
 async function run(action) {
@@ -185,6 +207,11 @@ async function select(id, preserveAnswer = false) {
   const preservedResult = preserveAnswer && selectedId === id ? activeResultPayload : null;
   stopPolling();
   stopAnalysisPolling();
+  stopQuestionPolling();
+  stopAnswerTimer();
+  answerBusy = false;
+  questionMutationSeq += 1;
+  questionViewSeq += 1;
   selectedId = id;
   sessionStorage.setItem('docqa.selectedDocument', id);
   currentTaskId = null;
@@ -203,6 +230,13 @@ async function select(id, preserveAnswer = false) {
   lastResultKind = preservedResult ? preservedResult.kind : null;
   analysisPollFailures = 0;
   analysisPollDelay = 2500;
+  questionJobId = null;
+  questionJobState = null;
+  questionJobs = [];
+  questionPollFailures = 0;
+  questionPollDelay = 2500;
+  const preservedQuestionResult = preserveAnswer && questionResult?.document_id === id ? questionResult : null;
+  questionResult = preservedQuestionResult;
   const token = ++requestSeq;
   // 连接错误属于此前选中的任务，不能带到另一份已成功的文档上。
   $('connection-status').textContent = '';
@@ -213,8 +247,10 @@ async function select(id, preserveAnswer = false) {
   $('analysis-plan-panel').replaceChildren();
   $('analysis-results').replaceChildren();
   $('analysis-job').replaceChildren();
-  // 问答结果不持久化：切换文档时清空答案区，避免显示上一份文档的回答。
-  if (!preserveAnswer) resetAnswer();
+  // 历史答案按文档隔离，刷新从服务端恢复；不把上一文档的结果带到新文档。
+  if (!preservedQuestionResult) resetAnswer();
+  $('question-job').replaceChildren();
+  $('question-history').replaceChildren();
   renderDocuments();
   const doc = documents.find((item) => item.id === id);
   $('document-title').textContent = doc.filename;
@@ -258,6 +294,8 @@ async function select(id, preserveAnswer = false) {
   } else {
     $('analysis-job').replaceChildren();
   }
+  if (token !== requestSeq) return;
+  await restoreQuestions();
 }
 
 async function loadContent(documentId, versionId, token = requestSeq, offset = 0) {
@@ -451,6 +489,15 @@ function renderFormulas(formulas) {
   return list;
 }
 
+function qualityWarningMessage(warning) {
+  // 旧不可变解析仍保存原提示；展示时解释其含义，不修改历史记录。
+  const message = warning.message || '';
+  if (warning.code === 'ocr_limitation' && !message.includes('不表示检测到OCR失败')) {
+    return `${message}（通用能力提示：尚未逐页验证准确性，不表示检测到OCR失败。）`;
+  }
+  return message;
+}
+
 function renderWarnings(warnings, version = null) {
   // legacy 可能只有版本级限制，没有独立告警条目，不能据此宣称没有质量问题。
   $('quality-panel').replaceChildren();
@@ -471,7 +518,7 @@ function renderWarnings(warnings, version = null) {
     const title = document.createElement('strong');
     title.textContent = `${warning.severity === 'error' ? '错误' : warning.severity === 'warning' ? '告警' : '提示'} · ${warning.code}`;
     const text = document.createElement('p');
-    text.textContent = warning.message
+    text.textContent = qualityWarningMessage(warning)
       + (warning.page ? `（第 ${warning.page} 页）` : '')
       + (warning.sheet_name ? `（工作表 ${warning.sheet_name}）` : '')
       + (warning.detail ? ` · ${warning.detail}` : '');
@@ -1059,7 +1106,7 @@ function renderAnalysisResult(result, append = false) {
     for (const warning of result.quality_warnings) {
       const item = document.createElement('li');
       item.textContent = `${warning.severity === 'error' ? '错误' : warning.severity === 'warning' ? '告警' : '提示'}`
-        + ` · ${warning.code} · ${warning.message}`;
+        + ` · ${warning.code} · ${qualityWarningMessage(warning)}`;
       list.append(item);
     }
     panel.append(title, list);
@@ -1577,6 +1624,7 @@ $('stop-task').onclick = () => run(async () => {
 // ---------------------------------------------------------------------------
 const answerStatusLabels = {
   answered: '已根据引用片段回答',
+  partial: '已部分回答，请核对尚缺少的依据',
   clarification_needed: '需要补充条件后才能回答',
   insufficient_evidence: '当前片段依据不足',
 };
@@ -1589,6 +1637,7 @@ function resetAnswer() {
   $('answer-warnings').replaceChildren();
   $('answer-limitations').replaceChildren();
   $('answer-citations').replaceChildren();
+  $('answer-actions').replaceChildren();
   $('answer-status').textContent = '等待提问';
   $('answer-meta').textContent = '';
   $('answer-panel').hidden = true;
@@ -1751,6 +1800,34 @@ function renderCitations(citations, meta) {
     const quote = document.createElement('blockquote');
     quote.textContent = citation.quote;
     card.append(head, quote);
+    const structure = citation.table_structure;
+    if (structure && structure.version === 'table-coordinate-evidence-v1' && structure.status === 'available') {
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = '查看表格行列结构';
+      const note = document.createElement('p');
+      note.className = 'muted';
+      note.textContent = '以下是模型收到的整块行列，可能超出本条引述范围。空白不等于零；合并覆盖格另作标记。期间、单位和脚注范围仍须核对原文。';
+      const grid = document.createElement('pre');
+      const covered = new Set((structure.covered_cells || []).map((cell) => `${cell[0]},${cell[1]}`));
+      grid.textContent = (structure.rows || []).slice(0, 400).map((row) =>
+        `表内第 ${row.row} 行：${(row.values || []).map((value, col) => covered.has(`${row.row},${col + 1}`)
+          ? '↳（合并覆盖）' : value === '' ? '（空）' : String(value)).join(' | ')}`
+      ).join('\n');
+      details.append(summary, note, grid);
+      for (const formula of (structure.formulas || []).slice(0, 400)) {
+        const line = document.createElement('p');
+        line.textContent = `${formula.cell}：${formula.cache_status === 'missing' ? '公式缓存缺失（不能当作0）'
+          : `文件缓存值 ${formula.cached_value}（未验证公式正确性）`}`;
+        details.append(line);
+      }
+      for (const footnote of (structure.footnotes || []).slice(0, 400)) {
+        const line = document.createElement('p');
+        line.textContent = `表格注释（适用范围未确认）：${footnote.text}`;
+        details.append(line);
+      }
+      card.append(details);
+    }
 
     const info = document.createElement('p');
     info.className = 'muted';
@@ -1808,6 +1885,19 @@ function renderAnswer(payload) {
     + ` · Prompt ${payload.prompt_version}`;
 
   renderAnswerMarkdown(payload.answer);
+  if (Array.isArray(payload.answer_parts) && payload.answer_parts.length) {
+    const title = document.createElement('h4');
+    title.textContent = '问题覆盖';
+    const list = document.createElement('ul');
+    const labels = { answered: '已回答', partial: '部分回答', missing_evidence: '缺少依据', needs_clarification: '需要澄清' };
+    for (const part of payload.answer_parts) {
+      const item = document.createElement('li');
+      item.textContent = `${labels[part.state] || '待核对'}：${part.text}`
+        + (part.missing_detail ? `（${part.missing_detail}）` : '');
+      list.append(item);
+    }
+    $('answer-body').append(title, list);
+  }
 
   const questions = $('answer-questions');
   questions.replaceChildren();
@@ -1816,8 +1906,8 @@ function renderAnswer(payload) {
     title.textContent = '需要您补充的条件';
     const hint = document.createElement('p');
     hint.className = 'muted';
-    // 本阶段不保存多轮历史：下一轮必须提交补全后的完整问题。
-    hint.textContent = '本阶段不保存会话历史。请把条件补进一个完整问题后重新提问，'
+    // 历史用于重开核对，每轮仍须提交完整问题，不隐式拼接上下文。
+    hint.textContent = '请把条件补进一个完整问题后重新提问，'
       + '例如“原问题 + 补充条件”；上一轮的回答不会被当作事实再次发送。';
     const list = document.createElement('ol');
     for (const question of payload.clarification_questions) {
@@ -1848,7 +1938,7 @@ function renderAnswer(payload) {
       const head = document.createElement('strong');
       head.textContent = `${warning.severity === 'error' ? '错误' : warning.severity === 'warning' ? '告警' : '提示'} · ${warning.code}`;
       const text = document.createElement('p');
-      text.textContent = warning.message
+      text.textContent = qualityWarningMessage(warning)
         + (warning.page ? `（第 ${warning.page} 页）` : '')
         + (warning.sheet_name ? `（工作表 ${warning.sheet_name}）` : '')
         + (warning.detail ? ` · ${warning.detail}` : '');
@@ -1874,62 +1964,417 @@ function renderAnswer(payload) {
   renderCitations(payload.citations || [], payload);
 }
 
+const questionStatusLabels = {
+  queued: '已排队，等待 worker 领取', running: '正在执行', succeeded: '已完成',
+  failed: '执行失败', needs_attention: '需要确认', cancelled: '已取消',
+  cancel_requested: '已请求取消，等待当前阶段结束',
+};
+const questionStageLabels = {
+  queued: '排队中', preparing: '准备问答', retrieving: '检索证据', retrieval: '检索证据',
+  evidence_ready: '证据已固定',
+  generating: '生成回答', validating: '校验回答与引用', saving: '保存结果', done: '已完成',
+  cancelled: '已取消', failed: '已停止',
+};
+
+function questionSessionKey(documentId) { return `docqa.question.${documentId}`; }
+function readQuestionSession(documentId) {
+  if (!documentId) return null;
+  try {
+    const value = JSON.parse(sessionStorage.getItem(questionSessionKey(documentId)) || 'null');
+    return value && typeof value === 'object' && typeof value.idempotency_key === 'string'
+      && typeof value.question === 'string' ? value : null;
+  } catch (error) { return null; }
+}
+function writeQuestionSession(documentId, value) {
+  // 在提交前保存原问题与请求键；服务端结果不明时刷新也不能偷偷换键重发。
+  try { sessionStorage.setItem(questionSessionKey(documentId), JSON.stringify(value)); }
+  catch (error) {
+    throw new Error('浏览器无法保存问答恢复记录，请允许本页使用会话存储后再提交。');
+  }
+}
+function stopQuestionPolling() {
+  if (questionPollTimer !== null) clearTimeout(questionPollTimer);
+  questionPollTimer = null;
+}
+function scheduleQuestionPoll(delay = questionPollDelay) {
+  stopQuestionPolling();
+  if (!document.hidden) questionPollTimer = setTimeout(pollQuestionJob, delay);
+}
+async function questionApi(path, options = {}) {
+  // GET 与短提交连接都设超时；超时仅中断网页连接，不代表服务端任务已取消。
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try { return await api(path, { ...options, signal: controller.signal, cache: 'no-store' }); }
+  finally { clearTimeout(timeout); }
+}
+function questionViewMatches(documentId, token, jobId = questionJobId, viewSeq = questionViewSeq) {
+  return documentId === selectedId && token === requestSeq && jobId === questionJobId
+    && viewSeq === questionViewSeq;
+}
+function unwrapQuestionJob(data) { return data?.job || data; }
+function renderQuestionPending(pending) {
+  const line = document.createElement('p');
+  line.className = 'error';
+  line.textContent = `提交结果尚未确认。原问题：${pending.question}。`
+    + '请先刷新问答任务查询已有记录；页面不会自动重发，也不能据此判断是否已经计费。'
+    + '确认原提交会复用同一个请求键；若服务器尚未收到原请求，这将创建任务并可能产生费用。';
+  $('question-job').replaceChildren(line);
+  controls();
+}
+function renderQuestionJob(job) {
+  questionJobState = job;
+  const panel = $('question-job');
+  panel.replaceChildren();
+  if (!job) { controls(); return; }
+  const line = document.createElement('p');
+  const status = job.cancel_requested && questionActiveStatuses.includes(job.status)
+    ? '已请求取消，等待当前阶段结束' : questionStatusLabels[job.status] || job.status;
+  const stage = job.status === 'cancelled' ? 'cancelled' : job.stage;
+  line.textContent = `任务 ${job.id} · ${status}`
+    + ` · ${questionStageLabels[stage] || stage || '等待阶段信息'}`
+    + ` · 已用 ${job.requests_used ?? 0}/${job.max_requests ?? '—'} 次模型请求`;
+  panel.append(line);
+  if (questionActiveStatuses.includes(job.status)) {
+    const start = Date.parse(job.status === 'queued' ? job.created_at : (job.started_at || job.created_at));
+    if (Number.isFinite(start)) {
+      const elapsed = document.createElement('p');
+      elapsed.className = 'muted';
+      const seconds = Math.max(0, Math.floor((Date.now() - start) / 1000));
+      elapsed.textContent = `${job.status === 'queued' ? '排队' : '本次执行'}已等待 ${seconds} 秒。`;
+      if (job.stage === 'generating' && seconds >= 30 && !job.cancel_requested) {
+        elapsed.textContent += '生成可能需要较长时间，可稍后从问答历史查看；刷新不会重复提交。';
+      }
+      panel.append(elapsed);
+    }
+  }
+  if (job.stage_detail) {
+    const detail = document.createElement('p');
+    detail.className = 'muted';
+    detail.textContent = job.stage_detail;
+    panel.append(detail);
+  }
+  if (job.question) {
+    const question = document.createElement('p');
+    question.textContent = `问题：${job.question}`;
+    panel.append(question);
+  }
+  const meta = document.createElement('p');
+  meta.className = 'muted';
+  meta.textContent = `解析版本 ${job.parse_version_id || '待绑定'} · 索引 ${job.index_id || '待绑定'}`
+    + (job.request_id ? ` · 请求编号 ${job.request_id}` : '')
+    + (job.updated_at ? ` · 更新 ${job.updated_at}` : '')
+    + '。任务在后台执行，可切换文档或稍后刷新。';
+  panel.append(meta);
+  if (job.error_code || job.error_message) {
+    const error = document.createElement('p');
+    error.className = 'error';
+    error.textContent = `${job.error_code || '任务提示'} · ${job.error_message || '请核对任务状态。'}`;
+    panel.append(error);
+  }
+  if (job.status === 'needs_attention') {
+    const note = document.createElement('p');
+    note.className = 'error';
+    note.textContent = '上游请求结果尚未确认，系统不会自动重发。明确重试可能重复计费；已有结果仍可查看。';
+    panel.append(note);
+  }
+  controls();
+}
+function renderQuestionHistory() {
+  const panel = $('question-history');
+  panel.replaceChildren();
+  const title = document.createElement('h4');
+  title.textContent = '问答历史';
+  panel.append(title);
+  if (!questionJobs.length) {
+    const empty = document.createElement('p');
+    empty.className = 'muted';
+    empty.textContent = '该文档还没有已记录的问答任务。';
+    panel.append(empty);
+  }
+  for (const job of questionJobs) {
+    const row = document.createElement('div');
+    row.className = 'result-row';
+    const label = document.createElement('span');
+    label.textContent = `${job.question || '问答任务'} · ${questionStatusLabels[job.status] || job.status}`
+      + ` · ${job.created_at || ''} · ${job.id}`;
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'subtle';
+    open.textContent = job.result_id ? '查看已存回答' : '查看任务';
+    const documentId = selectedId;
+    open.onclick = () => {
+      if (documentId !== selectedId || answerBusy) return;
+      openQuestionJob(job.id).catch((error) => {
+        if (documentId === selectedId) setMessage('无法读取问答记录，请刷新后重试。', 'error');
+      });
+    };
+    row.append(label, open);
+    panel.append(row);
+  }
+}
+async function loadQuestionHistory(documentId = selectedId, token = requestSeq, viewSeq = questionViewSeq) {
+  const jobs = await questionApi(`/documents/${encodeURIComponent(documentId)}/question-jobs`);
+  if (documentId !== selectedId || token !== requestSeq || viewSeq !== questionViewSeq) return null;
+  questionJobs = Array.isArray(jobs) ? jobs : (jobs.jobs || []);
+  renderQuestionHistory();
+  return questionJobs;
+}
+function saveKnownQuestionJob(documentId, job, pending = readQuestionSession(documentId), acceptedResponse = false) {
+  const current = readQuestionSession(documentId);
+  if (!pending || !current || current.idempotency_key !== pending.idempotency_key) return;
+  if (!acceptedResponse) {
+    if (pending.uncertain) {
+      const knownKey = pending.mutation === 'retry' ? job.last_retry_key : job.idempotency_key;
+      if (knownKey !== pending.idempotency_key) return;
+    } else if (pending.job_id !== job.id) return;
+  }
+  writeQuestionSession(documentId, { ...pending, job_id: job.id, uncertain: false,
+    result_id: job.result_id || null, mutation: null });
+}
+async function openQuestionResult(resultId, documentId = selectedId, token = requestSeq,
+  jobId = questionJobId, viewSeq = questionViewSeq) {
+  const result = await questionApi(`/question-results/${encodeURIComponent(resultId)}`);
+  if (!questionViewMatches(documentId, token, jobId, viewSeq) || result.document_id !== documentId) return;
+  questionResult = result;
+  renderAnswer(result.answer);
+  const actions = $('answer-actions');
+  actions.replaceChildren();
+  const label = document.createElement('span');
+  label.className = 'muted';
+  label.textContent = `已保存回答 ${result.id}` + (result.created_at ? ` · ${result.created_at}` : '');
+  actions.append(label);
+  for (const [format, text] of [['markdown', '导出 Markdown'], ['json', '导出 JSON']]) {
+    const link = document.createElement('a');
+    link.href = `/api/question-results/${encodeURIComponent(result.id)}/export?format=${format}`;
+    link.textContent = text;
+    actions.append(link);
+  }
+  const pending = readQuestionSession(documentId);
+  if (pending?.job_id === result.job_id) {
+    writeQuestionSession(documentId, { ...pending, result_id: result.id });
+  }
+}
+async function openQuestionJob(jobId) {
+  const documentId = selectedId;
+  const token = requestSeq;
+  const viewSeq = ++questionViewSeq;
+  stopQuestionPolling();
+  questionJobId = jobId;
+  const job = unwrapQuestionJob(await questionApi(`/question-jobs/${encodeURIComponent(jobId)}`));
+  if (!questionViewMatches(documentId, token, jobId, viewSeq) || job.document_id !== documentId) return;
+  renderQuestionJob(job);
+  if (job.result_id) await openQuestionResult(job.result_id, documentId, token, jobId, viewSeq);
+  if (!questionViewMatches(documentId, token, jobId, viewSeq)) return;
+  if (questionActiveStatuses.includes(job.status)) scheduleQuestionPoll(0);
+}
+async function restoreQuestions() {
+  const documentId = selectedId;
+  const token = requestSeq;
+  const viewSeq = ++questionViewSeq;
+  stopQuestionPolling();
+  const pending = readQuestionSession(documentId);
+  try {
+    const jobs = await loadQuestionHistory(documentId, token, viewSeq);
+    if (!jobs || documentId !== selectedId || token !== requestSeq || viewSeq !== questionViewSeq) return;
+    const matched = pending && jobs.find((job) => pending.mutation === 'retry'
+      ? job.last_retry_key === pending.idempotency_key
+      : job.id === pending.job_id || job.idempotency_key === pending.idempotency_key);
+    if (matched) saveKnownQuestionJob(documentId, matched, pending);
+    if (pending?.uncertain && !matched) { renderQuestionPending(pending); return; }
+    const job = matched || jobs.find((item) => questionActiveStatuses.includes(item.status)) || jobs[0];
+    if (job) {
+      questionJobId = job.id;
+      renderQuestionJob(job);
+      if (questionActiveStatuses.includes(job.status)) scheduleQuestionPoll(0);
+      // 普通刷新保留用户正在核对的回答，其余情况恢复已保存回答。
+      if (!questionResult && job.result_id) await openQuestionResult(job.result_id, documentId, token, job.id, viewSeq);
+      else if (questionResult) await openQuestionResult(questionResult.id, documentId, token, job.id, viewSeq);
+    } else controls();
+  } catch (error) {
+    if (documentId !== selectedId || token !== requestSeq || viewSeq !== questionViewSeq) return;
+    $('question-job').textContent = '无法读取问答任务与历史，请点击“刷新问答任务与历史”重试；未发起生成。';
+    if (pending?.uncertain) renderQuestionPending(pending);
+    controls();
+  }
+}
+async function pollQuestionJob() {
+  if (!questionJobId || !selectedId || document.hidden) { stopQuestionPolling(); return; }
+  const jobId = questionJobId;
+  const documentId = selectedId;
+  const token = requestSeq;
+  const viewSeq = questionViewSeq;
+  try {
+    const job = unwrapQuestionJob(await questionApi(`/question-jobs/${encodeURIComponent(jobId)}`));
+    if (!questionViewMatches(documentId, token, jobId, viewSeq) || job.document_id !== documentId) return;
+    renderQuestionJob(job);
+    saveKnownQuestionJob(documentId, job);
+    if (questionActiveStatuses.includes(job.status)) {
+      questionPollFailures = 0;
+      questionPollDelay = 2500;
+      scheduleQuestionPoll();
+      return;
+    }
+    stopQuestionPolling();
+    if (job.result_id) await openQuestionResult(job.result_id, documentId, token, jobId, viewSeq);
+    if (!questionViewMatches(documentId, token, jobId, viewSeq)) return;
+    await loadQuestionHistory(documentId, token, viewSeq);
+    questionPollFailures = 0;
+    questionPollDelay = 2500;
+  } catch (error) {
+    if (!questionViewMatches(documentId, token, jobId, viewSeq)) return;
+    questionPollFailures += 1;
+    const note = document.createElement('p');
+    note.className = 'error';
+    note.textContent = questionPollFailures > 6
+      ? '多次无法读取问答状态，已暂停自动查询。请刷新问答任务恢复；任务可能仍在后台执行，页面未重新生成。'
+      : '暂时无法读取问答状态，将稍后重查。任务可能仍在后台执行，页面不会重新生成。';
+    $('question-job').replaceChildren(note);
+    if (questionPollFailures > 6) { stopQuestionPolling(); return; }
+    questionPollDelay = Math.min(15000, questionPollDelay * 2);
+    scheduleQuestionPoll();
+  }
+}
+async function submitQuestionPending(pending) {
+  const documentId = selectedId;
+  const token = requestSeq;
+  const mutation = ++questionMutationSeq;
+  const viewSeq = ++questionViewSeq;
+  answerBusy = true;
+  controls();
+  askRequestCount += 1;
+  const record = { documentId, question: pending.question, seq: token, status: 'pending' };
+  askRequests.push(record);
+  const note = document.createElement('p');
+  note.textContent = '正在提交问答任务，任务编号将在服务器接收后显示。';
+  $('question-job').replaceChildren(note);
+  let accepted = false;
+  try {
+    const path = pending.mutation === 'retry'
+      ? `/question-jobs/${encodeURIComponent(pending.job_id)}/retry`
+      : `/documents/${encodeURIComponent(documentId)}/question-jobs`;
+    const data = await questionApi(path, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(pending.mutation === 'retry'
+        ? { idempotency_key: pending.idempotency_key }
+        : { question: pending.question, idempotency_key: pending.idempotency_key }),
+    });
+    const job = unwrapQuestionJob(data);
+    if (!job?.id || job.document_id !== documentId) throw new Error('任务响应不完整');
+    accepted = true;
+    saveKnownQuestionJob(documentId, job, pending, true);
+    record.status = 'ok';
+    if (documentId !== selectedId || token !== requestSeq || mutation !== questionMutationSeq) {
+      record.status = 'stale'; return;
+    }
+    questionJobId = job.id;
+    renderQuestionJob(job);
+    await loadQuestionHistory(documentId, token, viewSeq);
+    if (!questionViewMatches(documentId, token, job.id, viewSeq)) return;
+    if (job.result_id) await openQuestionResult(job.result_id, documentId, token, job.id, viewSeq);
+    if (!questionViewMatches(documentId, token, job.id, viewSeq)) return;
+    if (questionActiveStatuses.includes(job.status)) scheduleQuestionPoll(0);
+  } catch (error) {
+    record.status = accepted ? 'ok' : 'uncertain';
+    if (documentId !== selectedId || token !== requestSeq || mutation !== questionMutationSeq) return;
+    if (accepted) {
+      setMessage('任务已接收，暂时无法刷新记录。请刷新问答任务核对；页面不会重新生成。', 'error');
+      scheduleQuestionPoll(0);
+      return;
+    }
+    if ([400, 422].includes(error.status)) {
+      // 服务端明确拒绝的参数错误允许修改后重新提交；网络不明不能走此分支。
+      const current = readQuestionSession(documentId);
+      if (current?.idempotency_key === pending.idempotency_key) {
+        writeQuestionSession(documentId, { ...current, uncertain: false });
+      }
+      record.status = 'rejected';
+      const rejected = document.createElement('p');
+      rejected.className = 'error';
+      rejected.textContent = `提交被服务器拒绝：${error.message}。请检查条件后重新提交。`;
+      $('question-job').replaceChildren(rejected);
+      return;
+    }
+    // 无论网络超时还是响应丢失，都只能先查询已有任务；不能自动再次 POST。
+    renderQuestionPending(readQuestionSession(documentId) || pending);
+    await restoreQuestions();
+  } finally {
+    if (documentId === selectedId && token === requestSeq && mutation === questionMutationSeq) {
+      answerBusy = false;
+      controls();
+    }
+  }
+}
 async function askQuestion() {
-  // 一次提交只产生一次问答请求；失败后只能由用户手动重试。
   const documentId = selectedId;
   const question = $('question').value.trim();
   if (!documentId) { setMessage('请先选择一份文档', 'error'); return; }
   if (!question) { setMessage('请输入问题后再提问', 'error'); return; }
-  if (busy || answerBusy) return;   // 忙碌期间忽略重复点击与 Enter 重复提交。
-  const token = requestSeq;
-  busy = true;
-  answerBusy = true;
+  if (busy || answerBusy || questionActiveStatuses.includes(questionJobState?.status)) return;
+  const existing = readQuestionSession(documentId);
+  if (existing?.uncertain) { renderQuestionPending(existing); return; }
+  const pending = { question, idempotency_key: crypto.randomUUID(), job_id: null,
+    result_id: null, uncertain: true, mutation: null };
+  try { writeQuestionSession(documentId, pending); }
+  catch (error) { setMessage(error.message, 'error'); return; }
+  questionResult = null;
+  questionJobState = null;
+  questionJobId = null;
+  stopQuestionPolling();
+  resetAnswer();
   setMessage('');
-  $('answer-citations').replaceChildren();
-  $('answer-body').replaceChildren();
-  $('answer-questions').replaceChildren();
-  $('answer-warnings').replaceChildren();
-  $('answer-limitations').replaceChildren();
-  $('answer-status').textContent = '正在生成回答';
-  $('answer-meta').textContent = '';
-  $('answer-panel').hidden = false;
-  startAnswerTimer();
-  controls();
-  askRequestCount += 1;
-  const record = { documentId: documentId, question: question, seq: token, status: 'pending' };
-  askRequests.push(record);
-  try {
-    const payload = await api(`/documents/${documentId}/questions`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question: question }),
-    });
-    record.status = 'ok';
-    // 迟到响应校验：文档已切换或已有更新的请求时丢弃，不覆盖新状态。
-    if (token !== requestSeq || documentId !== selectedId) { record.status = 'stale'; return; }
-    renderAnswer(payload);
-  } catch (error) {
-    // 迟到失败同样不得覆盖当前文档的状态。
-    if (token !== requestSeq || documentId !== selectedId) { record.status = 'stale'; return; }
-    record.status = 'error';
-    $('answer-panel').hidden = false;
-    $('answer-status').textContent = '本次提问失败';
-    $('answer-meta').textContent = '可以修改问题后重新点击“提问”；页面不会自动重发请求。';
-    const note = document.createElement('p');
-    note.className = 'error';
-    note.textContent = error.message;
-    $('answer-body').replaceChildren(note);
-    $('answer-citations').replaceChildren();
-    $('answer-questions').replaceChildren();
-    $('answer-warnings').replaceChildren();
-    $('answer-limitations').replaceChildren();
-  } finally {
-    stopAnswerTimer();
-    $('answer-waiting').hidden = true;
-    busy = false;
-    answerBusy = false;
-    controls();
-  }
+  await submitQuestionPending(pending);
 }
+
+$('question-refresh').onclick = async () => {
+  if (answerBusy) return;
+  stopQuestionPolling();
+  questionPollFailures = 0;
+  questionPollDelay = 2500;
+  await restoreQuestions();
+};
+$('question-confirm').onclick = async () => {
+  if (answerBusy) return;
+  const pending = readQuestionSession(selectedId);
+  if (pending?.uncertain) await submitQuestionPending(pending);
+};
+$('question-retry').onclick = async () => {
+  if (answerBusy || !questionJobState || !['failed', 'needs_attention'].includes(questionJobState.status)
+    || readQuestionSession(selectedId)?.uncertain
+    || questionJobState.requests_used >= questionJobState.max_requests) return;
+  const pending = { question: questionJobState.question || '', idempotency_key: crypto.randomUUID(),
+    job_id: questionJobState.id, result_id: null, uncertain: true, mutation: 'retry' };
+  try { writeQuestionSession(selectedId, pending); }
+  catch (error) { setMessage(error.message, 'error'); return; }
+  await submitQuestionPending(pending);
+};
+$('question-cancel').onclick = async () => {
+  if (answerBusy || !questionJobId || !questionActiveStatuses.includes(questionJobState?.status)
+    || questionJobState?.cancel_requested) return;
+  const documentId = selectedId;
+  const token = requestSeq;
+  const jobId = questionJobId;
+  const mutation = ++questionMutationSeq;
+  const viewSeq = ++questionViewSeq;
+  answerBusy = true;
+  controls();
+  try {
+    const job = unwrapQuestionJob(await questionApi(`/question-jobs/${encodeURIComponent(jobId)}/cancel`,
+      { method: 'POST' }));
+    if (!questionViewMatches(documentId, token, jobId, viewSeq) || mutation !== questionMutationSeq) return;
+    renderQuestionJob(job);
+    setMessage('已请求取消问答任务；已经发出的上游请求仍可能计费。', 'info');
+    scheduleQuestionPoll(0);
+  } catch (error) {
+    if (!questionViewMatches(documentId, token, jobId, viewSeq) || mutation !== questionMutationSeq) return;
+    setMessage('取消请求结果尚未确认，请刷新问答任务核对；已经发出的请求仍可能计费。', 'error');
+    scheduleQuestionPoll(0);
+  } finally {
+    if (questionViewMatches(documentId, token, jobId) && mutation === questionMutationSeq) {
+      answerBusy = false;
+      controls();
+    }
+  }
+};
 
 async function intelligence(action, body) {
   // 摘要与信息提取已改为任务式接口：提交后由独立 worker 执行，页面轮询真实状态。
@@ -2015,10 +2460,14 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     stopPolling();
     stopRuntimePolling();
+    stopQuestionPolling();
   } else if (currentTaskId) {
     schedulePoll(0);
   }
   if (!document.hidden) refreshRuntimeStatus();
+  if (!document.hidden && questionJobId && questionActiveStatuses.includes(questionJobState?.status)) {
+    scheduleQuestionPoll(0);
+  }
 });
 
 // 自动化验收专用只读钩子：只暴露读取状态与“触发一次真实用户操作”的能力，
@@ -2048,6 +2497,14 @@ window.__docqaTest = {
     waitingVisible: !$('answer-waiting').hidden,
     requestCount: askRequestCount,
     lastRequest: askRequests.length ? askRequests[askRequests.length - 1] : null,
+  }),
+  questionState: () => ({
+    jobId: questionJobId, jobStatus: questionJobState?.status || null,
+    resultId: questionResult?.id || null, historyCount: questionJobs.length,
+    polling: questionPollTimer === null ? 0 : 1, pollDelay: questionPollDelay,
+    pollFailures: questionPollFailures, uncertain: Boolean(readQuestionSession(selectedId)?.uncertain),
+    pendingKey: readQuestionSession(selectedId)?.idempotency_key || null,
+    busy, answerBusy,
   }),
   requests: () => askRequests.map((entry) => ({ documentId: entry.documentId,
                                                 question: entry.question, seq: entry.seq })),

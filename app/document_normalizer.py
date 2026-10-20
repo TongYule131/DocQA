@@ -23,7 +23,7 @@ from app.schemas import Block, QualityWarning, SourceLocation
 logger = logging.getLogger(__name__)
 
 # 结果结构版本：Docling 结构变化或规范化规则调整时递增，便于识别历史版本产物。
-RESULT_SCHEMA_VERSION = "docqa-normalized-4"
+RESULT_SCHEMA_VERSION = "docqa-normalized-6"
 
 # Docling 文本标签到业务块类型的映射；未识别的标签会显式告警。
 _LABEL_TO_TYPE = {
@@ -160,6 +160,205 @@ def _extract_heading_path(node: dict[str, Any], index: dict[str, dict[str, Any]]
     return " / ".join(reversed(names))
 
 
+# 编号只用于已被上游标作标题的节点；普通段落、列表及表格数字不会被提升为标题。
+_CN_NUMBER = "一二三四五六七八九十百零〇"
+_HEADING_CHAPTER = re.compile(rf"^第[\d{_CN_NUMBER}]+([章节篇部])[ \t\u3000]*[、.．:：]?[ \t\u3000]*(.+)$")
+_HEADING_CN = re.compile(rf"^[{_CN_NUMBER}]+[ \t\u3000]*[、.．][ \t\u3000]*(.+)$")
+_HEADING_CN_PAREN = re.compile(rf"^[（(][ \t\u3000]*[{_CN_NUMBER}]+[ \t\u3000]*[）)][ \t\u3000]*(.+)$")
+_HEADING_ARABIC = re.compile(r"^([1-9]\d?(?:\.(?:0|[1-9]\d?)){1,5})[.．、]?[ \t\u3000]*(\D.*)$")
+_HEADING_SINGLE = re.compile(r"^([1-9]\d?)(?:[.．、][ \t\u3000]*|[ \t\u3000]+)(.+)$")
+_HEADING_ARABIC_PAREN = re.compile(r"^[（(][ \t\u3000]*([1-9]\d?)[ \t\u3000]*[）)][ \t\u3000]*(.+)$")
+_REFERENCE_MARKER = re.compile(r"^[\[［【]\s*\d{1,4}\s*[\]］】]|\[[JDMCRNPSEBOL/]{1,5}\]|\bdoi\s*:", re.I)
+_YEAR_OR_DATE = re.compile(r"^(?:18|19|20|21)\d{2}(?:\s*年(?:度|\s*\d{1,2}\s*月(?:\s*\d{1,2}\s*日)?)?)?$")
+_NUMERIC_VALUE = re.compile(r"^[\d\s,.，．+\-−%％‰/年月日:：()（）]+$")
+_DATA_UNIT = re.compile(r"^(?:%|％|‰|倍|人|次|个|张|项|万元|亿元|元|千克|公斤|kg|km|cm|mm)(?:$|[，,。；;\s])", re.I)
+_BACK_MATTER = {"参考文献", "参考资料", "references", "bibliography"}
+_APPENDIX = re.compile(r"^(?:附录(?:\s*[A-Z一二三四五六七八九十\d])?|appendix(?:\s+[A-Z\d])?)(?:$|[\s：:、])", re.I)
+_SHORT_HEADINGS = {"摘要", "引言", "绪论", "背景", "方法", "结果", "讨论", "结论", "总结", "致谢", "附录", "目录", "概述", "陈述"}
+# 姓名判定只排除很短的常见姓名形态，不改写其字符；如不能可靠区分，就不恢复该边界。
+_SURNAMES = frozenset("赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦尤许何吕施张孔曹严华金魏陶姜戚谢邹喻柏水窦章云苏潘葛奚范彭郎鲁韦昌马苗方俞任袁柳鲍史唐费廉岑薛雷贺倪汤滕殷罗毕郝邬安常乐于傅皮卞齐康伍余元卜顾孟平黄和穆萧尹姚邵湛汪祁毛禹狄米贝明臧计伏成戴宋茅庞熊纪舒屈项祝董梁杜阮蓝闵席季麻强贾路娄危江童颜郭梅盛林刁钟徐邱骆高夏蔡田樊胡凌霍虞万支柯管卢莫房裘缪解应宗丁宣邓郁单杭洪包左石崔龚程陆荣翁荀羊惠甄曲封芮储靳段富焦侯宁仇栾甘厉戎祖武符刘景詹束龙叶黎白赖卓蔺屠蒙池乔阴郜胥能苍双闻莘党翟谭贡劳姬申扶堵冉宰郦雍桑桂濮牛寿通边燕尚温庄柴瞿阎连习艾鱼容向古易慎戈廖庾终暨居衡步都耿满弘匡国文寇广阙东欧殳沃利蔚越夔隆师巩厍聂晁勾敖融冷訾辛阚那简饶空曾沙关蒯相查后荆红游竺权逯盖益桓公")
+_COMPOUND_SURNAMES = ("欧阳", "司马", "上官", "诸葛", "东方", "皇甫", "尉迟", "公孙", "慕容", "司徒", "司空", "夏侯", "令狐")
+
+
+@dataclass(frozen=True)
+class _Heading:
+    name: str
+    depth: int
+    style: str
+    numbers: tuple[int, ...] = ()
+
+
+def _heading_spec(text: str, *, title: bool = False) -> tuple[str, int, tuple[int, ...]] | None:
+    """保守识别标题形态，不清洗 OCR 空格，也不对原文进行字符串替换。"""
+    value = text.strip()
+    if not value or len(value) > (180 if title else 80) or "\n" in value or "\r" in value:
+        return None
+    if (_REFERENCE_MARKER.search(value) or _YEAR_OR_DATE.fullmatch(value)
+            or _NUMERIC_VALUE.fullmatch(value) or re.search(r"https?://|www\.", value, re.I)):
+        return None
+    numeric = re.match(r"^[+\-−]?\d+(?:[.．]\d+)?[ \t\u3000]*(.*)$", value)
+    if numeric and _DATA_UNIT.match(numeric[1]):
+        return None
+    if re.search(r"[，,.;．]\s*(?:18|19|20|21)\d{2}(?:[，,.;．:]|$)", value):
+        return None
+    if re.fullmatch(rf"(?:[{_CN_NUMBER}]+[、.．]|[（(][{_CN_NUMBER}\d]+[）)])", value):
+        return None
+    # 正文完整句和明显残句不能只因上游 section_header 标签就形成新章节。
+    if re.search(r"[。！？!?；;]", value) or value.endswith(("的", "与", "及", "在", "了", "为", "是", "于")):
+        return None
+    if value.startswith(("因此", "然而", "其中", "从而", "并且", "以及", "本研究", "本文通过", "本文认为")):
+        return None
+    marker = _HEADING_CHAPTER.match(value)
+    if marker:
+        if marker[1] in {"篇", "部"}:
+            return "part", 1, ()
+        return ("section" if marker[1] == "节" else "chapter", 2 if marker[1] == "节" else 1, ())
+    if _HEADING_CN.match(value):
+        return "chinese", 1, ()
+    if _HEADING_CN_PAREN.match(value):
+        return "chinese_paren", 2, ()
+    marker = _HEADING_ARABIC.match(value)
+    if marker:
+        if _DATA_UNIT.match(marker[2]):
+            return None
+        numbers = tuple(int(part) for part in marker[1].split("."))
+        return "arabic", len(numbers), numbers
+    marker = _HEADING_SINGLE.match(value)
+    if marker:
+        if _DATA_UNIT.match(marker[2]) or re.match(r"(?:18|19|20|21)\d{2}\b", value):
+            return None
+        return "arabic", 1, (int(marker[1]),)
+    if _HEADING_ARABIC_PAREN.match(value):
+        return "arabic_paren", 2, ()
+    if value not in _SHORT_HEADINGS:
+        if (re.fullmatch(r"[\u4e00-\u9fff]{2,3}", value) and value[0] in _SURNAMES
+                or len(value) == 4 and value.startswith(_COMPOUND_SURNAMES)):
+            return None
+        if re.fullmatch(r"[\u4e00-\u9fff]{2,4}(?:[、，,\s]+[\u4e00-\u9fff]{2,4})+", value):
+            return None
+        if (value[0] in _SURNAMES
+                and re.fullmatch(r"[\u4e00-\u9fff]{1,2}[ \t\u3000]+[\u4e00-\u9fff]{1,2}(?:[ \t\u3000]+[\u4e00-\u9fff])?", value)):
+            return None
+    return ("title", 0, ()) if title else ("plain", 1, ())
+
+
+def _recover_structure(blocks: list[Block], block_nodes: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """在既有阅读顺序上恢复缺失路径；显式祖先路径和原始块字符串始终优先。
+
+    仅 PDF/DOCX 调用。分页不清空章节，表格、图片与跨页续段可继承最近可靠标题；
+    不做双栏坐标重排，也不猜测断行或 OCR 字符，因此它不能修复上游所有阅读顺序错误。
+    """
+    stack: list[_Heading] = []
+    recovered = suppressed = 0
+    suppressed_orders: list[int] = []
+    suppressed_refs: list[str] = []
+    in_references = False
+    for block in blocks:
+        explicit = block.heading_path
+        if block.block_type in {"title", "section_header"}:
+            spec = _heading_spec(block.text, title=block.block_type == "title")
+            name = block.text.strip()
+            # OCR常在编号或“[ 参 考 文 献 ]”中插入空格；只用于识别边界，原文与路径不改写。
+            back_matter = re.sub(r"\s+", "", name).strip("[]［］【】").casefold() in _BACK_MATTER
+            if in_references and not back_matter and not _APPENDIX.match(name):
+                spec = None
+            if spec is None:
+                # 标签保留供核对；降为正文只影响新版本的章节边界和派生分块。
+                block.block_type = "paragraph"
+                suppressed += 1
+                suppressed_orders.append(block.order_index)
+                original_ref = block_nodes.get(block.id, {}).get("self_ref")
+                if isinstance(original_ref, str):
+                    suppressed_refs.append(original_ref)
+            else:
+                style, depth, numbers = spec
+                node = block_nodes.get(block.id, {})
+                level = node.get("level")
+                if style == "plain" and type(level) is int and 1 <= level <= 9:
+                    depth = level
+                if style in {"chapter", "section", "chinese", "chinese_paren"}:
+                    allowed_parents = {"chapter": {"part"}, "section": {"chapter", "part"},
+                        "chinese": {"section", "chapter", "part"},
+                        "chinese_paren": {"chinese", "section", "chapter", "part"}}[style]
+                    numbered_parent = next((item for item in reversed(stack) if item.style in allowed_parents), None)
+                    if numbered_parent:
+                        depth = numbered_parent.depth + 1
+                if style == "arabic" and len(numbers) == 1:
+                    chinese_parent = next((item for item in reversed(stack)
+                                           if item.style in {"chinese_paren", "chinese", "section", "chapter", "part"}), None)
+                    if chinese_parent:
+                        depth = chinese_parent.depth + 1
+                elif style == "arabic" and len(numbers) > 1:
+                    numbered_parent = next((item for item in stack if item.style == "arabic"
+                                            and len(item.numbers) == 1 and item.numbers[0] == numbers[0]), None)
+                    if numbered_parent:
+                        depth = numbered_parent.depth + len(numbers) - 1
+                    # 不能把缺失的 2.1 误接在已经出现的 1 章节下，也不凭空补造标题 2。
+                    stack = [item for item in stack if not item.numbers
+                             or item.numbers == numbers[:len(item.numbers)]]
+                elif style == "arabic_paren":
+                    parent = next((item for item in reversed(stack)
+                                   if item.style in {"arabic", "chinese_paren"}), None)
+                    if parent:
+                        depth = parent.depth + 1
+                if explicit:
+                    # 原显式链不改；它也为后续父链缺失的正文提供可靠上下文。
+                    parents = explicit.split(" / ")
+                    stack = [_Heading(part, index, "explicit") for index, part in enumerate(parents)]
+                    depth = len(parents)
+                else:
+                    while stack and stack[-1].depth >= depth:
+                        stack.pop()
+                stack.append(_Heading(name, depth, style, numbers))
+                if not explicit:
+                    block.heading_path = " / ".join(item.name for item in stack)
+                    recovered += 1
+                in_references = back_matter
+        if not block.heading_path and stack:
+            block.heading_path = " / ".join(item.name for item in stack)
+            recovered += 1
+        for source in block.sources:
+            if not source.section_path and block.heading_path:
+                source.section_path = block.heading_path
+
+    # 图题与前后相邻正文只建立关联，不将图像内部内容或周边文字拼成原文事实。
+    # 发布时块 ID 会绑定版本前缀；order_index 和上游 node_ref 保持稳定，不能存临时块 ID。
+    related_orders: dict[str, list[int]] = {}
+    related_refs: dict[str, list[str]] = {}
+    for index, block in enumerate(blocks):
+        if block.block_type != "caption":
+            continue
+        nearby: list[Block] = []
+        pages = {source.page for source in block.sources if source.page is not None}
+        for step in (-1, 1):
+            for distance in range(1, 4):
+                target = index + step * distance
+                if not 0 <= target < len(blocks):
+                    break
+                candidate = blocks[target]
+                if candidate.heading_path != block.heading_path:
+                    break
+                other_pages = {source.page for source in candidate.sources if source.page is not None}
+                if pages and other_pages and min(abs(a - b) for a in pages for b in other_pages) > 1:
+                    break
+                if candidate.block_type in {"picture", "page_header", "page_footer"}:
+                    continue
+                if candidate.block_type in {"paragraph", "list_item"} and candidate.text.strip():
+                    nearby.append(candidate)
+                break
+        if nearby:
+            related_orders[str(block.order_index)] = [candidate.order_index for candidate in nearby]
+            original_ref = block_nodes.get(block.id, {}).get("self_ref")
+            if isinstance(original_ref, str):
+                related_refs[original_ref] = [node_ref for candidate in nearby
+                    if isinstance(node_ref := block_nodes.get(candidate.id, {}).get("self_ref"), str)]
+    return {"recovered_heading_paths": recovered, "suppressed_heading_count": suppressed,
+            "suppressed_heading_order_indices": suppressed_orders, "suppressed_heading_node_refs": suppressed_refs,
+            "caption_context_order_indices": related_orders, "caption_context_node_refs": related_refs,
+            "heading_path_policy": "explicit_ancestors_first_numbering_then_docling_level",
+            "caption_context_basis": "adjacent_same_section_not_semantic_fact"}
+
+
 def _clean_index_text(text: str) -> str:
     """目录上下文的保守清理：只压缩点线引导符与重复空白。
 
@@ -264,6 +463,9 @@ def normalize_docling_result(document_id: str, payload: dict[str, Any], fmt: str
     pictures = _index_by_ref(payload.get("pictures"))
     pages = payload.get("pages") if isinstance(payload.get("pages"), dict) else {}
     body = payload.get("body") if isinstance(payload.get("body"), dict) else {}
+    node_index = {**texts, **tables, **groups, **pictures}
+    if isinstance(body.get("self_ref"), str):
+        node_index[body["self_ref"]] = body
 
     document = NormalizedDocument(
         document_id=document_id, format=fmt, parser_version=parser_version,
@@ -271,6 +473,7 @@ def normalize_docling_result(document_id: str, payload: dict[str, Any], fmt: str
     )
     warnings = document.warnings
     blocks: list[Block] = []
+    block_nodes: dict[str, dict[str, Any]] = {}
     # XLSX：sheet 分组名 -> 工作表名，供表格与文本块标注来源工作表。
     sheet_by_group: dict[str, str] = {}
     for ref, group in groups.items():
@@ -337,6 +540,7 @@ def normalize_docling_result(document_id: str, payload: dict[str, Any], fmt: str
         if child_ref in processed:
             continue
         processed.add(child_ref)
+        before_count = len(blocks)
         if child_ref in texts:
             node = texts[child_ref]
             if child_ref in table_child_refs:
@@ -353,7 +557,7 @@ def normalize_docling_result(document_id: str, payload: dict[str, Any], fmt: str
                 block_type = "paragraph"
             text = node.get("text")
             text = text if isinstance(text, str) else ""
-            section_path = _extract_heading_path(node, texts)
+            section_path = _extract_heading_path(node, node_index)
             sheet_name = current_sheet(node)
             if block_type in {"paragraph", "list_item", "caption", "footnote"}:
                 # 目录页的独立点线块：只在出现长点线时清理，并留痕说明。
@@ -410,7 +614,7 @@ def normalize_docling_result(document_id: str, payload: dict[str, Any], fmt: str
                 block_type = "table"
             table_no += 1
             sheet_name = current_sheet(table)
-            section_path = _extract_heading_path(table, texts)
+            section_path = _extract_heading_path(table, node_index)
             table_dict = _table_to_dict(table)
             table_dict["table_no"] = table_no
             table_dict["label"] = label
@@ -448,7 +652,7 @@ def normalize_docling_result(document_id: str, payload: dict[str, Any], fmt: str
             order += 1
         elif child_ref in pictures:
             picture = pictures[child_ref]
-            section_path = _extract_heading_path(picture, texts)
+            section_path = _extract_heading_path(picture, node_index)
             sheet_name = current_sheet(picture)
             sources = _prov_to_sources(picture.get("prov"), fmt, section_path, sheet_name)
             # 图片与统计图不做语义解析：只保留位置，明确告警，不把图内文字当可靠知识。
@@ -479,7 +683,8 @@ def normalize_docling_result(document_id: str, payload: dict[str, Any], fmt: str
             ))
 
         # 为每个结构块补齐节点引用，Office 没有 prov 时也能追溯到章节/表格。
-        if blocks and child_ref not in groups:
+        if len(blocks) > before_count and child_ref not in groups:
+            block_nodes[blocks[-1].id] = node_index.get(child_ref, {})
             for source in blocks[-1].sources:
                 if source.node_ref is None:
                     source.node_ref = child_ref
@@ -487,6 +692,21 @@ def normalize_docling_result(document_id: str, payload: dict[str, Any], fmt: str
                     source.table_no = blocks[-1].table.get('table_no')
 
     document.blocks = blocks
+    structure = _recover_structure(blocks, block_nodes) if fmt in {"pdf", "docx"} else {}
+    if structure.get("recovered_heading_paths"):
+        warnings.append(QualityWarning(
+            code="heading_paths_recovered", severity="info", scope="document",
+            message=f"有 {structure['recovered_heading_paths']} 个结构块缺少显式标题父链，"
+                    "已依据可靠标题编号、标题层级与原有阅读顺序补充章节路径；这些路径属于结构推断",
+            detail="已有显式路径优先；未重排双栏坐标、未补造缺失标题、未修改 OCR 文字",
+        ))
+    if structure.get("suppressed_heading_count"):
+        warnings.append(QualityWarning(
+            code="heading_labels_unreliable", severity="warning", scope="document",
+            message=f"有 {structure['suppressed_heading_count']} 个上游标题标签缺少可靠标题形态，"
+                    "已保留原文并按正文处理，未据此恢复章节边界；请对照原件核对",
+            detail="结构关联只依据原有阅读顺序，不代表已验证双栏阅读顺序或 OCR 正确性",
+        ))
     _add_document_level_warnings(document, fmt, pages, texts, tables, pictures, warnings)
     document.stats = {
         "block_count": len(blocks),
@@ -495,6 +715,7 @@ def normalize_docling_result(document_id: str, payload: dict[str, Any], fmt: str
         "picture_nodes": len(pictures),
         "table_cell_text_nodes_skipped": len(table_child_refs),
         "text_length": document.text_length(),
+        "structure": structure,
     }
     return document
 
@@ -524,17 +745,24 @@ def _add_document_level_warnings(document: NormalizedDocument, fmt: str, pages: 
                 message=f"第 {page_no} 页没有可提取内容（可能是合法空白页），页码保持原编号不变",
             ))
     indexable = document.indexable_blocks()
+    if fmt == "pdf" and pages:
+        text_pages = {s.page for block in indexable for s in block.sources if s.page is not None}
+        for page_no in sorted(used_pages - text_pages):
+            warnings.append(QualityWarning(
+                code="page_without_indexable_text", severity="warning", scope="page", page=page_no,
+                message=f"第 {page_no} 页存在页面节点，但未提取到可索引正文；可能是图页、非正文页或识别遗漏，请核对原件",
+            ))
     if not indexable:
         warnings.append(QualityWarning(
             code="no_indexable_content", severity="error", scope="document",
             message="整份文档没有可索引内容，不会建立“成功”索引；请确认原件是否为空或解析是否失败",
         ))
     if fmt == "pdf" and document.blocks:
-        # 扫描/混合 PDF 的 OCR 局限：只做提示，不声称能自动发现所有错字或阅读顺序错误。
+        # 此处没有逐页识别准确性检测，明确它是能力提示，不能冒充OCR失败判定。
         warnings.append(QualityWarning(
             code="ocr_limitation", severity="info", scope="document",
-            message="扫描或混合 PDF 的识别结果可能存在错字、目录页码错位与阅读顺序问题，"
-                    "请结合原件核对；系统不声称能自动发现全部 OCR 错误",
+            message="已提取文档内容，但尚未逐页验证文字识别准确性；此提示不表示检测到OCR失败。"
+                    "扫描或混合PDF仍可能有错字、页码或阅读顺序偏差，请按需核对原件",
         ))
     picture_count = len(pictures)
     if picture_count:

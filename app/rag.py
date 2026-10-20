@@ -22,6 +22,10 @@ from __future__ import annotations
 
 import logging
 import time
+import hashlib
+import json
+from dataclasses import replace
+from types import SimpleNamespace
 from dataclasses import dataclass, field
 from uuid import uuid4
 
@@ -31,13 +35,21 @@ from app.rag_context import (
     EvidencePack,
     RagError,
     build_evidence,
+    TASK_EVIDENCE_ORDER_VERSION,
 )
 from app.rag_prompts import (
     INSUFFICIENT_EVIDENCE_TEXT,
     PROMPT_VERSION,
     build_system_prompt,
+    build_task_system_prompt,
+    TASK_PROMPT_VERSION,
     build_user_prompt,
+    build_task_user_prompt,
 )
+from app.quote_spans import task_segment_payload as task_evidence_payload
+from app.rag_table_projection import TABLE_PROJECTION_VERSION, table_structure_signature, verify_table_snapshot
+from app.rag_qualifier_cues import QUALIFIER_CUE_VERSION
+from app.rag_answer_contract import ANSWER_CONTRACT_VERSION, validate_task_output
 from app.rag_validation import (
     ModelOutputError,
     ValidatedOutput,
@@ -49,6 +61,7 @@ from app.repository import Repository
 from app.schemas import (
     QualityWarning,
     RagAnswer,
+    RagAnswerPart,
     RagCitation,
     RagFact,
     RagRetrievalStats,
@@ -95,8 +108,7 @@ class RagService:
             return False, "回答生成需要先配置 DEEPSEEK_API_KEY 并重启服务"
         return True, ""
 
-    def answer(self, document_id: str, question: str) -> RagOutcome:
-        started = time.perf_counter()
+    def _preflight(self, document_id: str):
         # 前置检查顺序：文档 → 解析版本 → 索引兼容 → 在线模型配置。
         # 无效请求与不存在的文档在路由层就被拒绝，不会走到这里调用查询 embedding。
         document = self.repository.get(document_id)
@@ -129,16 +141,108 @@ class RagService:
         ok, reason = self.ready()
         if not ok:
             raise RagError(503, "provider_not_configured", reason)
+        return document, start_version_id, info
+
+    def _configuration_signature(self) -> str:
+        """冻结实际影响问答的非凭证配置；排队后改配置不能静默扩大输入或费用。"""
+        names = ("deepseek_base_url", "deepseek_model", "deepseek_thinking",
+                 "deepseek_reasoning_effort", "deepseek_max_tokens", "rag_retrieval_k",
+                 "rag_context_k", "rag_context_max_chars", "rag_input_max_chars", "rag_min_score")
+        payload = {name: getattr(self.settings, name) for name in names}
+        payload["prompt_version"] = PROMPT_VERSION
+        payload["question_retrieval_strategy"] = self.settings.question_retrieval_strategy
+        payload["question_context_k"] = self.settings.question_context_k
+        payload["task_prompt_version"] = TASK_PROMPT_VERSION
+        payload["task_prompt_hash"] = hashlib.sha256(build_task_system_prompt().encode()).hexdigest()
+        payload["answer_contract_version"] = ANSWER_CONTRACT_VERSION
+        payload["table_projection_version"] = TABLE_PROJECTION_VERSION
+        payload["qualifier_cue_version"] = QUALIFIER_CUE_VERSION
+        payload["task_evidence_order_version"] = TASK_EVIDENCE_ORDER_VERSION
+        from app.retrieval_planning import RETRIEVAL_STRATEGY_VERSION
+        payload["retrieval_strategy_version"] = RETRIEVAL_STRATEGY_VERSION
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+    def capture_snapshot(self, document_id: str, question: str) -> dict:
+        """零外部调用地固定问答范围，供持久化任务在稍后读取同一个索引。"""
+        document, start_version_id, info = self._preflight(document_id)
+        self._context_cap(build_task_system_prompt(include_table_structure=False), question, document.filename)
+        with self.repository.connect() as db:
+            state = db.execute(
+                "SELECT * FROM embedding_indexes WHERE document_id=? AND id=? AND status='indexed'",
+                (document_id, info["index_id"])).fetchone()
+        if state is None:
+            raise RagError(409, "index_changed_midflight", "索引状态已变化，请重新提交")
+        return {
+            "answer_contract_version": ANSWER_CONTRACT_VERSION,
+            "task_prompt_version": TASK_PROMPT_VERSION,
+            "document_id": document_id, "filename": document.filename,
+            "start_version_id": start_version_id, "parse_version_id": info["parse_version_id"],
+            "index_id": info["index_id"], "is_legacy": info["is_legacy"],
+            "source_signature": state["source_signature"],
+            "source_signature_algo": state["source_signature_algo"],
+            "provider_signature": state["provider_signature"],
+            "model_signature": self.index.embedding.signature,
+            "configuration_signature": self._configuration_signature(),
+            "table_projection_version": TABLE_PROJECTION_VERSION,
+            "qualifier_cue_version": QUALIFIER_CUE_VERSION,
+            "table_structure_signature": table_structure_signature(self.repository.blocks(info["parse_version_id"])),
+            "evidence_signature": vector_index.evidence_signature(
+                self.repository.chunks(document_id, info["parse_version_id"])),
+        }
+
+    def answer(self, document_id: str, question: str, *, snapshot: dict | None = None,
+               observer=None, retrieval_checkpoint: dict | None = None) -> RagOutcome:
+        started = time.perf_counter()
+        # observer 的异常必须向上传递：失去租约、取消或预算不足时不能继续收费。
+        emit = observer or (lambda _stage, _details: None)
+        frozen = snapshot
+        if frozen is None:
+            document, start_version_id, info = self._preflight(document_id)
+        else:
+            if (frozen.get("document_id") != document_id or
+                    frozen.get("qualifier_cue_version") != QUALIFIER_CUE_VERSION or
+                    frozen.get("configuration_signature") != self._configuration_signature()):
+                raise RagError(409, "question_snapshot_changed", "问答配置或输入范围已变化，请创建新任务")
+            if self.repository.get(document_id) is None:
+                raise RagError(404, "document_not_found", "文档不存在")
+            info = self.index.verify_snapshot(document_id, frozen)
+            start_version_id = frozen["start_version_id"]
+            document = SimpleNamespace(filename=frozen["filename"])
+            self._verify_snapshot(_IndexSnapshot(
+                document_id, frozen["filename"], info["index_id"], info["parse_version_id"],
+                info["is_legacy"], start_version_id, info["index_id"]))
+            self._verify_table_snapshot(frozen)
 
         # 固定规则和问题本身已超限时直接报错，不能伪装成“没有证据”。
-        system_prompt = build_system_prompt()
-        context_cap = self._context_cap(system_prompt, question, document.filename)
+        system_prompt = (build_task_system_prompt(include_table_structure=False) if frozen is not None
+                         else build_system_prompt())
+        user_prompt_builder = build_task_user_prompt if frozen is not None else build_user_prompt
+        context_cap = self._context_cap(system_prompt, question, document.filename, task_protocol=frozen is not None)
         # 唯一一次查询 embedding + 检索；检索固定版本由 DocumentIndex 返回。
         # 先记住检索前的活动索引，用于识别“检索期间索引被切换”的情况。
         index_before_search = info["index_id"]
         retrieval_started = time.perf_counter()
-        search_result = self.index.search(document_id, question,
-                                          self.settings.rag_retrieval_k)
+        if retrieval_checkpoint is not None:
+            if frozen is None:
+                raise RagError(409, "question_checkpoint_invalid", "恢复检索检查点需要固定问答范围")
+            # 检查点由任务仓储提供；恢复仍核对每个块的原文与来源，不能信任任意JSON。
+            search_result = self.index.validate_checkpoint(document_id, frozen, retrieval_checkpoint)
+        else:
+            emit("query_started", {})
+            if frozen is None:
+                search_result = self.index.search(document_id, question, self.settings.rag_retrieval_k)
+            else:
+                search_result = self.index.search_snapshot(
+                    document_id, question, self.settings.rag_retrieval_k, snapshot=frozen,
+                    include_scores=self.settings.question_retrieval_strategy == "hybrid-context")
+                if self.settings.question_retrieval_strategy == "hybrid-context":
+                    from app.retrieval_planning import plan_retrieval
+                    search_result = plan_retrieval(question, search_result,
+                        self.repository.chunks(document_id, frozen["parse_version_id"]),
+                        fulltext_budget=context_cap, max_items=self.settings.question_context_k,
+                        payload_transform=task_evidence_payload)
+            emit("query_completed", {"search_result": search_result,
+                                     "provider_usage": getattr(self.index.embedding, "last_call_metadata", None)})
         retrieval_ms = _elapsed_ms(retrieval_started)
 
         snapshot = _IndexSnapshot(
@@ -151,32 +255,75 @@ class RagService:
             pre_search_index_id=index_before_search,
         )
         evidence_version = self._verify_snapshot(snapshot)
+        table_blocks = self._verify_table_snapshot(frozen) if frozen is not None else None
 
         # 证据预算：先反推“参考资料序列化后还能占多少字符”，再整块装入。
-        build = build_evidence(search_result, self.settings,
+        evidence_settings = self.settings
+        if frozen is not None and self.settings.question_retrieval_strategy == "hybrid-context":
+            evidence_settings = replace(self.settings, rag_retrieval_k=max(
+                self.settings.rag_retrieval_k, self.settings.question_context_k),
+                rag_context_k=self.settings.question_context_k)
+        build = build_evidence(search_result, evidence_settings,
                                version_warnings=evidence_version.warnings, context_cap=context_cap,
-                               expected_document_id=document_id)
+                               expected_document_id=document_id,
+                               payload_transform=task_evidence_payload if frozen is not None else None,
+                               table_blocks=table_blocks,
+                               table_prompt_overhead=len(build_task_system_prompt()) - len(system_prompt)
+                                   if frozen is not None else 0,
+                               include_qualifier_cues=frozen is not None,
+                               preserve_document_order=frozen is not None)
         if build.fatal_reason:
             # 证据混入其他文档或版本：受控失败，不生成、不拼接。
             raise RagError(409, "evidence_scope_mismatch", build.fatal_reason)
         pack = build.pack
+        if any(item.table_projection_included for item in pack.items):
+            system_prompt = build_task_system_prompt()
+        from app.retrieval_planning import input_coverage_hints
+        coverage_hints = input_coverage_hints(search_result.get("planning") or {},
+                                             {item.chunk_id for item in pack.items})
         warnings = list(build.warnings)
         limitations = list(build.limitations)
         warnings.extend(self._snapshot_warnings(snapshot))
+        emit("evidence_fixed", {"diagnostics": {
+            "selected": [{"reference_id": item.reference_id, "chunk_id": item.chunk_id,
+                          "page": item.page, "text": item.text, "document_id": item.document_id,
+                          "parse_version_id": item.parse_version_id,
+                          "table_projection": item.table_projection,
+                          "table_projection_included": item.table_projection_included,
+                          "table_projection_omitted": item.table_projection_omitted,
+                          "qualifier_cues": item.qualifier_cues,
+                          "qualifier_cues_included": item.qualifier_cues_included,
+                          "sources": [source.model_dump() for source in item.sources]} for item in pack.items],
+            "drop_reasons": list(pack.drop_reasons), "context_chars": pack.context_chars,
+            "input_chars": len(system_prompt) + len(user_prompt_builder(
+                question=question, document_name=document.filename, evidence_payload=pack.payload())),
+            "retrieval_timings_ms": dict(search_result.get("timings_ms") or {}),
+            "strategy": search_result.get("strategy", "vector"),
+            "candidate_count": len(search_result.get("results", [])), "selected_count": len(pack.items),
+            "planned_route": (search_result.get("planning") or {}).get("route", "ranked_evidence"),
+            "evidence_order_version": TASK_EVIDENCE_ORDER_VERSION if frozen is not None else "relevance-order-v1",
+            "input_coverage_hints": coverage_hints,
+        }})
 
         if not pack.items:
             # 没有合格证据时直接返回依据不足，不调用 DeepSeek。
             warnings.extend(self._drop_warnings(pack.drop_reasons))
             limitations.append("本次请求没有可送入模型的证据块，因此没有调用生成模型")
-            return self._insufficient(
+            outcome = self._insufficient(
                 snapshot, pack, warnings, limitations,
                 retrieval_ms=retrieval_ms, started=started, generated=False)
+            if frozen is not None:
+                outcome.answer.prompt_version = TASK_PROMPT_VERSION
+                from app.rag_answer_contract import question_parts
+                outcome.answer.answer_parts = [RagAnswerPart(**part, state="missing_evidence", fact_indices=[],
+                    missing_detail="本次没有可送入生成模型的合格证据片段。") for part in question_parts(question)]
+            return outcome
 
         if not self.settings.deepseek_api_key.strip():
             raise RagError(503, "provider_not_configured",
                            "尚未配置 DEEPSEEK_API_KEY，请填写本地 .env 后重启服务")
 
-        user_prompt = build_user_prompt(question=question, document_name=document.filename,
+        user_prompt = user_prompt_builder(question=question, document_name=document.filename,
                                         evidence_payload=pack.payload())
         if len(system_prompt) + len(user_prompt) > self.settings.rag_input_max_chars:
             raise RagError(422, "rag_input_too_large",
@@ -185,11 +332,18 @@ class RagService:
 
         # 一次非流式生成；不重试、不改写、不追加第二次调用。
         generation_started = time.perf_counter()
+        if frozen is not None:
+            self._verify_table_snapshot(frozen)
+        emit("generation_started", {})
         raw = self.model.generate(system_prompt, user_prompt)
         generation_ms = _elapsed_ms(generation_started)
 
+        emit("validation_started", {})
+        if frozen is not None:
+            self._verify_table_snapshot(frozen)
         try:
-            validated = validate_model_output(raw, pack)
+            validated = (validate_task_output(raw, pack, question=question) if frozen is not None
+                         else validate_model_output(raw, pack))
             validate_user_condition_boundary(validated, pack, question=question)
         except ModelOutputError as exc:
             # 只记录非敏感原因码：不带原文、完整输出与凭证。
@@ -203,6 +357,10 @@ class RagService:
             snapshot, pack, validated, question=question, warnings=warnings,
             limitations=limitations, retrieval_ms=retrieval_ms, generation_ms=generation_ms,
             started=started, generated=True)
+        if frozen is not None:
+            answer.prompt_version = TASK_PROMPT_VERSION
+            answer.missing_points = list(validated.missing_points)
+            answer.answer_parts = [RagAnswerPart(**part) for part in validated.answer_parts]
         return RagOutcome(answer=answer, diagnostics={
             "selected": [{"reference_id": item.reference_id, "chunk_id": item.chunk_id,
                           "page": item.page, "text": item.text,
@@ -210,11 +368,24 @@ class RagService:
             "dropped_candidates": len(pack.drop_reasons),
             "context_chars": pack.context_chars,
             "input_chars": len(system_prompt) + len(user_prompt),
+            "drop_reasons": list(pack.drop_reasons),
+            "retrieval_reused": retrieval_checkpoint is not None,
+            "retrieval_timings_ms": dict(search_result.get("timings_ms") or {}),
+            "input_coverage_hints": coverage_hints,
+            "provider_usage": getattr(self.model, "last_call_metadata", None),
+            "context_selection_count": validated.context_selection_count,
         })
 
     # ------------------------------------------------------------------
     # 快照与预算
     # ------------------------------------------------------------------
+    def _verify_table_snapshot(self, snapshot: dict):
+        try:
+            return verify_table_snapshot(self.repository, snapshot)
+        except ValueError:
+            raise RagError(409, "question_table_snapshot_changed",
+                           "固定版本的表格结构已变化或版本不受支持，请创建新任务") from None
+
     def _verify_snapshot(self, snapshot: "_IndexSnapshot"):
         """校验检索结果确实属于本次固定的索引与解析版本。"""
         if snapshot.pre_search_index_id and snapshot.index_id and \
@@ -233,13 +404,14 @@ class RagService:
             raise RagError(409, "parse_version_invalid", "索引绑定的解析版本质量无效，不能用于问答")
         return version
 
-    def _context_cap(self, system_prompt: str, question: str, filename: str | None) -> int:
+    def _context_cap(self, system_prompt: str, question: str, filename: str | None, *, task_protocol: bool = True) -> int:
         """反推参考资料可用的字符预算，保证最终消息体不超限。
 
         预算里显式计入问题、文件名、转义字符、固定包装与输出 schema 的字符数；
         字符预算不等于 token 预算，这里只做本地输入限流。
         """
-        empty_user = build_user_prompt(question=question, document_name=filename,
+        builder = build_task_user_prompt if task_protocol else build_user_prompt
+        empty_user = builder(question=question, document_name=filename,
                                        evidence_payload=[])
         overhead = len(system_prompt) + len(empty_user)
         if overhead > self.settings.rag_input_max_chars:
@@ -307,7 +479,8 @@ class RagService:
             citations.append(RagCitation(
                 reference_id=ref, document_id=item.document_id, chunk_id=item.chunk_id,
                 parse_version_id=item.parse_version_id, page=item.page,
-                quote=quotes[ref], sources=list(item.sources)))
+                quote=quotes[ref], sources=list(item.sources),
+                table_structure=item.table_projection if item.table_projection_included else None))
         return citations
 
     def _build_answer(self, snapshot: "_IndexSnapshot", pack: EvidencePack,
@@ -327,8 +500,8 @@ class RagService:
         if not is_current_index and info["index_id"]:
             limitations.append("本次回答依据提问时固定的索引；该文档的活动索引此后已切换")
 
-        conclusion = [RagFact(text=fact.text, refs=sorted(fact.refs)) for fact in validated.conclusion]
-        explanation = [RagFact(text=fact.text, refs=sorted(fact.refs)) for fact in validated.explanation]
+        conclusion = [RagFact(text=fact.text, refs=sorted(fact.refs), context=fact.context) for fact in validated.conclusion]
+        explanation = [RagFact(text=fact.text, refs=sorted(fact.refs), context=fact.context) for fact in validated.explanation]
         if validated.status == "insufficient_evidence":
             # 该状态由后端提供固定兜底文本，引用与澄清问题为空。
             answer_text = INSUFFICIENT_EVIDENCE_TEXT

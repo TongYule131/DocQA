@@ -33,13 +33,65 @@ def initialized(tmp_path):
     return repo
 
 
+@pytest.mark.parametrize('winerror', [5, 32, 33])
+def test_ready_publication_waits_for_transient_windows_lock_atomically(tmp_path, monkeypatch, winerror):
+    initialized(tmp_path)
+    runtime = RuntimeGuard(tmp_path, 'web')
+    directory = tmp_path / '.local-service'
+    directory.mkdir()
+    destination = directory / 'web.ready'
+    destination.write_text('old-complete-record', encoding='utf-8')
+    replace = os.replace
+    attempts, sleeps = [], []
+
+    def locked_replace(source, target):
+        attempts.append((source, target))
+        assert destination.read_text(encoding='utf-8') == 'old-complete-record'
+        if len(attempts) < 3:
+            error = PermissionError('simulated Windows sharing conflict')
+            error.winerror = winerror
+            raise error
+        replace(source, target)
+
+    monkeypatch.setattr('app.runtime.os.replace', locked_replace)
+    monkeypatch.setattr('app.runtime.time.sleep', sleeps.append)
+    runtime.mark_ready()
+    assert len(attempts) == 3 and sleeps == [0.05, 0.1]
+    assert json.loads(destination.read_text(encoding='utf-8'))['pid'] == os.getpid()
+    assert not list(directory.glob('*.tmp'))
+
+
+@pytest.mark.parametrize('winerror,attempts_expected', [(5, 6), (32, 6), (33, 6), (87, 1), (None, 1)])
+def test_ready_publication_fails_closed_on_persistent_or_unrelated_errors(
+        tmp_path, monkeypatch, winerror, attempts_expected):
+    initialized(tmp_path)
+    runtime = RuntimeGuard(tmp_path, 'web')
+    attempts, sleeps = [], []
+
+    def denied_replace(source, target):
+        attempts.append((source, target))
+        error = PermissionError('simulated persistent or unrelated failure')
+        if winerror is not None:
+            error.winerror = winerror
+        raise error
+
+    monkeypatch.setattr('app.runtime.os.replace', denied_replace)
+    monkeypatch.setattr('app.runtime.time.sleep', sleeps.append)
+    with pytest.raises(PermissionError):
+        runtime.mark_ready()
+    assert len(attempts) == attempts_expected
+    assert len(sleeps) == attempts_expected - 1
+    assert sum(sleeps) <= 0.75
+    assert not (tmp_path / '.local-service/web.ready').exists()
+
+
 @pytest.mark.parametrize('damage', ['future', 'table', 'column', 'index', 'index_shape', 'gap',
                                     'primary_key', 'foreign_key', 'unique_constraint'])
 def test_incompatible_database_rejected_without_repair_or_writes(tmp_path, damage):
     repo = initialized(tmp_path)
     with sqlite3.connect(repo.path) as db:
         if damage == 'future':
-            db.execute("INSERT INTO schema_migrations VALUES (5, 'synthetic-future')")
+            db.execute("INSERT INTO schema_migrations VALUES (?, 'synthetic-future')", (migrations.SCHEMA_VERSION + 1,))
         elif damage == 'table':
             db.execute('DROP TABLE analysis_request_keys')
         elif damage == 'column':
@@ -82,7 +134,7 @@ def test_health_reports_actual_database_and_running_code(tmp_path):
         runtime = response.json()['runtime']
         assert runtime['data_dir'] == str(tmp_path.resolve())
         assert runtime['database_path'] == str((tmp_path / 'docqa.db').resolve())
-        assert runtime['schema_version'] == runtime['expected_schema_version'] == 4
+        assert runtime['schema_version'] == runtime['expected_schema_version'] == migrations.SCHEMA_VERSION
         ready = json.loads((tmp_path / '.local-service/web.ready').read_text(encoding='utf-8'))
         assert ready == runtime
 
@@ -106,7 +158,7 @@ def test_database_changed_while_running_blocks_upload_before_any_side_effect(tmp
     with TestClient(create_app(Settings(data_dir=tmp_path))) as client:
         with sqlite3.connect(tmp_path / 'docqa.db') as db:
             if damage == 'future':
-                db.execute("INSERT INTO schema_migrations VALUES (5, 'synthetic-future')")
+                db.execute("INSERT INTO schema_migrations VALUES (?, 'synthetic-future')", (migrations.SCHEMA_VERSION + 1,))
             else:
                 db.execute('DROP TABLE analysis_request_keys')
         assert client.get('/api/health').status_code == 503
@@ -191,7 +243,7 @@ def test_direct_web_requires_explicit_existing_database_upgrade(tmp_path, monkey
             pass
     assert file_hash(tmp_path / 'docqa.db') == before
     with TestClient(create_app(Settings(data_dir=tmp_path, allow_database_upgrade=True))) as client:
-        assert client.get('/api/health').json()['runtime']['schema_version'] == 4
+        assert client.get('/api/health').json()['runtime']['schema_version'] == migrations.SCHEMA_VERSION
 
 
 @pytest.mark.parametrize('worker_class', [ParseWorker, AnalysisWorker])
@@ -217,7 +269,7 @@ def test_start_script_refuses_incompatible_or_unapproved_existing_database(tmp_p
     else:
         repo = initialized(tmp_path)
         with sqlite3.connect(path) as db:
-            db.execute("INSERT INTO schema_migrations VALUES (5, 'synthetic-future')")
+            db.execute("INSERT INTO schema_migrations VALUES (?, 'synthetic-future')", (migrations.SCHEMA_VERSION + 1,))
     before = file_hash(path)
     with socket.socket() as listener:
         listener.bind(('127.0.0.1', 0))

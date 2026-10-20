@@ -79,6 +79,11 @@ class Settings:
     # 证据最低排序分值；None 表示禁用阈值（不把相似度当置信度）。
     # 阈值上线前必须用正负样本校准，不能仅用同一份文档调参。
     rag_min_score: float | None = None
+    # 查询embedding和生成均计次；重试不重置，默认留2次明确重试余量。
+    question_max_requests: int = 4
+    # 新任务可选本地混合策略；旧同步接口仍沿用原向量链路。
+    question_retrieval_strategy: str = "hybrid-context"
+    question_context_k: int = 20
     # ------------------------------------------------------------------
     # 摘要与信息提取（分析任务）
     # 预算单位仍是字符，不是 token；这里的数值只用于本地输入限流与费用上界，
@@ -145,6 +150,9 @@ class Settings:
             rag_input_max_chars=int(value("DOCQA_RAG_INPUT_MAX_CHARS", "20000")),
             # 空值表示禁用分数阈值；只有显式配置才启用过滤。
             rag_min_score=_optional_float(values.get("DOCQA_RAG_MIN_SCORE")),
+            question_max_requests=int(value("DOCQA_QUESTION_MAX_REQUESTS", "4")),
+            question_retrieval_strategy=value("DOCQA_QUESTION_RETRIEVAL_STRATEGY", "hybrid-context"),
+            question_context_k=int(value("DOCQA_QUESTION_CONTEXT_K", "20")),
             analysis_max_requests=int(value("DOCQA_ANALYSIS_MAX_REQUESTS", "8")),
             analysis_batch_max_chars=int(value("DOCQA_ANALYSIS_BATCH_MAX_CHARS", "12000")),
             analysis_reduce_max_chars=int(value("DOCQA_ANALYSIS_REDUCE_MAX_CHARS", "16000")),
@@ -227,6 +235,12 @@ class Settings:
         if self.rag_min_score is not None:
             if not math.isfinite(self.rag_min_score) or not -1.0 <= self.rag_min_score <= 1.0:
                 raise ValueError("DOCQA_RAG_MIN_SCORE 必须是 [-1,1] 内的有限数值，或留空以禁用阈值")
+        if type(self.question_max_requests) is not int or not 2 <= self.question_max_requests <= 20:
+            raise ValueError("DOCQA_QUESTION_MAX_REQUESTS 必须是2到20的整数，包含查询和生成尝试")
+        if self.question_retrieval_strategy not in {"vector", "hybrid-context"}:
+            raise ValueError("DOCQA_QUESTION_RETRIEVAL_STRATEGY 必须是 vector 或 hybrid-context")
+        if type(self.question_context_k) is not int or not 1 <= self.question_context_k <= 20:
+            raise ValueError("DOCQA_QUESTION_CONTEXT_K 必须是1到20的整数")
         # 分析任务预算：必须是有限正整数并有合理上界，避免配置错误导致费用失控。
         if not 1 <= self.analysis_max_requests <= 50:
             raise ValueError("DOCQA_ANALYSIS_MAX_REQUESTS 必须在 1 到 50 之间")

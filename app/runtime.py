@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import time
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -162,7 +163,17 @@ class RuntimeGuard:
         destination = directory / (self.role + ".ready")
         temporary = directory / (self.role + f".{os.getpid()}.ready.tmp")
         temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
-        os.replace(temporary, destination)
+        for attempt in range(6):
+            try:
+                os.replace(temporary, destination)
+                return
+            except OSError as exc:
+                # Windows 的状态读取/文件扫描可能短暂阻止替换；保持原子发布，
+                # 仅等待本地文件共享冲突，持续拒绝或其他错误仍使启动失败。
+                if getattr(exc, "winerror", None) not in {5, 32, 33} or attempt == 5:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+                self.check_code()
 
 
 def inspect_database(data_dir: Path) -> dict:

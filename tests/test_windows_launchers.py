@@ -5,6 +5,7 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -197,11 +198,52 @@ def test_three_roles_conflict_and_restart_preserve_data(shell, tmp_path):
             require_success(result)
             assert not port_open(port)
             stopped = read_status(shell, data_dir, tmp_path, f"{phase}-stopped-status")
-            assert len(stopped) == 3 and all(not record["running"] and not record["ready"] for record in stopped)
+            # Windows 可在后续状态脚本启动前复用已退出服务的 PID。
+            # 是否仍属于本服务必须看创建时间与路径，不能只看 PID 存在。
+            assert len(stopped) == 3 and all(not record["identity_match"] and not record["ready"]
+                                           for record in stopped)
         require_success(run_script(shell, data_dir, tmp_path, "remove-records", "stop_local.ps1"))
-        assert read_status(shell, data_dir, tmp_path, "final-status") == []
+        remaining = read_status(shell, data_dir, tmp_path, "final-status")
+        # 清理时若 PID 已被其他进程使用，产品刻意保留记录供核实；不能要求误删。
+        assert all(not record["identity_match"] and not record["ready"] for record in remaining)
+        assert {p.stem for p in (data_dir / ".local-service").glob("*.json")} == {
+            record["role"] for record in remaining
+        }
     finally:
         # 失败也只通过产品归属记录回收本测试环境，绝不按端口杀其他进程。
         cleanup = run_script(shell, data_dir, tmp_path, "cleanup", "stop_local.ps1", "-KeepRecords")
         require_success(cleanup)
         assert not port_open(port)
+
+
+def test_stop_preserves_foreign_process_and_record_when_pid_identity_differs(shell, tmp_path):
+    data_dir = tmp_path / "reused pid 中文"
+    records_dir = data_dir / ".local-service"
+    records_dir.mkdir(parents=True)
+    # 本测试自己创建的独立进程；故意记录错误创建时间，稳定模拟 PID 被复用。
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(90)"],
+        env=isolated_env(data_dir), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    try:
+        record_path = records_dir / "parse-worker.json"
+        record = {
+            "role": "parse-worker", "pid": child.pid, "executable": sys.executable,
+            "start_time": "2000-01-01T00:00:00Z", "data_dir": str(data_dir.resolve()),
+            "port": None, "stdout_log": str(records_dir / "unused.log"),
+        }
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+        original = record_path.read_bytes()
+        before = read_status(shell, data_dir, tmp_path, "foreign-before")
+        assert len(before) == 1 and before[0]["running"]
+        assert not before[0]["identity_match"] and not before[0]["ready"]
+        require_success(run_script(shell, data_dir, tmp_path, "foreign-stop", "stop_local.ps1"))
+        assert child.poll() is None
+        assert record_path.read_bytes() == original
+        after = read_status(shell, data_dir, tmp_path, "foreign-after")
+        assert after == before
+        assert not (data_dir / "docqa.db").exists()
+    finally:
+        child.terminate()
+        child.wait(timeout=10)

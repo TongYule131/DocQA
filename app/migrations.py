@@ -19,7 +19,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # 当前代码期望的数据库结构版本；新增迁移时递增。
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # 旧 source_signature 算法标识：sha256(json(chunk.model_dump()))，保留用于验证旧索引。
 SIGNATURE_ALGO_LEGACY = "sha256-chunk-dump-v1"
@@ -743,8 +743,115 @@ def _apply_v4(db: sqlite3.Connection) -> None:
         FROM analysis_jobs WHERE idempotency_key IS NOT NULL""")
 
 
+# v5：问答使用独立任务与费用账本，不借用摘要／提取表表达不同的调用语义。
+_QUESTION_TABLES = """
+CREATE TABLE question_jobs (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    parse_version_id TEXT NOT NULL REFERENCES parse_versions(id) ON DELETE CASCADE,
+    index_id TEXT NOT NULL REFERENCES embedding_indexes(id) ON DELETE CASCADE,
+    question TEXT NOT NULL,
+    idempotency_key TEXT,
+    request_id TEXT NOT NULL,
+    last_retry_key TEXT,
+    request_fingerprint TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    stage TEXT NOT NULL DEFAULT 'queued',
+    stage_detail TEXT,
+    max_requests INTEGER NOT NULL DEFAULT 2,
+    requests_used INTEGER NOT NULL DEFAULT 0,
+    request_upper_bound INTEGER NOT NULL DEFAULT 2,
+    result_id TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    lease_token TEXT,
+    lease_expires_at TEXT,
+    heartbeat_at TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    CHECK (status IN ('queued','running','succeeded','failed','cancelled','needs_attention')),
+    CHECK (max_requests >= 2 AND requests_used >= 0 AND requests_used <= max_requests)
+);
+CREATE INDEX ix_question_jobs_document ON question_jobs(document_id, created_at);
+CREATE TABLE question_request_keys (
+    document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    idempotency_key TEXT NOT NULL,
+    job_id TEXT NOT NULL REFERENCES question_jobs(id) ON DELETE CASCADE,
+    operation TEXT NOT NULL,
+    request_fingerprint TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (document_id, idempotency_key),
+    CHECK (operation IN ('submit','retry'))
+);
+CREATE TABLE question_attempts (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES question_jobs(id) ON DELETE CASCADE,
+    attempt_no INTEGER NOT NULL,
+    lease_token TEXT NOT NULL,
+    status TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    error_code TEXT,
+    UNIQUE (job_id, attempt_no)
+);
+CREATE TABLE question_calls (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES question_jobs(id) ON DELETE CASCADE,
+    sequence_no INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    lease_token TEXT NOT NULL,
+    status TEXT NOT NULL,
+    error_code TEXT,
+    started_at TEXT NOT NULL,
+    settled_at TEXT,
+    elapsed_ms INTEGER,
+    provider_usage_json TEXT,
+    UNIQUE (job_id, sequence_no),
+    CHECK (role IN ('embedding','generation')),
+    CHECK (status IN ('intent','succeeded','failed','uncertain'))
+);
+CREATE TABLE question_checkpoints (
+    job_id TEXT NOT NULL REFERENCES question_jobs(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (job_id, role),
+    CHECK (role IN ('retrieval','answer','evidence'))
+);
+CREATE TABLE question_stage_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL REFERENCES question_jobs(id) ON DELETE CASCADE,
+    stage TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX ix_question_stage_events_job ON question_stage_events(job_id, id);
+CREATE TABLE question_results (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL UNIQUE REFERENCES question_jobs(id) ON DELETE CASCADE,
+    document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    parse_version_id TEXT NOT NULL REFERENCES parse_versions(id) ON DELETE CASCADE,
+    index_id TEXT NOT NULL REFERENCES embedding_indexes(id) ON DELETE CASCADE,
+    question TEXT NOT NULL,
+    answer_json TEXT NOT NULL,
+    requests_used INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX ix_question_results_document ON question_results(document_id, created_at);
+"""
+
+
+def _apply_v5(db: sqlite3.Connection) -> None:
+    """只新增问答持久化结构；现有文档、索引、分析记录及活动指针保持原样。"""
+    _exec_script(db, _QUESTION_TABLES)
+
+
 # 版本 -> 迁移函数；按顺序执行。
-MIGRATIONS = {1: _apply_v1, 2: _apply_v2, 3: _apply_v3, 4: _apply_v4}
+MIGRATIONS = {1: _apply_v1, 2: _apply_v2, 3: _apply_v3, 4: _apply_v4, 5: _apply_v5}
 
 
 def _index_shapes(db: sqlite3.Connection) -> dict:

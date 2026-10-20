@@ -170,7 +170,7 @@ def resolve_reduce_points(reduced: ValidatedReduce, *, entries: list[dict]) -> t
                 if not entry["original_refs"]:
                     raise AnalysisOutputError("missing_quote", "汇总事实不能引用没有原文依据的概述")
                 for original in entry["original_refs"]:
-                    key = (original["block_id"], original["source_index"], original["quote"])
+                    key = (original.get("unit_id") or original["block_id"], original["source_index"], original["quote"])
                     if key not in citation_index:
                         citation_index[key] = len(citations) + 1
                         citations.append({"reference_id": citation_index[key], **original})

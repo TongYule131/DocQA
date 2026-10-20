@@ -625,7 +625,7 @@ def merge_extraction_items(batches: list[ValidatedExtraction], *,
         for item in batch.items:
             resolved = [resolve_quote(batch_index, ref) for ref in item.refs]
             source_keys = tuple(sorted({
-                (entry["block_id"], entry.get("source_index"), entry["quote"])
+                (entry.get("unit_id") or entry["block_id"], entry.get("source_index"), entry["quote"])
                 for entry in resolved}))
             key = (item.kind, item.content, item.name, item.value_text, item.unit,
                    item.period, item.subject, item.scope, source_keys)
@@ -635,12 +635,14 @@ def merge_extraction_items(batches: list[ValidatedExtraction], *,
             seen_keys.add(key)
             final_refs: list[int] = []
             for entry in resolved:
-                source_key = (entry["block_id"], entry.get("source_index"), entry["quote"])
+                source_key = (entry.get("unit_id") or entry["block_id"], entry.get("source_index"), entry["quote"])
                 if source_key not in citation_index:
                     citation_index[source_key] = len(citations) + 1
                     citations.append({
                         "reference_id": citation_index[source_key],
                         "block_id": entry["block_id"],
+                        "unit_id": entry.get("unit_id"),
+                        "offset_scope": entry.get("offset_scope", "block"),
                         "source_index": entry.get("source_index"),
                         "block_type": entry.get("block_type"),
                         "quote": entry["quote"],

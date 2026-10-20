@@ -306,15 +306,17 @@ def test_migration_v3_creates_analysis_tables_and_backs_up(tmp_path):
     connection = sqlite3.connect(db_path, isolation_level=None)
     connection.execute("PRAGMA foreign_keys=OFF")
     connection.execute("DELETE FROM schema_migrations WHERE version>=3")
-    for table in ("analysis_request_keys", "analysis_results", "analysis_calls", "analysis_steps",
+    for table in ("question_results", "question_stage_events", "question_checkpoints", "question_calls",
+                  "question_attempts", "question_request_keys", "question_jobs",
+                  "analysis_request_keys", "analysis_results", "analysis_calls", "analysis_steps",
                   "analysis_attempts", "analysis_jobs"):
         connection.execute(f"DROP TABLE IF EXISTS {table}")
     connection.commit()
     connection.close()
 
     summary = repository.initialize()
-    assert summary["from"] == 2 and summary["to"] == 4
-    assert summary["applied"] == [3, 4]
+    assert summary["from"] == 2 and summary["to"] == migrations.SCHEMA_VERSION
+    assert summary["applied"] == list(range(3, migrations.SCHEMA_VERSION + 1))
     assert summary["backup"] and Path(summary["backup"]).exists()
 
     with repository.connect() as db:

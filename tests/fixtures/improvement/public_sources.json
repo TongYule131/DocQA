@@ -1,0 +1,368 @@
+{
+  "schema_version": "docqa-public-corpus-v1",
+  "selection_date": "2026-10-18",
+  "scope": "真实官方原件储备；尚未执行Docling解析或供应商语义验收。分组先于生成模型使用；holdout题目不得用于调参。",
+  "annotation_status": "manual_preannotation_before_model_execution; independent review pending",
+  "originals_in_git": false,
+  "documents": [
+    {
+      "id": "public-curriculum-2022",
+      "title": "义务教育信息科技课程标准（2022年版）",
+      "publisher": "中华人民共和国教育部",
+      "topic": "基础教育课程",
+      "language": "zh-CN",
+      "split": "dev",
+      "source_family": "moe-information-technology-curriculum-2022",
+      "landing_url": "https://www.moe.gov.cn/srcsite/A26/s8001/202204/t20220420_619921.html",
+      "download_url": "http://www.moe.gov.cn/srcsite/A26/s8001/202204/W020220420582361024968.pdf",
+      "filename": "public-curriculum-2022.pdf",
+      "format": "pdf",
+      "sha256": "065f9df22d35da8813508c23782c7853dab3c54e34f552a627f8dd1698fa1e01",
+      "license_status": {
+        "id": "no_explicit_open_license_confirmed",
+        "scope": "仅本地阅读引用与评估，原件不再分发",
+        "source": "https://www.moe.gov.cn/srcsite/A26/s8001/202204/t20220420_619921.html"
+      },
+      "access_conditions": "官方通知公开附件，无账号；HTTPS端点实际重定向同站HTTP，此固定HTTP原件已核对。仅下载公开内容且固定哈希；公开访问不等于开放许可，也不声明端到端TLS。",
+      "questions": [
+        {
+          "id": "public-curriculum-2022:Q1",
+          "request": "信息科技课程核心素养由哪四个方面构成？",
+          "required_points": [
+            "信息意识",
+            "计算思维",
+            "数字化学习与创新",
+            "信息社会责任"
+          ],
+          "sources": [
+            {
+              "section": "三 课程目标 核心素养内涵"
+            }
+          ],
+          "forbidden_inferences": [
+            "将一般课程理念替代四项核心素养",
+            "声称四项按分数权重排列"
+          ]
+        },
+        {
+          "id": "public-curriculum-2022:Q2",
+          "request": "教学建议中关于原理认知提出什么教学路径？评价怎样体现过程性要求？",
+          "required_points": [
+            "场景分析到原理认知到应用迁移",
+            "过程性评价贯穿教学过程",
+            "教学评价一致"
+          ],
+          "sources": [
+            {
+              "section": "六 课程实施 教学建议与评价建议"
+            }
+          ],
+          "forbidden_inferences": [
+            "用终结性评价取代过程性评价",
+            "将建议表述成已有实验效果"
+          ]
+        }
+      ],
+      "downloaded_at_utc": "2026-10-18T04:42:46.815284+00:00"
+    },
+    {
+      "id": "public-nist-ai-rmf",
+      "title": "Artificial Intelligence Risk Management Framework AI RMF 1.0",
+      "publisher": "National Institute of Standards and Technology",
+      "topic": "人工智能风险治理",
+      "language": "en",
+      "split": "dev",
+      "source_family": "nist-ai-rmf-1",
+      "landing_url": "https://www.nist.gov/publications/artificial-intelligence-risk-management-framework-ai-rmf-10",
+      "download_url": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf",
+      "filename": "public-nist-ai-rmf.pdf",
+      "format": "pdf",
+      "sha256": "7576edb531d9848825814ee88e28b1795d3a84b435b4b797d3670eafdc4a89f1",
+      "license_status": {
+        "id": "NIST-technical-series-policy",
+        "scope": "按NIST技术出版物政策保留来源；美国联邦雇员作品在美国不受版权保护，国外权利依NIST声明；第三方内容另论",
+        "source": "https://www.nist.gov/open/copyright-fair-use-and-licensing-statements-srd-data-software-and-technical-series-publications"
+      },
+      "access_conditions": "NIST公开PDF，无账号；本项目仅本地保存原件，不再分发第三方图像或商标。",
+      "questions": [
+        {
+          "id": "public-nist-ai-rmf:Q1",
+          "request": "AI RMF核心包含哪些功能？GOVERN与其余功能的关系是什么？",
+          "required_points": [
+            "GOVERN MAP MEASURE MANAGE四功能",
+            "GOVERN为横贯其他功能的治理",
+            "功能不被限定为固定顺序清单"
+          ],
+          "sources": [
+            {
+              "section": "5 AI RMF Core"
+            }
+          ],
+          "forbidden_inferences": [
+            "把四功能说成强制认证步骤",
+            "省略治理的横贯关系"
+          ]
+        },
+        {
+          "id": "public-nist-ai-rmf:Q2",
+          "request": "框架的适用范围和自愿性如何界定？是否面向某个单一行业？",
+          "required_points": [
+            "自愿使用",
+            "非特定行业",
+            "与具体用例无关",
+            "适用于不同规模组织"
+          ],
+          "sources": [
+            {
+              "section": "Executive Summary"
+            }
+          ],
+          "forbidden_inferences": [
+            "声称具有普遍法律强制力",
+            "声称只面向大企业或金融行业"
+          ]
+        }
+      ],
+      "downloaded_at_utc": "2026-10-18T04:42:49.544343+00:00"
+    },
+    {
+      "id": "public-renewables-et61",
+      "title": "Renewable electricity capacity and generation ET 6.1 September 2026",
+      "publisher": "UK Department for Energy Security and Net Zero",
+      "topic": "能源统计",
+      "language": "en",
+      "split": "dev",
+      "source_family": "desnz-et61-renewables-quarterly",
+      "landing_url": "https://www.gov.uk/government/statistics/energy-trends-section-6-renewables",
+      "download_url": "https://assets.publishing.service.gov.uk/media/6aba724dfceb6fb3a65012d2/ET_6.1_SEP_26.xlsx",
+      "filename": "public-renewables-et61.xlsx",
+      "format": "xlsx",
+      "sha256": null,
+      "license_status": {
+        "id": "OGL-v3-except-otherwise-stated",
+        "scope": "官方GOV.UK内容按Open Government Licence v3.0，除另有声明；保留DESNZ来源与版本",
+        "source": "https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/"
+      },
+      "access_conditions": "GOV.UK公开原始Excel附件，无登录；原件不修改、不重算、不从网页投影生成工作簿。",
+      "questions": [
+        {
+          "id": "public-renewables-et61:Q1",
+          "request": "该工作簿区分了哪些装机容量与发电量口径，单位是否相同？",
+          "required_points": [
+            "装机容量与发电量分别列示",
+            "需保留各表单位",
+            "不能把容量当作发电量"
+          ],
+          "sources": [
+            {
+              "section": "原始Excel表头与说明"
+            }
+          ],
+          "forbidden_inferences": [
+            "混合装机容量与发电量",
+            "把季度值直接当年度值"
+          ]
+        },
+        {
+          "id": "public-renewables-et61:Q2",
+          "request": "该表对可再生电力的时间范围、修订及数据状态有哪些说明？",
+          "required_points": [
+            "按原始说明保留统计期间",
+            "按原表保留修订标识",
+            "不把预测值当实际值"
+          ],
+          "sources": [
+            {
+              "section": "原始Excel说明与脚注"
+            }
+          ],
+          "forbidden_inferences": [
+            "自行计算未提供的未来期间",
+            "遗漏统计口径脚注"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "public-ecology-2024",
+      "title": "2024中国生态环境状况公报",
+      "publisher": "中华人民共和国生态环境部",
+      "topic": "生态环境年度报告",
+      "language": "zh-CN",
+      "split": "holdout",
+      "source_family": "mee-national-ecology-report-2024",
+      "landing_url": "https://www.mee.gov.cn/hjzl/sthjzk/zghjzkgb/",
+      "download_url": "https://www.mee.gov.cn/hjzl/sthjzk/zghjzkgb/202506/P020250604527010717462.pdf",
+      "filename": "public-ecology-2024.pdf",
+      "format": "pdf",
+      "sha256": "3e37566ef1379f7db56b06eaf233f89803dd2832ba8fe0d654bb3083ed80d468",
+      "license_status": {
+        "id": "copyright_reserved_local_reference_only",
+        "scope": "部网站标注版权所有，未确认开放许可；仅本地引用评估，不在Git或交付包再分发原件",
+        "source": "https://www.mee.gov.cn/hjzl/sthjzk/zghjzkgb/"
+      },
+      "access_conditions": "官方公开报告附件，无账号要求；不把公开访问视为开放再分发许可。",
+      "questions": [
+        {
+          "id": "public-ecology-2024:Q1",
+          "request": "2024年全国地级及以上城市空气质量的主要指标和同比变化是什么？",
+          "required_points": [
+            "细颗粒物29.3微克每立方米，下降2.7%",
+            "优良天数87.2%，上升1.7个百分点",
+            "重污染天数0.9%，下降0.7个百分点"
+          ],
+          "sources": [
+            {
+              "section": "大气环境 全国城市空气质量"
+            }
+          ],
+          "forbidden_inferences": [
+            "把百分比变化与百分点混淆",
+            "将全国城市统计套用于每一座城市"
+          ]
+        },
+        {
+          "id": "public-ecology-2024:Q2",
+          "request": "全国地表水与地下水的主要质量比例分别是多少，比较对象是什么？",
+          "required_points": [
+            "地表水Ⅰ至Ⅲ类断面90.4%",
+            "地表水劣Ⅴ类断面0.6%",
+            "地下水Ⅰ至Ⅳ类点位77.9%",
+            "断面与点位不同分母"
+          ],
+          "sources": [
+            {
+              "section": "淡水环境 地表水与地下水"
+            }
+          ],
+          "forbidden_inferences": [
+            "把地表水断面比例写为地下水点位比例",
+            "由监测占比推断全部水体可饮用"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "public-nasa-plan-2022",
+      "title": "NASA Strategic Plan 2022",
+      "publisher": "National Aeronautics and Space Administration",
+      "topic": "航天科研战略",
+      "language": "en",
+      "split": "holdout",
+      "source_family": "nasa-strategic-plan-2022",
+      "landing_url": "https://www.nasa.gov/ocfo/strategic-plan/",
+      "download_url": "https://science.nasa.gov/wp-content/uploads/2023/04/fy_22_strategic_plan-1.pdf",
+      "filename": "public-nasa-plan-2022.pdf",
+      "format": "pdf",
+      "sha256": "1328ca081c62b195fa5cca309d15f18d723cd56d3f7941e7f8e66bc31c488c90",
+      "license_status": {
+        "id": "NASA-publication-policy-third-party-rights-reserved",
+        "scope": "NASA内容一般可用于教育与信息用途，第三方素材、标识及人物权利另论；仅本地文本评估，不再分发图像",
+        "source": "https://www.nasa.gov/nasa-brand-center/images-and-media/"
+      },
+      "access_conditions": "NASA官方公开PDF，无账号；保存既定历史版本，不将战略目标当作已完成成果。",
+      "questions": [
+        {
+          "id": "public-nasa-plan-2022:Q1",
+          "request": "该战略计划的四项战略目标分别是什么？",
+          "required_points": [
+            "扩展人类知识",
+            "将人类活动延伸至更广空间",
+            "推动创新以应对国家挑战",
+            "增强能力与运行以促进使命成功"
+          ],
+          "sources": [
+            {
+              "section": "Strategic Goals"
+            }
+          ],
+          "forbidden_inferences": [
+            "将计划目标写成已经实现",
+            "把科学探索限定为载人登月"
+          ]
+        },
+        {
+          "id": "public-nasa-plan-2022:Q2",
+          "request": "NASA列出的核心价值观有哪些，包容性的地位如何说明？",
+          "required_points": [
+            "安全",
+            "诚信",
+            "团队合作",
+            "卓越",
+            "包容",
+            "包容性为核心价值之一"
+          ],
+          "sources": [
+            {
+              "section": "Core Values"
+            }
+          ],
+          "forbidden_inferences": [
+            "遗漏新增包容性",
+            "将价值观等同于可量化绩效成绩"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "public-information-regulation",
+      "title": "中华人民共和国政府信息公开条例 2019年修订",
+      "publisher": "国务院；汕尾市审计局政府网站公开附件",
+      "topic": "政府信息公开制度",
+      "language": "zh-CN",
+      "split": "holdout",
+      "source_family": "state-council-information-disclosure-2019",
+      "landing_url": "https://www.shanwei.gov.cn/swsjj/zhuanti/pfzl/flfg/content/post_937499.html",
+      "download_url": "https://www.shanwei.gov.cn/attachment/0/48/48927/937499.pdf",
+      "filename": "public-information-regulation.pdf",
+      "format": "pdf",
+      "sha256": "99db992a5ee4ed0bbb74177220c12b59d9bcd4aa6d7efd0237074b21ed4c2197",
+      "license_status": {
+        "id": "official-regulation-local-reference-only",
+        "scope": "官方法规文本公开附件；不推定网站其他作品开放许可，仅本地评估和短引来源",
+        "source": "https://www.shanwei.gov.cn/swsjj/zhuanti/pfzl/flfg/content/post_937499.html"
+      },
+      "access_conditions": "官方政府网站公开PDF，无账号；评估历史文本文义，不构成现行法律适用意见。",
+      "questions": [
+        {
+          "id": "public-information-regulation:Q1",
+          "request": "依申请公开的答复期限及延长条件如何规定？",
+          "required_points": [
+            "能够当场答复应当场答复",
+            "不能当场答复，自收到申请起20个工作日内答复",
+            "负责人同意并告知申请人可延长，最长20个工作日",
+            "征求第三方与其他机关意见时间不计入"
+          ],
+          "sources": [
+            {
+              "section": "第三十三条"
+            }
+          ],
+          "forbidden_inferences": [
+            "把工作日写成自然日",
+            "忽略延长告知和审批",
+            "将征求意见时间计入法定答复期限"
+          ]
+        },
+        {
+          "id": "public-information-regulation:Q2",
+          "request": "哪些信息不得公开，涉及第三方合法权益时有哪些例外条件？",
+          "required_points": [
+            "国家秘密与法定禁止及危及安全稳定信息不得公开",
+            "商业秘密与个人隐私等第三方合法权益信息原则不公开",
+            "第三方同意或不公开可能对公共利益造成重大影响可公开"
+          ],
+          "sources": [
+            {
+              "section": "第十四条与第十五条"
+            }
+          ],
+          "forbidden_inferences": [
+            "声称所有个人隐私绝对不可公开",
+            "把依法不得公开信息与第三方权益例外混为一谈"
+          ]
+        }
+      ]
+    }
+  ]
+}

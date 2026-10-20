@@ -319,6 +319,16 @@ class Question(BaseModel):
     question: str = Field(min_length=1, max_length=4000, pattern=r"\S")
 
 
+class QuestionJobRequest(Question):
+    """任务式问答沿用问题边界，增加用于网络不确定恢复的幂等键。"""
+    idempotency_key: str = Field(min_length=1, max_length=200, pattern=r"\S")
+
+
+class QuestionRetryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    idempotency_key: str = Field(min_length=1, max_length=200, pattern=r"\S")
+
+
 class Answer(BaseModel):
     # 问答响应契约：正文和支撑答案的来源列表。
     answer: str
@@ -328,13 +338,30 @@ class Answer(BaseModel):
 # ----------------------------------------------------------------------
 # RAG 问答契约（第一版：单文档、单轮、非流式）
 # ----------------------------------------------------------------------
-RagStatus = Literal["answered", "clarification_needed", "insufficient_evidence"]
+RagStatus = Literal["answered", "partial", "clarification_needed", "insufficient_evidence"]
+
+
+class RagFactContext(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    kind: Literal["subject", "period", "unit", "scope", "condition", "role"]
+    text: str
+    ref: int
+
+
+class RagAnswerPart(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    part_id: str
+    text: str
+    state: Literal["answered", "partial", "missing_evidence", "needs_clarification"]
+    fact_indices: list[int] = Field(default_factory=list)
+    missing_detail: str = ""
 
 
 class RagFact(BaseModel):
     """一条已通过校验的简短事实；refs 由后端从已校验结构复制，编号由服务端分配。"""
     text: str
     refs: list[int]
+    context: list[RagFactContext] = Field(default_factory=list)
 
 
 class RagCitation(BaseModel):
@@ -350,6 +377,7 @@ class RagCitation(BaseModel):
     page: int | None = None
     quote: str
     sources: list[SourceLocation] = Field(default_factory=list)
+    table_structure: dict | None = None
 
 
 class RagRetrievalStats(BaseModel):
@@ -378,6 +406,8 @@ class RagAnswer(BaseModel):
     status: RagStatus
     answer: str
     clarification_questions: list[str] = Field(default_factory=list)
+    missing_points: list[str] = Field(default_factory=list)
+    answer_parts: list[RagAnswerPart] = Field(default_factory=list)
     citations: list[RagCitation] = Field(default_factory=list)
     conclusion: list[RagFact] = Field(default_factory=list)
     explanation: list[RagFact] = Field(default_factory=list)
@@ -645,6 +675,9 @@ class AnalysisCitation(BaseModel):
     reference_id: int
     # 块 ID 由服务端映射给出；定位信息缺失时为空串，不编造。
     block_id: str = ""
+    # 大表行组共享原块，unit_id区分实际送入模型的派生输入；旧结果保持可读。
+    unit_id: str | None = None
+    offset_scope: Literal["block", "input_unit"] = "block"
     source_index: int | None = None
     block_type: str | None = None
     quote: str

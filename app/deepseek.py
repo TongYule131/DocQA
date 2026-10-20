@@ -1,7 +1,9 @@
 """DeepSeek 在线模型适配器，实现 providers.LanguageModel 的 generate 契约。"""
 from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError, OpenAI
+from contextvars import ContextVar
 
 from app.config import Settings
+from app.provider_usage import response_metadata
 
 
 class ModelError(Exception):
@@ -14,8 +16,15 @@ class ModelError(Exception):
 class DeepSeekModel:
     def __init__(self, settings: Settings):
         self.settings = settings
+        self._call_metadata = ContextVar("deepseek_call_metadata", default=None)
+
+    @property
+    def last_call_metadata(self) -> dict | None:
+        # 同一适配器可被并发同步接口使用，元数据按执行上下文隔离。
+        return self._call_metadata.get()
 
     def generate(self, system_prompt: str, user_prompt: str) -> str:
+        self._call_metadata.set(None)
         if not self.settings.deepseek_api_key.strip():
             raise ModelError(503, "尚未配置 DEEPSEEK_API_KEY，请填写本地 .env 后重启服务")
         try:
@@ -62,6 +71,7 @@ class DeepSeekModel:
             complete = finish_reason == "stop"
         except (AttributeError, IndexError, TypeError):
             raise ModelError(502, "DeepSeek 响应结构不完整") from None
+        self._call_metadata.set(response_metadata(response, finish_reason=finish_reason))
         if not complete:
             if finish_reason == "length":
                 raise ModelError(502, "DeepSeek 未返回完整答案：输出额度已耗尽；"

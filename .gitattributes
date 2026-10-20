@@ -1,0 +1,8 @@
+# Document fixtures must retain their exact bytes on every platform.
+*.pdf binary
+*.docx binary
+*.xlsx binary
+
+# Frozen historical plans are checked against their original SHA-256 hashes.
+docs/archive/2026-10-20/OCR*.md -text
+docs/archive/2026-10-20/RAG*.md -text

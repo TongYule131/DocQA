@@ -1,0 +1,54 @@
+{
+  "schema_version": "docqa-doc-archive-v1",
+  "created_at": "2026-10-20T06:10:28.933255+00:00",
+  "files": [
+    {
+      "original": "docs/OCR区域去重修复-v3.md",
+      "archived": "docs/archive/2026-10-20/OCR区域去重修复-v3.md",
+      "sha256": "3c20f28d01371f70111024cae8f6e62e1b69f291c957e33e862a0a5f65562128",
+      "role": "historical_frozen_plan_or_erratum_not_current_status"
+    },
+    {
+      "original": "docs/OCR整页与分流验证计划.md",
+      "archived": "docs/archive/2026-10-20/OCR整页与分流验证计划.md",
+      "sha256": "963a101627a619d45b228030bccf8b51f40d64320a8bc8c96711a1ca085a7195",
+      "role": "historical_frozen_plan_or_erratum_not_current_status"
+    },
+    {
+      "original": "docs/OCR整页分流候选保护-v2.md",
+      "archived": "docs/archive/2026-10-20/OCR整页分流候选保护-v2.md",
+      "sha256": "81b8739a9c672a2e760b3b50d60723e7c1236d6a6b1eda251b01f929b6e3863e",
+      "role": "historical_frozen_plan_or_erratum_not_current_status"
+    },
+    {
+      "original": "docs/OCR真实PDF分流与补检验证计划.md",
+      "archived": "docs/archive/2026-10-20/OCR真实PDF分流与补检验证计划.md",
+      "sha256": "2abe64e4a72913d357ed1bc0d5f53440374c21e54c32fb655177eea42d221155",
+      "role": "historical_frozen_plan_or_erratum_not_current_status"
+    },
+    {
+      "original": "docs/OCR真实PDF标注与来源勘误.md",
+      "archived": "docs/archive/2026-10-20/OCR真实PDF标注与来源勘误.md",
+      "sha256": "eedc7fe172a61f2a50feb2232ccb65f8890915117294b48b92451fb0a3d68ad9",
+      "role": "historical_frozen_plan_or_erratum_not_current_status"
+    },
+    {
+      "original": "docs/OCR真实PDF页面分流-v2.md",
+      "archived": "docs/archive/2026-10-20/OCR真实PDF页面分流-v2.md",
+      "sha256": "9cc281749636663a57c88ce39242066ea15d7cdc9384affa9be5418e991243d3",
+      "role": "historical_frozen_plan_or_erratum_not_current_status"
+    },
+    {
+      "original": "docs/OCR识别量化标准与提升计划.md",
+      "archived": "docs/archive/2026-10-20/OCR识别量化标准与提升计划.md",
+      "sha256": "c1cc23b7926bdb4fe3ce36320710ef5351d95c17c5ad7c7f004fb6aa90f796f9",
+      "role": "historical_frozen_plan_or_erratum_not_current_status"
+    },
+    {
+      "original": "docs/RAG质量闭环与本轮计划.md",
+      "archived": "docs/archive/2026-10-20/RAG质量闭环与本轮计划.md",
+      "sha256": "002703490c4f079f81c0361c3c9bb6408ec8992e94ea04efd297c8267646da9c",
+      "role": "historical_frozen_plan_or_erratum_not_current_status"
+    }
+  ]
+}
