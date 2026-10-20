@@ -24,6 +24,37 @@ def vector_result(chunks):
         "sources": [s.model_dump() for s in c.sources]} for i, c in enumerate(chunks)]}
 
 
+def test_direct_definition_and_explicit_section_bodies_enter_tight_context_before_summary():
+    chunks = [chunk(0, "本报告概述三类机制与传输网格的定位，具体定义见正文。", "摘要"),
+        chunk(1, "第一机制通过统一接口，让不同设备按照同一协议交换数据。", "12 总体机制 / 12.1 接口机制"),
+        chunk(2, "第二机制通过资源调度，实现不同节点之间的协作和负载均衡。", "12 总体机制 / 12.2 调度机制"),
+        chunk(3, "传输网格是指设备之间传递数据和指令的连接基础设施，而不是调度规则。", "12 总体机制 / 12.3 连接机制")]
+    planned = plan_retrieval('第12节提出哪些机制？“传输网格”应如何定位？', vector_result([chunks[0]]), chunks)
+    assert planned["evidence_order"][0] == "c3"
+    assert set(planned["evidence_order"][:3]) == {"c1", "c2", "c3"}
+    assert planned["planning"]["selection_reasons"]["c3"] == "named_direct_definition"
+    built = build_evidence(planned, Settings(rag_context_k=3, rag_context_max_chars=2000), expected_document_id="doc")
+    assert {item.chunk_id for item in built.pack.items} == {"c1", "c2", "c3"}
+    assert built.pack.context_chars <= 2000
+
+
+def test_definition_priority_is_not_triggered_by_an_unrelated_definition_or_page_number():
+    chunks = [chunk(0, "传输网格的连接范围限于园区。", "运行说明"),
+              chunk(1, "调度中心是指分配计算任务的控制设施。", "其他定义")]
+    planned = plan_retrieval('“传输网格”的定位是什么？', vector_result([chunks[0]]), chunks)
+    assert "named_direct_definition" not in planned["planning"]["selection_reasons"].values()
+
+
+def test_author_position_question_reserves_actual_conclusion_without_deciding_its_direction():
+    chunks = [chunk(0, "接口约束和适配成本是常见问题，背景研究对此有许多讨论。", "背景"),
+              chunk(1, "本报告认为，适配存在成本，但不应取消接口约束，应改善工具支持。", "5 结论")]
+    planned = plan_retrieval("有观点认为适配有成本，因此应取消接口约束，这是否符合作者观点？",
+                             vector_result([chunks[0]]), chunks)
+    assert planned["evidence_order"][0] == "c1"
+    assert planned["planning"]["selection_reasons"]["c1"] == "author_position_conclusion"
+    assert planned["planning"]["semantic_completeness_verified"] is False
+
+
 def test_keyword_branch_recovers_unretrieved_definition_and_caption_context():
     chunks = [chunk(0, "研究背景与宏观政策。"),
               chunk(1, "模型由外环原则、内环流程与实践要素组成。"),

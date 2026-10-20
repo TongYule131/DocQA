@@ -75,6 +75,27 @@ def evidence_metrics(case: dict, candidate_ids: list[str], selected_ids: list[st
             "generated_answer_quality": "not_evaluated_by_retrieval_metrics"}
 
 
+def admitted_quote_metrics(case: dict, ranges_by_chunk: dict) -> dict:
+    """按实际输入范围核对黄金引文；只有块ID命中不能算压缩后证据仍在。"""
+    from app.rag_extract_context import validate_ranges
+    chunks=validate_case(case)
+    for identifier,ranges in ranges_by_chunk.items():
+        if identifier not in chunks:raise EvaluationError('unknown_admitted_chunk')
+        validate_ranges(chunks[identifier]['text'].replace('\r\n','\n'),ranges)
+    def present(fragment):
+        text=chunks[fragment['chunk_id']]['text'].replace('\r\n','\n')
+        quote=fragment['quote'].replace('\r\n','\n');start=text.find(quote)
+        while start>=0:
+            if any(a<=start and start+len(quote)<=b for a,b in ranges_by_chunk.get(fragment['chunk_id'],[])):return True
+            start=text.find(quote,start+1)
+        return False
+    found=[point['point_id'] for point in case['required_evidence'] if any(
+        all(present(fragment) for fragment in group) for group in point['alternatives'])]
+    return {**fraction(len(found),len(case['required_evidence'])),
+        'missing_points':[p['point_id'] for p in case['required_evidence'] if p['point_id'] not in found],
+        'scope':'exact_gold_quotes_in_actual_input_not_semantic_support'}
+
+
 def reviewed_answer_metrics(case: dict, answer: dict | None, review: dict | None) -> dict:
     if answer is None or review is None:
         return {"status": "unverified", "faithfulness": None, "answer_relevance": None,
@@ -112,8 +133,8 @@ def reviewed_answer_metrics(case: dict, answer: dict | None, review: dict | None
 def summarize(rows: list[dict]) -> dict:
     def aggregate(group):
         metrics = {}
-        for name in ("candidate_recall", "input_recall", "candidate_precision", "input_precision"):
-            known = [r["retrieval"][name] for r in group if "numerator" in r["retrieval"][name]]
+        for name in ("candidate_recall", "input_recall", "input_quote_recall", "candidate_precision", "input_precision"):
+            known = [r["retrieval"][name] for r in group if "numerator" in r["retrieval"].get(name,{})]
             metrics[name] = {**fraction(sum(m["numerator"] for m in known),
                                       sum(m["denominator"] for m in known)),
                              "labelled_cases": len(known)}
@@ -144,7 +165,8 @@ def retrieval_gate(report: dict, baseline: dict | None = None, *, min_recall: fl
                 any(r["case_sha256"]!=previous[k]["case_sha256"] for k,r in current.items())):
             raise EvaluationError("baseline_case_mismatch")
         for key,row in current.items():
-            for name in ("candidate_recall","input_recall"):
+            for name in ("candidate_recall","input_recall","input_quote_recall"):
+                if name not in row['retrieval'] or name not in previous[key]['retrieval']:continue
                 now=row["retrieval"][name]["value"]
                 before=previous[key]["retrieval"][name]["value"]
                 if before is not None and (now is None or now+1e-12<before):
@@ -153,5 +175,8 @@ def retrieval_gate(report: dict, baseline: dict | None = None, *, min_recall: fl
         recall=group["input_recall"]["value"]
         if recall is not None and recall<min_recall:
             failures.append({"category":group["category"],"reason":"input_recall_below_target"})
+        quote_recall=group.get('input_quote_recall',{}).get('value')
+        if quote_recall is not None and quote_recall<min_recall:
+            failures.append({'category':group['category'],'reason':'actual_input_quote_recall_below_target'})
     return {"scope":"offline_retrieval_only","passed":not failures,"failures":failures,
             "min_input_recall":min_recall,"online_semantic_release":"unverified"}

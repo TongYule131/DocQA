@@ -139,7 +139,8 @@ def prepare(repository, settings, case, query):
     base = build_task_system_prompt(include_table_structure=False)
     cap = rag._context_cap(base, case['question'], snapshot['filename'])
     planned = plan_retrieval(case['question'], raw, chunks, fulltext_budget=cap,
-        max_items=settings.question_context_k, payload_transform=task_evidence_payload)
+        max_items=settings.question_context_k, max_candidates=settings.question_candidate_k,
+        payload_transform=task_evidence_payload)
     captured = {}
 
     class PreviewModel:

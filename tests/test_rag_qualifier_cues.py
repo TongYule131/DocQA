@@ -57,11 +57,16 @@ def test_worker_freezes_cues_and_restored_checkpoint_rejects_changed_cue(tmp_pat
     env.repository.finish_parse("qdoc", 1, [Chunk(id="cue", document_id="qdoc", parse_version_id="cue-v", text=text, order_index=0)])
     env.rag.index.build("qdoc", rebuild=True)
     env.embedding.calls.clear()
+    from tests.test_question_jobs import LEGACY_BODY
+    from tests.fixtures.rag_quality.claim_protocol import upgrade
+    env.model.handler=lambda *_:json.dumps(upgrade(LEGACY_BODY,{1:text},strict=True),ensure_ascii=False)
     job, _ = submit(env)
     claimed = env.service.store.claim("fixture", 60, job_id=job["id"])
     evidence = {}
     def observe(stage, details):
         if stage == "evidence_fixed": evidence.update(details["diagnostics"])
+        if stage == "query_completed":
+            assert env.service.store.save_checkpoint(job['id'],claimed['lease_token'],role='retrieval',payload=details['search_result'],sequence_no=None)
     result = env.rag.answer("qdoc", job["question"], snapshot=json.loads(claimed["snapshot_json"]), observer=observe)
     assert json.loads(env.model.calls[0][1])["references"][0]["qualifier_cues"]["scope_verified"] is False
     evidence["selected"][0]["qualifier_cues"][0]["text"] = "伪造限定"

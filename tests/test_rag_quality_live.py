@@ -99,7 +99,7 @@ def test_repair_inherits_original_budget_and_keeps_failure(tmp_path, drift, monk
 @pytest.mark.parametrize("tamper", [None, "request", "snapshot", "answer"])
 def test_success_reuse_revalidates_same_input_and_raw_without_new_calls(tmp_path, tamper):
     from app.rag_context import build_evidence
-    from app.quote_spans import task_evidence_payload
+    from app.quote_spans import task_segment_payload as task_evidence_payload
     from tests.test_question_jobs import question_fixture, submit, LocalRuntime, REPLY, QUESTION
     from app.question_worker import QuestionWorker
     env = question_fixture(tmp_path)
@@ -111,7 +111,9 @@ def test_success_reuse_revalidates_same_input_and_raw_without_new_calls(tmp_path
     snapshot = json.loads(env.service.store.row(job["id"])["snapshot_json"])
     retrieval = env.service.store.checkpoint(job["id"], "retrieval")
     pack = build_evidence(retrieval, env.settings, expected_document_id="qdoc",
-                          payload_transform=task_evidence_payload).pack
+                          payload_transform=task_evidence_payload,extractive_question=QUESTION,
+                          max_items=env.settings.question_context_k,context_max_chars=env.settings.question_context_max_chars,
+                          include_qualifier_cues=True,preserve_document_order=True).pack
     case = {"case_id": "test", "question": QUESTION}
     record = {"case_sha256": digest(case), "job": job, "result": result,
               "selected_chunk_ids": [i.chunk_id for i in pack.items]}
@@ -168,7 +170,7 @@ def test_v6_targeted_repair_cannot_reset_36_calls_or_expand_four_questions(tmp_p
 
 
 def test_current_prompt_cannot_reopen_historical_v6_repair_authorization(tmp_path):
-    assert TASK_PROMPT_VERSION=='rag-task-v18'
+    assert TASK_PROMPT_VERSION not in {'rag-task-v5', 'rag-task-v6'}
     with pytest.raises(EvaluationStopped,match='修订'):
         live.freeze_run(tmp_path,{},'fact-contract-v6')
     assert not (tmp_path/'request-ledger.db').exists()

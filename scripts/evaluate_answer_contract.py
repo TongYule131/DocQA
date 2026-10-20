@@ -42,7 +42,7 @@ def evaluate(cases=None,probes=None):
             accepted=False
         escaped.append({"case_id":case["case_id"],"structure_accepted":accepted,
                         "semantic_expected":"fail_omitted_qualification","requires_semantic_review":True})
-    return {"schema":"docqa-answer-contract-replay-v1","cases_sha256":digest(cases),
+    return {"schema":"docqa-answer-contract-replay-v1","contract_version":"fact-context-parts-v3","cases_sha256":digest(cases),
         "probes_sha256":digest(probes),"provider_calls":0,"model_generation":"not_executed",
         "scope":"8 CC0 synthetic source texts; protocol replay, not independent/blind semantic accuracy",
         "guard_passed":all(r["guard_passed"] for r in rows),"cases":rows,"semantic_probes":escaped,

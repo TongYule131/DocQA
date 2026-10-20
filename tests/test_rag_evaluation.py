@@ -35,6 +35,16 @@ def test_alternative_evidence_is_not_counted_twice(case):
     assert evidence_metrics(case,ids,ids)["input_recall"]["numerator"]==3
 
 
+def test_compression_cannot_count_gold_quote_in_an_unread_range(case):
+    from app.rag_evaluation import admitted_quote_metrics
+    fragment=case['required_evidence'][0]['alternatives'][0][0]
+    source=next(c for c in case['chunks'] if c['id']==fragment['chunk_id'])
+    full={c['id']:[[0,len(c['text'])]] for c in case['chunks']}
+    assert admitted_quote_metrics(case,full)['numerator']==len(case['required_evidence'])
+    full[source['id']]=[[0,1]]
+    assert case['required_evidence'][0]['point_id'] in admitted_quote_metrics(case,full)['missing_points']
+
+
 def test_unlabelled_relevance_is_unknown_not_zero(case):
     case["relevance_exhaustive"]=False
     ids=[c["id"] for c in case["chunks"]]

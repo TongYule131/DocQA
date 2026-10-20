@@ -78,7 +78,8 @@ def _context_environment(tmp_path):
         sources=[SourceLocation(format="txt",line_start=1,line_end=1)])])
     env.rag.index.build("qdoc",rebuild=True)
     env.embedding.calls.clear()
-    env.model.handler=lambda *_:json.dumps(case["positive"],ensure_ascii=False)
+    from tests.fixtures.rag_quality.claim_protocol import upgrade
+    env.model.handler=lambda *_:json.dumps(upgrade(case["positive"], {1: case["source"]},strict=True),ensure_ascii=False)
     return env,case
 
 
@@ -95,7 +96,7 @@ def test_context_is_visible_in_same_fact_and_durable_across_history_and_exports(
     result=env.service.get_result(completed["result_id"])
     answer=result["answer"]
     assert "未经审计" not in answer["conclusion"][0]["text"]  # 正文没有被自动改写。
-    assert answer["conclusion"][0]["context"][-1]["text"]=="未经审计"
+    assert "未经审计" in answer["conclusion"][0]["context"][-1]["text"]
     assert "未经审计" in answer["answer"] and "2025年" in answer["answer"]
     restored=QuestionJobService(env.settings,Repository(tmp_path/"docqa.db"),env.rag)
     assert restored.get_result(result["id"])["answer"]==answer

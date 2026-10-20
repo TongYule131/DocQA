@@ -14,15 +14,17 @@ from app.rag_context import RagError
 from app.repository import Repository, TaskConflict, now_iso
 from app.schemas import Chunk, Document, SourceLocation
 from app.vector_index import DocumentIndex
+from tests.fixtures.rag_quality.claim_protocol import upgrade
 
 
 TEXT = "全书内容分为21个部分，第一部分为总述。"
 QUESTION = "全书内容分为多少个部分？"
-REPLY = json.dumps({"status": "answered", "conclusion": [{"text": "全书内容分为21个部分。", "refs": [1],
+LEGACY_BODY = {"status": "answered", "conclusion": [{"text": "全书内容分为21个部分。", "refs": [1],
     "context":[{"kind":"unit","text":"个部分","ref":1}]}],
     "explanation": [], "clarification_questions": [],
     "evidence_quotes": [{"ref": 1, "quote": "全书内容分为21个部分"}],
-    "answer_parts":[{"part_id":"p1","state":"answered","fact_indices":[0],"missing_detail":""}]}, ensure_ascii=False)
+    "answer_parts":[{"part_id":"p1","state":"answered","fact_indices":[0],"missing_detail":""}]}
+REPLY = json.dumps(upgrade(LEGACY_BODY, {1: TEXT}), ensure_ascii=False)
 
 
 class Embedding:

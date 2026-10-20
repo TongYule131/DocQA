@@ -6,8 +6,8 @@ import re
 
 from app.rag_validation import ModelOutputError, parse_model_output, validate_model_output
 
-ANSWER_CONTRACT_VERSION = "fact-context-parts-v3"
-SUPPORTED_CONTRACT_VERSIONS = {"fact-context-parts-v1", "fact-context-parts-v2", ANSWER_CONTRACT_VERSION}
+ANSWER_CONTRACT_VERSION = "fact-context-parts-v7"
+SUPPORTED_CONTRACT_VERSIONS = {"fact-context-parts-v1", "fact-context-parts-v2", "fact-context-parts-v3", "fact-context-parts-v4", "fact-context-parts-v5", "fact-context-parts-v6", ANSWER_CONTRACT_VERSION}
 CONTEXT_LABELS = {"subject": "对象", "period": "期间", "unit": "单位",
                   "scope": "范围", "condition": "限定", "role": "用途"}
 # 紧接数字或百分号的连字符属于区间分隔，中文/英文后的一元正负号仍须保留。
@@ -27,13 +27,69 @@ def _fail(reason):
 
 
 def _tokens(value):
-    # 仅比较数值出现这一必要条件；不合并OCR数字间空格、不计算或改写答案。
+    # 定位编号不是统计值。仅统一明确的三位分组，不合并任意OCR数字间空格。
+    value=re.sub(r'第\s*\d+(?:\.\d+)*\s*[章节页段]', '', value)
+    value=re.sub(r'第\s*\d+(?:\.\d+)+(?:[、和及与,，]\s*\d+(?:\.\d+)+)*(?:节)?','',value)
+    value=re.sub(r'((?:原文|论文)在[“"‘])\d+(?:\.\d+)*\s+(?=[^”"’]{2,80}[”"’](?:开篇|中|部分))',r'\1',value)
+    value=re.sub(r'(?<![\d.])\d{1,3}(?:[ \u00a0]\d{3})+(?:\.\d+)?(?!\d|[ \u00a0]\d)',
+                 lambda m:re.sub(r'[ \u00a0]','',m.group()),value)
     return {re.sub(r"\s+(?=[%％])", "", v) for v in _NUMBERS.findall(value)}
 
 
-def validate_task_output(raw, evidence, *, question, contract_version=ANSWER_CONTRACT_VERSION):
+def _context_numbers(value):
+    # 概念列举的个数和带版本号的文字标识不是金额/测量；原文数值仍由_tokens核对。
+    value=re.sub(r'\d+世纪(?:初|末|中叶)?','',value)
+    value=re.sub(r'\d+\s*(?:个|种)?(?:层面|层级|机制|维度|类别|方面|要素)(?![\u3400-\u9fff]*(?:元|人|天|小时|件))','',value)
+    # 只有明确称为编号/版本/许可等文字标识时才免测量context；USD10-20仍是金额。
+    pattern=r'(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9]*(?:[-_.][A-Za-z0-9]+)+(?![A-Za-z0-9])'
+    value=re.sub(pattern,lambda m:'' if re.search(r'(?:许可(?:证)?(?:标识)?|标识|编号|版本|合成|license|version)\s*(?:为|是|[:：])?\s*$',value[:m.start()],re.I) else m.group(),value)
+    return _tokens(value)
+
+
+def _without_known_section_locators(value,evidence,section_headings=None):
+    """仅识别真实输入标题中的编号，且要求明确的标题/章节关系语法。
+
+    元数据可提供章节地址，不能拿其数字为金额或比例背书；不直接从所有小数中
+    删除标题编号。范围判断不修改事实文字或原文引述。
+    """
+    headings={}
+    for heading in (section_headings if section_headings is not None else [item.heading_path for item in evidence.items]):
+        for part in re.split(r'\s+/\s+',heading or ''):
+            match=re.match(r'\s*(\d+(?:\.\d+)+)\s+(.+)',part)
+            if match:headings.setdefault(match[1],[]).append(re.sub(r'\s+','',match[2]))
+    if not headings:return value
+    def nested(match):
+        parent,child=match[1],match[2]
+        return match.group()[:-len(child)] if child in headings and child.startswith(parent+'.') else match.group()
+    # “第3节3.1虽然……”是显式嵌套章节地址；带金额/单位后缀的3.1仍须核对。
+    value=re.sub(r'第(\d+)[章节](?:的)?(\d+(?:\.\d+)+)(?![\d.]|元|万|亿|件|人|天|小时|年|月|日|[%％])',nested,value)
+    pattern=r'(?<![\d.])(\d+(?:\.\d+)+)的[“‘"]([^”’"]{2,80})[”’"]'
+    def titled(match):
+        title=re.sub(r'\s+','',match[2])
+        return '的“'+match[2]+'”' if any(title in h for h in headings.get(match[1],[])) else match.group()
+    value=re.sub(pattern,titled,value)
+    # 只处理“推出3.2、3.3与另两个层面配对”这类明确章节关系，不处理数值列表。
+    pattern=r'((?:推出|对应|配对|小节为|章节为)\s*)((?:\d+(?:\.\d+)+[、,，]\s*)*\d+(?:\.\d+)+)(?=(?:与|和|及)(?:另|其他)[^。；，]{0,16}(?:层面|机制|章节|小节))'
+    value=re.sub(pattern,lambda m:m[1] if all(n in headings for n in re.findall(r'\d+(?:\.\d+)+',m[2])) else m.group(),value)
+    return value
+
+
+# 旧离线调用默认按原v3读取；生产必须显式传入任务冻结的协议版本，禁止失败后降级。
+def validate_task_output(raw, evidence, *, question, contract_version="fact-context-parts-v3", _claim_sources=None,_section_headings=None):
     if not isinstance(contract_version, str) or contract_version not in SUPPORTED_CONTRACT_VERSIONS:
         _fail("unsupported_contract_version")
+    if contract_version == ANSWER_CONTRACT_VERSION:
+        from app.rag_claim_evidence import validate_unit_output
+        return validate_unit_output(raw,evidence,question=question,declare_parts=True,derive_refs=True)
+    if contract_version=='fact-context-parts-v6':
+        from app.rag_claim_evidence import validate_unit_output
+        return validate_unit_output(raw,evidence,question=question,declare_parts=True)
+    if contract_version == 'fact-context-parts-v5':
+        from app.rag_claim_evidence import validate_unit_output
+        return validate_unit_output(raw,evidence,question=question)
+    if contract_version == "fact-context-parts-v4":
+        from app.rag_claim_evidence import validate_claim_output
+        return validate_claim_output(raw, evidence, question=question)
     payload = parse_model_output(raw)
     parts = payload.pop("answer_parts", None)
     if not isinstance(parts, list):
@@ -57,13 +113,13 @@ def validate_task_output(raw, evidence, *, question, contract_version=ANSWER_CON
     output = validate_model_output(json.dumps(payload, ensure_ascii=False), evidence, task_protocol=True)
     facts = output.conclusion + output.explanation
     total = sum(len(f.text) for f in facts) + sum(map(len, output.clarification_questions + output.missing_points))
-    for fact, context in zip(facts, contexts):
+    for fact_index,(fact, context) in enumerate(zip(facts, contexts)):
         seen = set()
         accepted = []
         for binding in context:
             if not isinstance(binding, dict):
                 _fail("bad_type")
-            if set(binding) == {'kind', 'ref', 'segment'} and contract_version == ANSWER_CONTRACT_VERSION:
+            if set(binding) == {'kind', 'ref', 'segment'} and contract_version == "fact-context-parts-v3":
                 from app.quote_spans import context_segments
                 ref, segment = binding['ref'], binding['segment']
                 if type(ref) is not int or ref not in fact.refs or type(segment) is not int:
@@ -88,10 +144,13 @@ def validate_task_output(raw, evidence, *, question, contract_version=ANSWER_CON
             seen.add(identity)
             accepted.append(dict(binding))
             total += len(text)
-        numbers = _tokens(fact.text)
-        if numbers and not context:
+        numeric_text=_without_known_section_locators(fact.text,evidence,_section_headings)
+        numbers = _tokens(numeric_text)
+        context_numbers=_context_numbers(numeric_text)
+        if context_numbers and not context:
             _fail("numeric_context_missing")
-        available = set().union(*(_tokens(output.quotes[ref]) for ref in fact.refs))
+        sources=_claim_sources[fact_index] if _claim_sources is not None else [output.quotes[ref] for ref in fact.refs]
+        available = set().union(*(_tokens(source) for source in sources))
         if not numbers <= available:
             _fail("number_not_in_quote")
         fact.context = accepted
@@ -105,7 +164,7 @@ def validate_task_output(raw, evidence, *, question, contract_version=ANSWER_CON
         if not isinstance(entry, dict) or set(entry) != {"part_id", "state", "fact_indices", "missing_detail"}:
             _fail("coverage_mismatch")
         allowed_states = {"answered", "missing_evidence", "needs_clarification"}
-        if contract_version in {"fact-context-parts-v2", ANSWER_CONTRACT_VERSION}:
+        if contract_version in {"fact-context-parts-v2", "fact-context-parts-v3"}:
             allowed_states.add("partial")
         if (entry["part_id"] != required["part_id"] or not isinstance(entry["state"], str)
                 or entry["state"] not in allowed_states):
@@ -154,4 +213,9 @@ def fact_display_text(fact):
         entry = entry if isinstance(entry, dict) else entry.model_dump()
         if entry["text"] not in text:
             details.append(CONTEXT_LABELS[entry["kind"]] + "：" + entry["text"])
-    return text + ("（" + "；".join(details) + "）" if details else "")
+    kind = fact.get("claim_type", "unclassified") if isinstance(fact, dict) else getattr(fact, "claim_type", "unclassified")
+    label = {"direct": "原文直述", "synthesis": "多处综合", "inference": "结构推断"}.get(kind)
+    review = fact.get('support_review',{}) if isinstance(fact,dict) else getattr(fact,'support_review',{})
+    note = ('（证据规则检查：需复核；语义待复核）' if review.get('status')=='needs_review'
+            else '（证据规则检查通过；语义待复核）' if review.get('status')=='checks_passed' else '')
+    return (f"【{label}】" if label else "") + text + ("（" + "；".join(details) + "）" if details else "") + note

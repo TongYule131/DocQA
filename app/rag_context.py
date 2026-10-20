@@ -6,9 +6,11 @@
    本次快照一致，混入其他文档或版本直接受控失败，而不是默默拼接。
 2. 引用编号由服务端对**最终入选证据**按整块装入顺序分配；只在候选里、
    因预算未送入模型的块不会获得编号，模型也无法引用它。
-3. 采用确定性整块装入：块连同必要元数据序列化后计入预算，容纳不下就跳过并
+3. 旧同步采用确定性整块装入；任务式可按read_ranges抽取完整原句并保留依赖，
+   数据库完整正文不改。块连同实际可见范围及元数据计入预算，容纳不下就跳过并
    继续尝试后续候选；入选块绝不会被从尾部硬截断，标题、表头、条件、脚注
-   不会为了凑字数被删掉。因预算舍弃任何块时标记 truncated=True
+   表格不为凑字数删表头/注释。抽取只是候选压缩，不证明语义条件完整。
+   因预算舍弃任何块时标记 truncated=True
    （表示证据集合不完整，不表示引用文本被截断）。
 4. 字符预算不等于 token 预算；这里只做本地输入限流，真正的模型上下文限制
    仍需供应商实测，因此不凭空引入与 DeepSeek 不匹配的 tokenizer。
@@ -74,6 +76,9 @@ class EvidenceItem:
     qualifier_cues: list[dict] = field(default_factory=list)
     qualifier_cues_included: bool = False
     qualifier_cues_omitted: bool = False
+    read_ranges: list[list[int]] | None = None
+    segment_policy: str | None = None
+    unit_choices: dict | None = None
 
     def payload(self) -> dict[str, Any]:
         """序列化为送入模型的数据对象；只包含可作为事实依据的字段。
@@ -86,6 +91,10 @@ class EvidenceItem:
             "ref": self.reference_id,
             "content": self.text,
         }
+        if self.read_ranges is not None:
+            entry['_read_ranges'] = self.read_ranges
+            entry['_strict_segments'] = self.segment_policy == 'sentence-segments-v2'
+        if self.unit_choices is not None:entry['_unit_choices']=self.unit_choices
         if self.heading_path:
             entry["heading"] = self.heading_path
         if self.chunk_type:
@@ -111,6 +120,10 @@ class EvidencePack:
     context_chars: int
     drop_reasons: list[str] = field(default_factory=list)
     rejected: list[tuple[EvidenceItem, str]] = field(default_factory=list)
+    slot_hints: dict = field(default_factory=dict)
+    review_policy: str | None = None
+    continuation_pairs: list[dict] = field(default_factory=list)
+    budget_profile: dict = field(default_factory=dict)
 
     def item_by_ref(self, reference_id: int) -> EvidenceItem | None:
         for item in self.items:
@@ -230,7 +243,8 @@ def detect_scope_mismatch(candidates: list[EvidenceItem], *, document_id: str | 
 
 def pack_evidence(candidates: list[EvidenceItem], *, context_max_chars: int,
                   serialize: Callable[[list[EvidenceItem]], str],
-                  max_items: int | None = None) -> tuple[list[EvidenceItem], bool, int, list[str]]:
+                  max_items: int | None = None, slots: list[dict] | None = None,
+                  partners: dict[str, list[str]] | None = None) -> tuple[list[EvidenceItem], bool, int, list[str]]:
     """确定性整块装入：按顺序尝试放入，放不下就跳过并继续尝试后续候选。
 
     返回 (入选证据, 是否舍弃过块, 序列化字符数, 舍弃原因)。
@@ -241,20 +255,34 @@ def pack_evidence(candidates: list[EvidenceItem], *, context_max_chars: int,
     truncated = False
     context_chars = 0
 
-    for candidate in candidates:
-        if max_items is not None and len(selected) >= max_items:
+    # 每槽先争取一条，再轮换补充第二条；仅重排原文块，不压缩或拼造引述。
+    by_id = {item.chunk_id: item for item in candidates}
+    ordered = []
+    for position in range(2):
+        for slot in slots or []:
+            ids = slot.get('candidate_ids', [])
+            if position < len(ids) and ids[position] in by_id and ids[position] not in ordered:
+                ordered.append(ids[position])
+    ordered += list(dict.fromkeys(i for slot in slots or [] for i in slot.get('candidate_ids', []) if i in by_id and i not in ordered))
+    ordered += [item.chunk_id for item in candidates if item.chunk_id not in ordered]
+    for identifier in ordered:
+        candidate = by_id[identifier]
+        if candidate in selected: continue
+        unit = [by_id[i] for i in (partners or {}).get(identifier, [identifier]) if i in by_id and by_id[i] not in selected]
+        if not unit: unit = [candidate]
+        if max_items is not None and len(selected) + len(unit) > max_items:
             drop_reasons.append(f"候选 chunk_id={candidate.chunk_id} 超出证据块数上限，已舍弃")
             continue
         # 先用占位编号序列化，确认整块装入后是否仍在预算内。
-        candidate.reference_id = len(selected) + 1
-        serialized = serialize(selected + [candidate])
+        for n,item in enumerate(unit,len(selected)+1): item.reference_id=n
+        serialized = serialize(selected + unit)
         if len(serialized) > context_max_chars:
-            candidate.reference_id = 0
+            for item in unit: item.reference_id=0
             truncated = True
             drop_reasons.append(
                 f"候选 chunk_id={candidate.chunk_id} 超出参考资料字符预算，已整块舍弃")
             continue
-        selected.append(candidate)
+        selected.extend(unit)
         context_chars = len(serialized)
 
     # 重新编号，保证入选证据的引用编号严格连续、从 1 开始。
@@ -307,7 +335,8 @@ def build_evidence(search_result: dict, settings: Settings, *,
                    expected_document_id: str | None = None,
                    payload_transform=None, table_blocks: list | None = None,
                    table_prompt_overhead: int = 0, include_qualifier_cues: bool = False,
-                   preserve_document_order: bool = False) -> EvidenceBuildResult:
+                   preserve_document_order: bool = False, max_items: int | None = None,
+                   context_max_chars: int | None = None, extractive_question: str | None = None) -> EvidenceBuildResult:
     """由一次检索结果构建本次证据包，并完成版本快照校验。
 
     - context_cap 由提示词实际序列化长度反推（见 app.rag），保证最终消息体不超限；
@@ -323,7 +352,7 @@ def build_evidence(search_result: dict, settings: Settings, *,
 
     candidates, drop_reasons = build_candidates(raw_results, min_score=settings.rag_min_score)
     planned_order = search_result.get("evidence_order")
-    if isinstance(planned_order, list) and search_result.get("strategy") in {"hybrid-context-v1", "hybrid-context-v2"}:
+    if isinstance(planned_order, list) and search_result.get("strategy") in {"hybrid-context-v1", "hybrid-context-v2", "hybrid-context-v3", "hybrid-context-v4", "hybrid-context-v5"}:
         # 融合排名和分问题上下文顺序仅来自服务端规划；原余弦分值仍用于可选阈值。
         positions = {chunk_id: i for i, chunk_id in enumerate(planned_order) if isinstance(chunk_id, str)}
         candidates.sort(key=lambda item: positions.get(item.chunk_id, len(positions)))
@@ -341,18 +370,28 @@ def build_evidence(search_result: dict, settings: Settings, *,
         return EvidenceBuildResult(pack=pack, warnings=[], limitations=[],
                                    fatal_reason=fatal_reason)
 
-    max_chars = settings.rag_context_max_chars if context_cap is None else min(
-        settings.rag_context_max_chars, context_cap)
+    configured_cap = settings.rag_context_max_chars if context_max_chars is None else context_max_chars
+    max_chars = configured_cap if context_cap is None else min(configured_cap, context_cap)
     max_chars = max(max_chars, 0)
+    profile, pairs, partners = {}, [], {}
+    if extractive_question is not None:
+        from app.rag_extract_context import budget_profile, plan_admission
+        profile = budget_profile(extractive_question, max_items=max_items or settings.rag_context_k, context_chars=max_chars)
+        pairs, partners = plan_admission(candidates, extractive_question, profile)
+        max_items = profile['max_items']
 
     def serialize(items: list[EvidenceItem]) -> str:
+        if extractive_question is not None:
+            from app.rag_extract_context import assign_unit_options
+            assign_unit_options(items,pairs)
         entries = [item.payload() for item in items]
         return json.dumps(payload_transform(entries) if payload_transform else entries,
                           ensure_ascii=False, separators=(",", ":"))
 
+    slots = (search_result.get('planning') or {}).get('evidence_slots', []) if search_result.get('strategy') in {'hybrid-context-v4','hybrid-context-v5'} else []
     selected, truncated, context_chars, budget_reasons = pack_evidence(
         candidates, context_max_chars=max_chars, serialize=serialize,
-        max_items=settings.rag_context_k)
+        max_items=settings.rag_context_k if max_items is None else max_items, slots=slots, partners=partners)
     drop_reasons.extend(budget_reasons)
     if table_blocks is not None:
         from app.rag_table_projection import table_projection, TABLE_PROJECTION_MAX_CHARS
@@ -382,6 +421,9 @@ def build_evidence(search_result: dict, settings: Settings, *,
             item.qualifier_cues = qualifier_cues(item.text)
             if not item.qualifier_cues:
                 continue
+            if item.read_ranges is not None and item.read_ranges != [[0,len(item.text)]]:
+                item.qualifier_cues_omitted = True
+                continue
             item.qualifier_cues_included = True
             if len(serialize(selected)) + overhead > max_chars:
                 item.qualifier_cues_included = False
@@ -397,21 +439,41 @@ def build_evidence(search_result: dict, settings: Settings, *,
         for number, item in enumerate(selected, 1):
             item.reference_id = number
         context_chars = len(serialize(selected)) if selected else 0
+    while selected and context_chars>max_chars:
+        # 只因重编号造成的关联元数据增长；按原候选优先级舍弃完整关联组。
+        victim=max(selected,key=lambda i:candidates.index(i))
+        discarded=set(partners.get(victim.chunk_id,[victim.chunk_id]))
+        selected=[i for i in selected if i.chunk_id not in discarded];truncated=True
+        drop_reasons.append('关联引用元数据超出预算，已舍弃完整关联组')
+        for n,item in enumerate(selected,1):item.reference_id=n
+        context_chars=len(serialize(selected)) if selected else 0
     # truncated 只表示“因为字符预算不足而舍弃了本可入选的整块”，
     # 不表示被 top_k 上限截断（那是检索条数上限，不是预算问题）。
 
     pack = EvidencePack(items=selected, candidates=candidates, index_id=index_id,
                         parse_version_id=parse_version_id, truncated=truncated,
                         context_chars=context_chars, drop_reasons=drop_reasons)
+    if extractive_question is not None:
+        from app.rag_extract_context import SELECTION_VERSION
+        pack.review_policy=SELECTION_VERSION
+        pack.continuation_pairs=pairs
+        pack.budget_profile=profile
+    if slots:
+        from app.rag_evidence_slots import slot_hints
+        pack.slot_hints = slot_hints(slots, {item.chunk_id for item in selected})
 
     warnings = _relevant_warnings(version_warnings or [], selected)
     limitations: list[str] = []
+    if pack.slot_hints.get('unfilled_count'):
+        limitations.append(f"本次有{pack.slot_hints['unfilled_count']}个检索证据槽位未装入原文；槽位只是检索线索，不代表语义覆盖已验证")
+    if any(item.read_ranges is not None and item.read_ranges!=[[0,len(item.text)]] for item in selected):
+        limitations.append('本次使用可定位的原文抽取范围；未装入的句子不能引用，亦不能据此断言全文不存在某观点')
     if preserve_document_order and selected and not order_available:
         limitations.append("原文块顺序信息不完整，保留检索顺序；阶段归属仍需核对正文")
     if any(item.table_projection_omitted for item in selected):
         limitations.append("部分表格片段未附行列辅助结构（结构无法核对或辅助预算不足），原文片段仍完整保留")
     if any(item.qualifier_cues_omitted for item in selected):
-        limitations.append("部分限定语句索引因辅助预算不足未附入，原文片段仍完整保留；索引本身不验证适用范围")
+        limitations.append("部分限定语句索引因抽取范围或辅助预算未附入；可引用范围以实际装入的原文为准，索引本身不验证适用范围")
     if truncated:
         limitations.append(
             "本次回答只使用了字符预算内的部分检索片段，证据集合不完整；"

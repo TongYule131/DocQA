@@ -181,5 +181,6 @@ def validate_table_checkpoint(repository, snapshot: dict, selected: list[dict], 
                          or len(json.dumps(projection, ensure_ascii=False, separators=(",", ":"))) > TABLE_PROJECTION_MAX_CHARS):
             raise ValueError("table_checkpoint_projection_unavailable")
         refs[ref] = projection if included else None
-    if any(c.table_structure != refs.get(c.reference_id) for c in citations):
+    if any(c.table_structure != refs.get(c.source_reference_id if getattr(c, "source_reference_id", None) is not None
+                                         else c.reference_id) for c in citations):
         raise ValueError("table_result_projection_mismatch")

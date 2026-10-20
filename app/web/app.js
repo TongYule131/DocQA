@@ -1835,6 +1835,14 @@ function renderCitations(citations, meta) {
       + ` · 片段 ${citation.chunk_id}`
       + (meta && meta.is_old_version ? ' · 本次回答依据历史解析版本' : '');
     card.append(info);
+    if (citation.evidence_id) {
+      const identity = document.createElement('p');
+      identity.className = 'muted';
+      identity.textContent = `证据ID ${citation.evidence_id}`
+        + ` · 解析原文范围 [${citation.char_start}, ${citation.char_end})`
+        + ' · 原文精确匹配；语义支持待复核。页码/坐标为分块来源区域。';
+      card.append(identity);
+    }
 
     const actions = document.createElement('div');
     actions.className = 'actions';
@@ -1845,6 +1853,38 @@ function renderCitations(citations, meta) {
     preview.textContent = '查看引用版本';
     preview.onclick = () => run(() => loadContent(citation.document_id, citation.parse_version_id));
     actions.append(preview);
+    if (citation.verification === 'exact_match' && citation.offset_basis === 'chunk_crlf_lf_unicode_codepoints') {
+      const excerpt = document.createElement('button');
+      excerpt.type = 'button';
+      excerpt.className = 'subtle';
+      excerpt.textContent = '展开并高亮解析原文';
+      const region = document.createElement('pre');
+      region.hidden = true;
+      excerpt.onclick = () => run(async () => {
+        if (region.dataset.loaded === 'true') { region.hidden = !region.hidden; return; }
+        const chunks = await api(`/documents/${encodeURIComponent(citation.document_id)}/chunks`
+          + `?version_id=${encodeURIComponent(citation.parse_version_id)}`);
+        const chunk = chunks.find((item) => item.id === citation.chunk_id);
+        if (!chunk || chunk.document_id !== citation.document_id || chunk.parse_version_id !== citation.parse_version_id) {
+          throw new Error('对应版本的原文片段不可用');
+        }
+        // 后端偏移为Unicode码点；不能直接用JS的UTF-16下标，否则emoji后会错位。
+        const chars = Array.from(String(chunk.text).replace(/\r\n/g, '\n'));
+        const start = citation.char_start, end = citation.char_end;
+        if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start || end > chars.length
+          || chars.slice(start, end).join('') !== citation.quote) {
+          throw new Error('引述范围与原文不一致，未显示高亮');
+        }
+        const mark = document.createElement('mark');
+        mark.textContent = citation.quote;
+        region.replaceChildren(document.createTextNode(chars.slice(0, start).join('')), mark,
+          document.createTextNode(chars.slice(end).join('')));
+        region.dataset.loaded = 'true';
+        region.hidden = false;
+      });
+      actions.append(excerpt);
+      card.append(region);
+    }
     const pages = (citation.sources || [])
       .filter((source) => source.format === 'pdf' && Number.isInteger(source.page) && source.page > 0)
       .map((source) => source.page);

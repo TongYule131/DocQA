@@ -98,7 +98,7 @@ def test_cancel_during_generation_keeps_checkpoint_but_does_not_publish(tmp_path
 def test_invalid_model_citation_is_failed_and_never_published(tmp_path):
     env = question_fixture(tmp_path)
     job, _ = submit(env)
-    env.model.handler = lambda _s, _u: REPLY.replace('"refs": [1]', '"refs": [99]')
+    env.model.handler = lambda _s, _u: REPLY.replace('"ref": 1', '"ref": 99')
     assert worker(env).run_job(job["id"])
     failed = env.service.get_job(job["id"])
     assert failed["status"] == "failed" and failed["error_code"] == "rag_output_invalid"
@@ -181,9 +181,10 @@ def test_markdown_export_textualizes_injected_markup_in_question_and_evidence(tm
         sources=[SourceLocation(format="txt", line_start=1, line_end=2)])])
     env.rag.index.build("qdoc", rebuild=True)
     def reply(_s, _u):
-        return json.dumps({"status": "answered", "conclusion": [{"text": '<img src="https://invalid.example/pixel">', "refs": [1],"context":[]}],
+        from tests.fixtures.rag_quality.claim_protocol import upgrade
+        return json.dumps(upgrade({"status": "answered", "conclusion": [{"text": '<img src="https://invalid.example/pixel">', "refs": [1],"context":[]}],
             "explanation": [], "clarification_questions": [], "evidence_quotes": [{"ref": 1, "quote": hostile}],
-            "answer_parts":[{"part_id":"p1","state":"answered","fact_indices":[0],"missing_detail":""}]}, ensure_ascii=False)
+            "answer_parts":[{"part_id":"p1","state":"answered","fact_indices":[0],"missing_detail":""}]}, {1: hostile}, strict=True), ensure_ascii=False)
     env.model.handler = reply
     job, _ = submit(env, question="请解释以下原文：" + hostile)
     assert worker(env).run_job(job["id"])
@@ -255,7 +256,7 @@ def test_partial_answer_persists_and_exports_missing_points(tmp_path):
     env = question_fixture(tmp_path)
     body = json.loads(REPLY)
     body.update(status="partial", missing_points=["第二部分的实践效果没有足够依据。"])
-    body["answer_parts"].append({"part_id":"p2","state":"missing_evidence","fact_indices":[],
+    body["answer_parts"].append({"part_id":"p2","state":"missing_evidence",
                                   "missing_detail":body["missing_points"][0]})
     env.model.handler = lambda *_: json.dumps(body, ensure_ascii=False)
     job, _ = submit(env,question=QUESTION+"第二部分的实践效果如何？")
@@ -267,5 +268,6 @@ def test_partial_answer_persists_and_exports_missing_points(tmp_path):
     assert result["answer"]["missing_points"] == body["missing_points"]
     assert body["missing_points"][0] in result["answer"]["answer"]
     assert body["missing_points"][0] in env.service.export(result["id"], "markdown")[0]
-    assert complete["diagnostics"]["strategy"] == "hybrid-context-v2"
+    from app.retrieval_planning import RETRIEVAL_STRATEGY_VERSION
+    assert complete["diagnostics"]["strategy"] == RETRIEVAL_STRATEGY_VERSION
     assert complete["diagnostics"]["candidate_count"] >= complete["diagnostics"]["selected_count"]

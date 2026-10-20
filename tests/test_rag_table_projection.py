@@ -127,10 +127,12 @@ def table_environment(tmp_path):
     # finish_parse复用该独立库的固定版本，仅为测试安装合成分块，不访问正式数据。
     env.rag.index.build("qdoc", rebuild=True)
     env.embedding.calls.clear()
-    env.model.handler = lambda system, user: json.dumps({"status": "answered",
+    from tests.fixtures.rag_quality.claim_protocol import upgrade
+    env.model.handler = lambda system, user: json.dumps(upgrade({"status": "answered",
         "conclusion": [{"text": "退款金额为0。", "refs": [1], "context": [{"kind": "subject", "text": "退款", "ref": 1}]}],
         "explanation": [], "clarification_questions": [], "evidence_quotes": [{"ref": 1, "span": 1}],
-        "answer_parts": [{"part_id": "p1", "state": "answered", "fact_indices": [0], "missing_detail": ""}]}, ensure_ascii=False)
+        "answer_parts": [{"part_id": "p1", "state": "answered", "fact_indices": [0], "missing_detail": ""}]},
+        {1: chunks[0].text}), ensure_ascii=False)
     return env, block
 
 
@@ -208,6 +210,8 @@ def test_saved_answer_checkpoint_cannot_bypass_source_and_structure_validation(t
     evidence = {}
     def observer(stage, details):
         if stage == "evidence_fixed": evidence.update(details["diagnostics"])
+        if stage == "query_completed":
+            assert env.service.store.save_checkpoint(job['id'],claimed['lease_token'],role='retrieval',payload=details['search_result'],sequence_no=None)
     answer = env.rag.answer("qdoc", "退款多少？", snapshot=snapshot, observer=observer).answer.model_dump()
     if target == "source": evidence["selected"][0]["text"] += "伪造资料"
     if target == "projection": evidence["selected"][0]["table_projection"]["rows"][-1]["values"][-1] = "100"
@@ -253,6 +257,8 @@ def test_valid_saved_table_answer_survives_restart_without_generation(tmp_path):
     evidence = {}
     def observer(stage, details):
         if stage == "evidence_fixed": evidence.update(details["diagnostics"])
+        if stage == "query_completed":
+            assert env.service.store.save_checkpoint(job['id'],claimed['lease_token'],role='retrieval',payload=details['search_result'],sequence_no=None)
     answer = env.rag.answer("qdoc", "退款多少？", snapshot=json.loads(claimed["snapshot_json"]), observer=observer).answer.model_dump()
     assert env.service.store.save_checkpoint(job["id"], claimed["lease_token"], role="evidence", payload=evidence, sequence_no=None)
     assert env.service.store.save_checkpoint(job["id"], claimed["lease_token"], role="answer", payload=answer, sequence_no=None)

@@ -691,6 +691,42 @@ check('CLOSURE-UI-3', '切换文档清空旧结果类型，重新生成使用当
       request.url.endsWith('/closure-b/analysis-plan?kind=extraction')),
   JSON.stringify({ state: hooks.analysisState(), requests: closureRequests.slice(requestsBeforeRegenerate) }))
 
+// v4：稳定身份展示和解析原文高亮。全部通过本地fetch桩，不发送实际请求。
+const previousFetch = sandbox.fetch
+const evidenceRequests = []
+const selectedQuote = '<img src=x onerror=alert(1)>'
+const evidenceCitation = { reference_id: 3, document_id: 'citation-doc', parse_version_id: 'citation-v',
+  chunk_id: 'citation-c', quote: selectedQuote, evidence_id: 'ev-stable-synthetic',
+  verification: 'exact_match', offset_basis: 'chunk_crlf_lf_unicode_codepoints',
+  char_start: 1, char_end: 1 + selectedQuote.length, sources: [{ format: 'pdf', page: 7 }] }
+sandbox.fetch = async (url, options = {}) => {
+  evidenceRequests.push({ url, options })
+  return { ok: true, json: async () => [{ id: 'citation-c', document_id: 'citation-doc',
+    parse_version_id: 'citation-v', text: `😀${selectedQuote}尾部` }] }
+}
+renderCitations([evidenceCitation], { is_old_version: true })
+const evidencePanel = elements.get('answer-citations')
+check('CITATION-V4-1', '来源卡展示稳定ID，并区分原文匹配与语义复核',
+  evidencePanel.textContent.includes('ev-stable-synthetic') && evidencePanel.textContent.includes('语义支持待复核'),
+  '显示编号不承担稳定身份；不宣称语义已通过')
+const expandEvidence = evidencePanel.allNodes().find((node) => node.tagName === 'BUTTON' && node.textContent.includes('展开并高亮'))
+await expandEvidence.onclick()
+let evidenceMark = evidencePanel.allNodes().find((node) => node.tagName === 'MARK')
+check('CITATION-V4-2', 'emoji之后的原文按Unicode码点准确高亮，恶意文字只作为文本',
+  evidenceMark?.textContent === selectedQuote && !evidencePanel.allNodes().some((node) => node.tagName === 'IMG'),
+  'UTF-16下标不冒充后端Unicode字符偏移')
+await expandEvidence.onclick()
+check('CITATION-V4-3', '展开引用只GET固定解析版本，重复展开复用本地原文',
+  evidenceRequests.length === 1 && evidenceRequests[0].url.includes('version_id=citation-v')
+    && (!evidenceRequests[0].options.method || evidenceRequests[0].options.method === 'GET'),
+  JSON.stringify(evidenceRequests.map((r) => r.url)))
+renderCitations([{ ...evidenceCitation, char_end: evidenceCitation.char_end + 1 }], {})
+await elements.get('answer-citations').allNodes().find((node) => node.tagName === 'BUTTON' && node.textContent.includes('展开并高亮')).onclick()
+check('CITATION-V4-4', '范围与原文不一致时拒绝高亮',
+  !elements.get('answer-citations').allNodes().some((node) => node.tagName === 'MARK'),
+  '错误范围不会通过find静默定位到另一处')
+sandbox.fetch = previousFetch
+
 const failed = results.filter((item) => !item.passed)
 console.log(`\n离线渲染安全测试：${results.length - failed.length}/${results.length} 通过`)
 process.exit(failed.length ? 1 : 0)

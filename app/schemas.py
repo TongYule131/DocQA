@@ -362,6 +362,9 @@ class RagFact(BaseModel):
     text: str
     refs: list[int]
     context: list[RagFactContext] = Field(default_factory=list)
+    claim_type: Literal["unclassified", "direct", "synthesis", "inference"] = "unclassified"
+    evidence_ids: list[str] = Field(default_factory=list)
+    support_review: dict = Field(default_factory=dict)
 
 
 class RagCitation(BaseModel):
@@ -378,6 +381,15 @@ class RagCitation(BaseModel):
     quote: str
     sources: list[SourceLocation] = Field(default_factory=list)
     table_structure: dict | None = None
+    source_reference_id: int | None = None
+    evidence_id: str | None = None
+    quote_sha256: str | None = None
+    char_start: int | None = None
+    char_end: int | None = None
+    offset_basis: Literal["chunk_crlf_lf_unicode_codepoints"] | None = None
+    verification: Literal["exact_match", "legacy_unverified"] = "legacy_unverified"
+    # 精确字符串校验不等于语义通过；历史记录不能在读取时被追认为人工已复核。
+    semantic_status: Literal["not_reviewed"] = "not_reviewed"
 
 
 class RagRetrievalStats(BaseModel):

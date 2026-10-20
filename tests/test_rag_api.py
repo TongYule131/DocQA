@@ -191,6 +191,8 @@ def test_answered_response_comes_from_model_output_and_real_chunks(tmp_path, gat
         # 已校验结构与 Markdown 一致。
         assert body["conclusion"] == [{"text": "全书内容分为21个部分。", "refs": [1]}]
         assert body["explanation"] == [{"text": "该结论出自第一部分的总述。", "refs": [1]}]
+        assert "evidence_id" not in citation  # 同步兼容接口不扩展任务式引用协议。
+        assert "table_structure" not in citation
         assert body["clarification_questions"] == []
         assert body["retrieval"]["selected_count"] >= 1
         assert body["retrieval"]["truncated"] is False

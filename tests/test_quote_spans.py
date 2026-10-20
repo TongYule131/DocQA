@@ -10,7 +10,7 @@ from app.rag_context import EvidenceItem, EvidencePack, build_evidence
 from app.rag_prompts import TASK_PROMPT_VERSION, build_task_user_prompt
 from app.rag_validation import ModelOutputError, validate_model_output
 from app.question_worker import QuestionWorker
-from tests.test_question_jobs import LocalRuntime, TEXT, REPLY, question_fixture, submit
+from tests.test_question_jobs import LocalRuntime, TEXT, REPLY, LEGACY_BODY, question_fixture, submit
 
 
 def pack(text):
@@ -19,10 +19,12 @@ def pack(text):
 
 
 def quote_protocol_body():
-    body = json.loads(REPLY)
+    body = deepcopy(LEGACY_BODY)
     # 此文件单独测试既有引用协议；v6扩展由真实任务链路及专门协议回归验证。
     body.pop("answer_parts",None)
-    for fact in body["conclusion"]+body["explanation"]:fact.pop("context",None)
+    for fact in body["conclusion"]+body["explanation"]:
+        for key in ("context", "claim_type", "evidence","part_ids"):
+            fact.pop(key, None)
     return body
 
 
@@ -93,7 +95,7 @@ def test_input_payload_is_immutable_and_budget_includes_real_span_metadata():
 def test_real_question_worker_publishes_server_selected_contiguous_quote(tmp_path):
     env = question_fixture(tmp_path)
     body=json.loads(REPLY)
-    body["evidence_quotes"]=[{"ref":1,"span":1}]
+    body['conclusion'][0]['evidence']=[{'ref':1,'unit':1}]
     env.model.handler = lambda *_: json.dumps(body,ensure_ascii=False)
     job, _ = submit(env)
     assert QuestionWorker(env.settings, env.repository, rag=env.rag, runtime=LocalRuntime()).run_job(job["id"])

@@ -142,6 +142,9 @@ button.ref{background:#e8f1e6;color:#2f5a44;padding:1px 6px;margin-left:3px;font
 .extraction-item p{margin:2px 0}
 .extraction-item small{display:block;line-height:1.6}
 footer{text-align:center;color:#98a092;font-size:11px;padding:12px 0 32px}
+/* 稳定证据ID和连续原文可能没有空格，窄卡片中也必须换行而非撑宽整个页面。 */
+.citation{min-width:0;overflow-wrap:anywhere}
+.citation pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%}
 :focus-visible{outline:2px solid #5b9373;outline-offset:3px}
 /* 窄屏适配：双栏改为单栏，缩小外边距和字号 */
 @media(max-width:760px){header{padding:0 20px}

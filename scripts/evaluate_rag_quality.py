@@ -11,8 +11,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from app.config import Settings
 from app.rag_context import build_evidence
-from app.quote_spans import task_evidence_payload
-from app.rag_evaluation import EvaluationError, digest, evidence_metrics, summarize, retrieval_gate, validate_case
+from app.quote_spans import task_segment_payload as task_evidence_payload
+from app.rag_evaluation import EvaluationError, digest, evidence_metrics, admitted_quote_metrics, summarize, retrieval_gate, validate_case
+from app.rag_extract_context import admitted_ranges
 from app.retrieval_planning import plan_retrieval, _plan_retrieval_v1
 from app.schemas import Chunk
 
@@ -38,7 +39,8 @@ def evaluate(cases: list[dict], planner=plan_retrieval):
         settings = Settings(rag_retrieval_k=20, rag_context_k=case["context_k"],
                             rag_context_max_chars=case["context_max_chars"])
         built = build_evidence(planned, settings, expected_document_id=case["document_id"],
-                               payload_transform=task_evidence_payload)
+                               payload_transform=task_evidence_payload,
+                               extractive_question=case['question'] if planner is plan_retrieval else None)
         if built.fatal_reason:
             raise EvaluationError("evidence_scope_mismatch")
         candidates = [hit["chunk_id"] for hit in planned["results"]]
@@ -53,7 +55,8 @@ def evaluate(cases: list[dict], planner=plan_retrieval):
             "results":oracle_hits},settings,expected_document_id=case["document_id"],payload_transform=task_evidence_payload)
         rows.append(dict(case_id=case["case_id"], source_kind=case["source_kind"], category=case["category"],
             case_sha256=digest(case), candidate_ids=candidates, selected_ids=selected,
-            retrieval=evidence_metrics(case,candidates,selected),
+            retrieval={**evidence_metrics(case,candidates,selected),'input_quote_recall':admitted_quote_metrics(case,
+                {i.chunk_id:admitted_ranges(i.text,i.read_ranges,strict=i.segment_policy=='sentence-segments-v1') for i in built.pack.items})},
             context_chars=built.pack.context_chars, context_k=case["context_k"],
             context_max_chars=case["context_max_chars"], drop_reasons=built.pack.drop_reasons,
             planning=planned.get("planning", {}), local_ms=local_ms,
@@ -70,7 +73,7 @@ def main(argv=None):
     parser.add_argument("--report",type=Path,required=True)
     parser.add_argument("--strategy",choices=("current","legacy"),default="current")
     parser.add_argument("--baseline",type=Path,help="可选的同一冻结场景基线报告")
-    parser.add_argument("--gate",action="store_true",help="逐题防退步并按类别检查90%输入召回，失败返回1")
+    parser.add_argument("--gate",action="store_true",help="逐题防退步并按类别检查90%%输入召回，失败返回1")
     args=parser.parse_args(argv)
     if args.report.exists():
         parser.error("报告已存在，请使用新路径保留首次结果")

@@ -12,12 +12,13 @@ from scripts.evaluate_answer_contract import pack_for
 from tests.fixtures.rag_quality.answer_contract import make_cases
 from tests.test_question_jobs import LocalRuntime, question_fixture, submit
 from tests.test_rag_answer_contract import _context_environment
+from tests.fixtures.rag_quality.claim_protocol import upgrade
 
 
 def _markdown(answer):
     return render_markdown(ValidatedOutput(status=answer['status'],
-        conclusion=[ValidatedFact(**f) for f in answer['conclusion']],
-        explanation=[ValidatedFact(**f) for f in answer['explanation']],
+        conclusion=[ValidatedFact(**{k:v for k,v in f.items() if k!='evidence_ids'}) for f in answer['conclusion']],
+        explanation=[ValidatedFact(**{k:v for k,v in f.items() if k!='evidence_ids'}) for f in answer['explanation']],
         clarification_questions=answer['clarification_questions'],missing_points=answer['missing_points']))
 
 
@@ -28,6 +29,8 @@ def _prepared_checkpoint(env, question):
     evidence={}
     def observer(stage, details):
         if stage=='evidence_fixed':evidence.update(details['diagnostics'])
+        if stage=='query_completed':
+            assert worker.store.save_checkpoint(job['id'],claimed['lease_token'],role='retrieval',payload=details['search_result'],sequence_no=None)
     result=env.rag.answer('qdoc',question,snapshot=json.loads(claimed['snapshot_json']),observer=observer)
     assert worker.store.save_checkpoint(job['id'],claimed['lease_token'],role='evidence',payload=evidence,sequence_no=None)
     return worker,claimed,result.answer.model_dump()
@@ -50,10 +53,11 @@ def test_valid_nonascending_fact_references_publish_with_consistent_canonical_ma
     env.rag.index.build('qdoc',rebuild=True);env.embedding.calls.clear()
     def answer(_system,user):
         refs=json.loads(user)['references']; assert len(refs)==2
-        return json.dumps(dict(status='answered',conclusion=[dict(text='材料介绍教学内容和实践任务。',
+        return json.dumps(upgrade(dict(status='answered',conclusion=[dict(text='材料介绍教学内容和实践任务。',
             refs=[refs[1]['ref'],refs[0]['ref']],context=[])],explanation=[],clarification_questions=[],
             evidence_quotes=[dict(ref=r['ref'],span=1) for r in refs],
-            answer_parts=[dict(part_id='p1',state='answered',fact_indices=[0],missing_detail='')]),ensure_ascii=False)
+            answer_parts=[dict(part_id='p1',state='answered',fact_indices=[0],missing_detail='')]),
+            {r['ref']:''.join(r['content'][0]['segments'].values()) for r in refs}),ensure_ascii=False)
     env.model.handler=answer
     job,_=submit(env,question='介绍哪些教学内容和任务？')
     assert QuestionWorker(env.settings,env.repository,rag=env.rag,runtime=LocalRuntime()).run_job(job['id'])
@@ -94,7 +98,7 @@ def test_checkpoint_rechecks_user_condition_source_boundary_before_publication(t
 def test_checkpoint_insufficient_answer_cannot_replace_fixed_fallback(tmp_path):
     env,case=_context_environment(tmp_path)
     body=dict(status='insufficient_evidence',conclusion=[],explanation=[],clarification_questions=[],
-        evidence_quotes=[],answer_parts=[dict(part_id='p1',state='missing_evidence',fact_indices=[],missing_detail='缺少成本依据。')])
+        missing_points=[],answer_parts=[dict(part_id='p1',state='missing_evidence',missing_detail='缺少成本依据。')])
     env.model.handler=lambda *_:json.dumps(body,ensure_ascii=False)
     worker,claimed,answer=_prepared_checkpoint(env,case['question'])
     answer['answer']='已经证实该机构利润大幅增长。'
@@ -106,7 +110,7 @@ def test_insufficient_answer_exports_the_specific_missing_detail(tmp_path):
     env,case=_context_environment(tmp_path)
     detail='本次证据没有2026年的经营数据。'
     body=dict(status='insufficient_evidence',conclusion=[],explanation=[],clarification_questions=[],
-        evidence_quotes=[],answer_parts=[dict(part_id='p1',state='missing_evidence',fact_indices=[],missing_detail=detail)])
+        missing_points=[],answer_parts=[dict(part_id='p1',state='missing_evidence',missing_detail=detail)])
     env.model.handler=lambda *_:json.dumps(body,ensure_ascii=False)
     worker,claimed,answer=_prepared_checkpoint(env,case['question'])
     done=_resume(env,worker,claimed,answer)
@@ -148,10 +152,18 @@ def test_saved_v6_answer_checkpoint_remains_publishable_without_new_calls(tmp_pa
     worker,claimed,answer=_prepared_checkpoint(env,case['question'])
     snapshot=json.loads(claimed['snapshot_json'])
     snapshot.update(answer_contract_version='fact-context-parts-v1',task_prompt_version='rag-task-v6')
+    for field in ('evidence_selection_version','evidence_profile','claim_review_version'):snapshot.pop(field,None)
     claimed['snapshot_json']=json.dumps(snapshot,ensure_ascii=False)
     with env.repository.connect() as db:
         db.execute('UPDATE question_jobs SET snapshot_json=? WHERE id=?',(claimed['snapshot_json'],claimed['id']))
     answer['prompt_version']='rag-task-v6'
+    # 旧v1一条引用对应整块，不带新单位拆分/稳定ID或认证。
+    citation=dict(answer['citations'][0],reference_id=1,quote=case['source'],source_reference_id=None,
+        evidence_id=None,char_start=None,char_end=None,quote_sha256=None,offset_basis=None)
+    answer['citations']=[citation]
+    for fact in answer['conclusion']+answer['explanation']:
+        fact.update(refs=[1],context=case['positive']['conclusion'][0]['context'],claim_type='unclassified',evidence_ids=[],support_review={})
+    answer['answer']=_markdown(answer)
     done=_resume(env,worker,claimed,answer)
     assert done['status']=='succeeded'
     assert env.service.get_result(done['result_id'])['answer']['prompt_version']=='rag-task-v6'
@@ -162,7 +174,7 @@ def test_partial_single_question_survives_worker_history_and_export(tmp_path):
     body=copy.deepcopy(case['positive']);detail='本次证据没有营业成本数据。'
     body.update(status='partial',missing_points=[detail],answer_parts=[dict(
         part_id='p1',state='partial',fact_indices=[0],missing_detail=detail)])
-    env.model.handler=lambda *_:json.dumps(body,ensure_ascii=False)
+    env.model.handler=lambda *_:json.dumps(upgrade(body, {1: case['source']},strict=True),ensure_ascii=False)
     job,_=submit(env,question='营业收入与成本是多少？')
     assert QuestionWorker(env.settings,env.repository,rag=env.rag,runtime=LocalRuntime()).run_job(job['id'])
     done=env.service.get_job(job['id']);assert done['status']=='succeeded',done

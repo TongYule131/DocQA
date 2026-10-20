@@ -57,6 +57,8 @@ REASON_CODE_NAMES = {
     "coverage_missing", "fact_context_missing", "context_scope_mismatch", "context_not_in_quote",
     "numeric_context_missing", "number_not_in_quote", "coverage_mismatch",
     "unsupported_requirement", "coverage_status_conflict",
+    "claim_evidence_invalid", "claim_type_missing_or_invalid", "context_not_in_claim_evidence",
+    'quote_not_in_admitted_input','incomplete_quote_sentence','continuation_not_bound_to_claim','inference_label_required',
 }
 
 # 数量与长度上限（对应任务书 6.2）。
@@ -85,6 +87,8 @@ class ValidatedFact:
     text: str
     refs: list[int]
     context: list[dict] = field(default_factory=list)
+    claim_type: str = "unclassified"
+    support_review: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -98,6 +102,8 @@ class ValidatedOutput:
     missing_points: list[str] = field(default_factory=list)
     answer_parts: list[dict] = field(default_factory=list)
     context_selection_count: int = 0
+    # v4的展示引用可以来自同一输入片段的不同范围；始终保留真实输入ref和偏移。
+    citation_bindings: dict[int, dict] = field(default_factory=dict)
 
     def used_refs(self) -> set[int]:
         refs: set[int] = set()
@@ -387,8 +393,19 @@ def validate_user_condition_boundary(output: ValidatedOutput, evidence: Evidence
             return re.sub(r"(?<=[\u3400-\u9fff])\s+(?=\S)|(?<=\S)\s+(?=[\u3400-\u9fff])", "", value)
         return layout_spaces(phrase) in layout_spaces(source)
     for fact in output.conclusion + output.explanation:
-        cited_texts = [item.text.replace("\r\n", "\n") for ref in fact.refs
-                       if (item := evidence.item_by_ref(ref)) is not None]
+        if output.citation_bindings:
+            # v4的refs是本次引述编号，不能误当成输入片段编号；只读本条所选证据。
+            from app.rag_extract_context import merge_ranges
+            by_source={}
+            for ref in fact.refs:
+                binding=output.citation_bindings[ref]
+                by_source.setdefault(binding['source_ref'],[]).append([binding['char_start'],binding['char_end']])
+            # 只合并本事实在同一原块内相接/重叠的真实范围；不拼接不同块或缺口。
+            cited_texts=[evidence.item_by_ref(source_ref).text[a:b] for source_ref,ranges in by_source.items()
+                for a,b in merge_ranges(ranges)]
+        else:
+            cited_texts = [item.text.replace("\r\n", "\n") for ref in fact.refs
+                           if (item := evidence.item_by_ref(ref)) is not None]
         for match in quoted_user_text.finditer(fact.text):
             quoted = next(value for value in match.groups() if value is not None)
             if quoted in normalized_question and not any(same_source_phrase(quoted, text) for text in cited_texts):

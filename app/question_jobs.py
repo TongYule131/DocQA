@@ -60,6 +60,14 @@ def _public_diagnostics(payload: dict | None) -> dict:
     safe = {name: payload[name] for name in ("dropped_candidates", "context_chars", "input_chars",
         "retrieval_reused", "retrieval_timings_ms", "candidate_count", "selected_count", "drop_reasons",
         "strategy", "planned_route") if name in payload}
+    if isinstance(payload.get('evidence_slot_hints'), dict):
+        hints = payload['evidence_slot_hints']
+        safe['evidence_slot_hints'] = {key: hints[key] for key in ('version', 'heuristic_only',
+            'semantic_completeness_verified', 'unfilled_count') if key in hints}
+    if isinstance(payload.get('budget_profile'),dict):
+        safe['budget_profile']={k:payload['budget_profile'][k] for k in ('kind','max_items','target_items','context_chars',
+            'excerpt_chars','semantic_completeness_verified') if k in payload['budget_profile']}
+    if isinstance(payload.get('evidence_selection_version'),str):safe['evidence_selection_version']=payload['evidence_selection_version']
     safe["selected"] = [{name: item[name] for name in ("reference_id", "chunk_id", "page", "document_id")
                         if name in item} for item in payload.get("selected", []) if isinstance(item, dict)]
     return safe
@@ -297,12 +305,54 @@ class QuestionJobStore:
             if len(citation_ids) != len(validated.citations):
                 raise ValueError("duplicate_result_reference")
             for citation in validated.citations:
-                source = selected.get(citation.reference_id)
+                source = selected.get(citation.source_reference_id if citation.source_reference_id is not None else citation.reference_id)
                 if (source is None or source.get("chunk_id") != citation.chunk_id or not citation.quote
                         or citation.quote not in str(source.get("text", "")).replace("\r\n", "\n").replace("\r", "\n")):
                     raise ValueError("result_quote_not_in_evidence")
                 if "sources" in source and [location.model_dump() for location in citation.sources] != source["sources"]:
                     raise ValueError("result_source_not_in_evidence")
+                if citation.evidence_id is not None:
+                    from app.rag_citation_identity import citation_identity
+                    text = str(source.get("text", "")).replace("\r\n", "\n")
+                    if (type(citation.char_start) is not int or type(citation.char_end) is not int
+                            or not 0 <= citation.char_start < citation.char_end <= len(text)
+                            or text[citation.char_start:citation.char_end] != citation.quote):
+                        raise ValueError("result_citation_range_mismatch")
+                    expected = citation_identity(citation.document_id, citation.parse_version_id, citation.chunk_id,
+                        citation.char_start, citation.char_end, citation.quote)
+                    if any(getattr(citation, key) != value for key, value in expected.items()):
+                        raise ValueError("result_citation_identity_mismatch")
+            snapshot = json.loads(row["snapshot_json"])
+            from app.rag_prompts import TASK_PROMPT_VERSION
+            from app.rag_extract_context import SELECTION_VERSION
+            from app.rag_support_review import REVIEW_VERSION
+            if snapshot.get('task_prompt_version')==TASK_PROMPT_VERSION and (
+                    snapshot.get('evidence_selection_version')!=SELECTION_VERSION or snapshot.get('claim_review_version')!=REVIEW_VERSION):
+                raise ValueError('admission_policy_changed')
+            if snapshot.get('evidence_selection_version'):
+                from app.rag_support_review import restore_admission,review_claims
+                from types import SimpleNamespace
+                retrieval_row=db.execute("SELECT payload_json FROM question_checkpoints WHERE job_id=? AND role='retrieval'",(job_id,)).fetchone()
+                if retrieval_row is None:raise ValueError('admission_retrieval_missing')
+                admission=restore_admission(self.repository,snapshot,evidence.get('selected',[]),json.loads(retrieval_row[0]),row['question'])
+                rechecked=validated.model_copy(deep=True)
+                reviewed=SimpleNamespace(conclusion=rechecked.conclusion,explanation=rechecked.explanation,
+                    quotes={c.reference_id:c.quote for c in rechecked.citations},
+                    citation_bindings={c.reference_id:dict(source_ref=c.source_reference_id,char_start=c.char_start,char_end=c.char_end)
+                                       for c in rechecked.citations})
+                review_claims(reviewed,admission)
+                if any(a.support_review!=b.support_review for a,b in zip(
+                        rechecked.conclusion+rechecked.explanation,validated.conclusion+validated.explanation)):
+                    raise ValueError('claim_review_checkpoint_changed')
+            if snapshot.get("answer_contract_version") in {"fact-context-parts-v4","fact-context-parts-v5","fact-context-parts-v6","fact-context-parts-v7"}:
+                if any(not citation.evidence_id or citation.source_reference_id is None for citation in validated.citations):
+                    raise ValueError("result_citation_identity_missing")
+                if len({c.evidence_id for c in validated.citations}) != len(validated.citations):
+                    raise ValueError("duplicate_result_evidence_identity")
+                identities = {c.reference_id: c.evidence_id for c in validated.citations}
+                if any(f.claim_type == "unclassified" or f.evidence_ids != [identities.get(ref) for ref in sorted(f.refs)]
+                       for f in validated.conclusion + validated.explanation):
+                    raise ValueError("result_claim_evidence_mismatch")
             if any(not fact.refs or not set(fact.refs) <= citation_ids for fact in validated.conclusion + validated.explanation):
                 raise ValueError("result_reference_missing")
             snapshot = json.loads(row["snapshot_json"])
@@ -317,18 +367,45 @@ class QuestionJobStore:
                 from app.rag_context import EvidenceItem, EvidencePack
                 from app.rag_validation import render_markdown, validate_user_condition_boundary
                 from app.rag_prompts import INSUFFICIENT_EVIDENCE_TEXT
-                pack = EvidencePack(items=[EvidenceItem(reference_id=ref, chunk_id=item["chunk_id"],
+                is_v4 = snapshot["answer_contract_version"] in {"fact-context-parts-v4","fact-context-parts-v5","fact-context-parts-v6","fact-context-parts-v7"}
+                # v4发布时已逐条重算稳定ID和原文范围；用这些已核对范围重验数值、限定和覆盖。
+                # 不能把展示引述号再当输入片段号，也不能降级后直接相信落库的答案正文。
+                scoped_items = ([EvidenceItem(reference_id=c.reference_id, chunk_id=c.chunk_id,
+                    document_id=c.document_id, parse_version_id=c.parse_version_id, page=c.page, text=c.quote,
+                    heading_path=admission.item_by_ref(c.source_reference_id).heading_path if snapshot.get('evidence_selection_version') else None)
+                    for c in validated.citations] if is_v4 else [EvidenceItem(reference_id=ref, chunk_id=item["chunk_id"],
                     document_id=row["document_id"], parse_version_id=row["parse_version_id"],
-                    page=item.get("page"), text=item["text"]) for ref,item in selected.items()], candidates=[],
+                    page=item.get("page"), text=item["text"]) for ref,item in selected.items()])
+                pack = EvidencePack(items=scoped_items, candidates=[],
                     index_id=row["index_id"], parse_version_id=row["parse_version_id"], truncated=False, context_chars=0)
                 payload = {name: getattr(validated, name) for name in ("status", "clarification_questions", "missing_points")}
-                payload.update(conclusion=[f.model_dump() for f in validated.conclusion],
-                    explanation=[f.model_dump() for f in validated.explanation],
+                payload.update(conclusion=[f.model_dump(include={"text", "refs", "context"}) for f in validated.conclusion],
+                    explanation=[f.model_dump(include={"text", "refs", "context"}) for f in validated.explanation],
                     evidence_quotes=[{"ref":c.reference_id,"quote":c.quote} for c in validated.citations],
                     answer_parts=[{k:v for k,v in p.model_dump().items() if k!="text"} for p in validated.answer_parts])
+                own_sources=None
+                if is_v4 and snapshot.get('evidence_selection_version'):
+                    from app.rag_extract_context import merge_ranges
+                    by_citation={c.reference_id:c for c in validated.citations};own_sources=[]
+                    for fact in validated.conclusion+validated.explanation:
+                        grouped={}
+                        for ref in fact.refs:
+                            c=by_citation[ref]
+                            grouped.setdefault(c.source_reference_id,[]).append([c.char_start,c.char_end])
+                        own_sources.append([admission.item_by_ref(ref).text[a:b] for ref,ranges in grouped.items()
+                                            for a,b in merge_ranges(ranges)])
                 checked = validate_task_output(_dump(payload), pack, question=row["question"],
-                                               contract_version=snapshot["answer_contract_version"])
-                validate_user_condition_boundary(checked, pack, question=row["question"])
+                                               contract_version="fact-context-parts-v3" if is_v4 else snapshot["answer_contract_version"],
+                                               _claim_sources=own_sources,
+                                               _section_headings=[item.heading_path for item in admission.items] if is_v4 and snapshot.get('evidence_selection_version') else None)
+                for fact, stored in zip(checked.conclusion + checked.explanation, validated.conclusion + validated.explanation):
+                    fact.claim_type = stored.claim_type
+                    fact.support_review = stored.support_review
+                if is_v4 and snapshot.get('evidence_selection_version'):
+                    checked.citation_bindings={c.reference_id:dict(source_ref=c.source_reference_id,char_start=c.char_start,char_end=c.char_end)
+                                               for c in validated.citations}
+                    validate_user_condition_boundary(checked,admission,question=row['question'])
+                else:validate_user_condition_boundary(checked, pack, question=row["question"])
                 expected_text = (INSUFFICIENT_EVIDENCE_TEXT if validated.status == "insufficient_evidence"
                                  else render_markdown(checked))
                 if ([p.model_dump() for p in validated.answer_parts] != checked.answer_parts
@@ -524,7 +601,13 @@ class QuestionJobService:
                     labels.append(f"第 {source['page']} 页")
                 if source.get("sheet_name"):
                     labels.append(str(source["sheet_name"]) + " " + str(source.get("cell_range") or ""))
+                if source.get("section_path"):
+                    labels.append(str(source["section_path"]))
             lines += [f"[{citation['reference_id']}] {_markdown_text(' / '.join(labels))}", "", _markdown_text(citation["quote"]), ""]
+            if citation.get("evidence_id"):
+                lines += [f"证据ID：{citation['evidence_id']}",
+                    f"解析原文范围：[{citation['char_start']}, {citation['char_end']}) · Unicode字符，CRLF→LF",
+                    "校验：原文精确匹配；语义支持未自动认证。页码/坐标为分块来源区域。", ""]
         lines += [f"解析版本：{_markdown_text(result['parse_version_id'])} · 索引：{_markdown_text(result['index_id'])}",
                   f"任务：{_markdown_text(result['job_id'])} · 请求数：{result['requests_used']}", ""]
         if answer["limitations"]:

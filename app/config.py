@@ -83,7 +83,11 @@ class Settings:
     question_max_requests: int = 4
     # 新任务可选本地混合策略；旧同步接口仍沿用原向量链路。
     question_retrieval_strategy: str = "hybrid-context"
-    question_context_k: int = 20
+    question_context_k: int = 32
+    # 任务式问答独立于旧同步接口；提高容量不增加查询/生成次数。
+    question_context_max_chars: int = 24000
+    question_input_max_chars: int = 32000
+    question_candidate_k: int = 64
     # ------------------------------------------------------------------
     # 摘要与信息提取（分析任务）
     # 预算单位仍是字符，不是 token；这里的数值只用于本地输入限流与费用上界，
@@ -152,7 +156,10 @@ class Settings:
             rag_min_score=_optional_float(values.get("DOCQA_RAG_MIN_SCORE")),
             question_max_requests=int(value("DOCQA_QUESTION_MAX_REQUESTS", "4")),
             question_retrieval_strategy=value("DOCQA_QUESTION_RETRIEVAL_STRATEGY", "hybrid-context"),
-            question_context_k=int(value("DOCQA_QUESTION_CONTEXT_K", "20")),
+            question_context_k=int(value("DOCQA_QUESTION_CONTEXT_K", "32")),
+            question_context_max_chars=int(value("DOCQA_QUESTION_CONTEXT_MAX_CHARS", "24000")),
+            question_input_max_chars=int(value("DOCQA_QUESTION_INPUT_MAX_CHARS", "32000")),
+            question_candidate_k=int(value("DOCQA_QUESTION_CANDIDATE_K", "64")),
             analysis_max_requests=int(value("DOCQA_ANALYSIS_MAX_REQUESTS", "8")),
             analysis_batch_max_chars=int(value("DOCQA_ANALYSIS_BATCH_MAX_CHARS", "12000")),
             analysis_reduce_max_chars=int(value("DOCQA_ANALYSIS_REDUCE_MAX_CHARS", "16000")),
@@ -239,8 +246,15 @@ class Settings:
             raise ValueError("DOCQA_QUESTION_MAX_REQUESTS 必须是2到20的整数，包含查询和生成尝试")
         if self.question_retrieval_strategy not in {"vector", "hybrid-context"}:
             raise ValueError("DOCQA_QUESTION_RETRIEVAL_STRATEGY 必须是 vector 或 hybrid-context")
-        if type(self.question_context_k) is not int or not 1 <= self.question_context_k <= 20:
-            raise ValueError("DOCQA_QUESTION_CONTEXT_K 必须是1到20的整数")
+        if type(self.question_candidate_k) is not int or not 1 <= self.question_candidate_k <= 100:
+            raise ValueError("DOCQA_QUESTION_CANDIDATE_K 必须是1到100的整数")
+        if type(self.question_context_k) is not int or not 1 <= self.question_context_k <= self.question_candidate_k:
+            raise ValueError("DOCQA_QUESTION_CONTEXT_K 必须为正整数且不超过候选块数")
+        for name in ("question_context_max_chars", "question_input_max_chars"):
+            if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
+                raise ValueError(f"{name} 必须是正整数字符上限")
+        if self.question_context_max_chars >= self.question_input_max_chars:
+            raise ValueError("DOCQA_QUESTION_CONTEXT_MAX_CHARS 必须小于 DOCQA_QUESTION_INPUT_MAX_CHARS")
         # 分析任务预算：必须是有限正整数并有合理上界，避免配置错误导致费用失控。
         if not 1 <= self.analysis_max_requests <= 50:
             raise ValueError("DOCQA_ANALYSIS_MAX_REQUESTS 必须在 1 到 50 之间")

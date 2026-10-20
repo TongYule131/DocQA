@@ -31,7 +31,8 @@ from app.vector_index import DocumentIndex
 TARGETS = ["xlsx-revenue:Q2", "xlsx-revenue:Q4", "docx-learning:Q4", "paper:Q3"]
 CONFIG_FIELDS = ("deepseek_base_url", "deepseek_model", "deepseek_thinking", "deepseek_reasoning_effort",
     "deepseek_max_tokens", "embedding_base_url", "embedding_model", "embedding_batch_size", "rag_retrieval_k",
-    "rag_context_k", "question_context_k", "rag_context_max_chars", "rag_input_max_chars", "rag_min_score")
+    "rag_context_k", "question_context_k", "rag_context_max_chars", "rag_input_max_chars", "rag_min_score",
+    "question_context_max_chars", "question_input_max_chars", "question_candidate_k")
 QUERY_FIELDS = ("document_id", "filename", "start_version_id", "parse_version_id", "index_id", "is_legacy",
     "source_signature", "source_signature_algo", "provider_signature", "model_signature", "evidence_signature")
 
@@ -94,12 +95,14 @@ def prepare(repository, settings, case, saved_query):
     base = build_task_system_prompt(include_table_structure=False)
     cap = rag._context_cap(base, case["question"], snapshot["filename"])
     retrieved = plan_retrieval(case["question"], raw, chunks, fulltext_budget=cap,
-                               max_items=settings.question_context_k, payload_transform=task_evidence_payload)
+                               max_items=settings.question_context_k, max_candidates=settings.question_candidate_k,
+                               payload_transform=task_evidence_payload)
     index.validate_checkpoint(case["document_id"], snapshot, retrieved)
     pack = build_evidence(retrieved, settings, expected_document_id=case["document_id"], context_cap=cap,
         payload_transform=task_evidence_payload, table_blocks=repository.blocks(case["parse_version_id"]),
         table_prompt_overhead=len(build_task_system_prompt()) - len(base), include_qualifier_cues=True,
-        preserve_document_order=True).pack
+        preserve_document_order=True,max_items=settings.question_context_k,
+        context_max_chars=settings.question_context_max_chars,extractive_question=case['question']).pack
     if not pack.items:
         raise EvaluationStopped("没有合格输入，不生成")
     system = build_task_system_prompt(include_table_structure=any(i.table_projection_included for i in pack.items))

@@ -129,18 +129,40 @@ def revalidate_saved_answer(record, request, raw, pack, *, case, snapshot, prior
             or record["selected_chunk_ids"] != [i.chunk_id for i in pack.items]):
         raise EvaluationStopped("旧回答输入、范围或状态变化，不能复用")
     from app.rag_answer_contract import validate_task_output
-    validated = (validate_task_output(raw,pack,question=case["question"]) if "question_parts" in request["user"]
+    validated = (validate_task_output(raw,pack,question=case["question"],
+                 contract_version=snapshot.get("answer_contract_version", "fact-context-parts-v3")) if "question_parts" in request["user"]
                  else validate_model_output(raw, pack, task_protocol=True))
     validate_user_condition_boundary(validated, pack, question=case["question"])
+    from app.rag_support_review import review_claims
+    review_claims(validated,pack)
     answer = record["result"]["answer"]
-    facts = lambda rows: [{"text": f.text, "refs": f.refs,"context":f.context} for f in rows]
-    previous_facts = lambda rows: [{**f,"context":f.get("context",[])} for f in rows]
+    def facts(rows):
+        return [{"text": f.text, "refs": sorted(f.refs), "context": f.context, "claim_type": f.claim_type,
+                 'support_review':f.support_review} for f in rows]
+    def previous_facts(rows):
+        return [{"text": f["text"], "refs": f["refs"], "context": f.get("context", []),
+                 "claim_type": f.get("claim_type", "unclassified"),'support_review':f.get('support_review',{})} for f in rows]
     if (validated.status != answer["status"] or facts(validated.conclusion) != previous_facts(answer["conclusion"])
             or facts(validated.explanation) != previous_facts(answer["explanation"])
             or validated.missing_points != answer["missing_points"]
             or validated.clarification_questions != answer["clarification_questions"]
             or validated.quotes != {c["reference_id"]: c["quote"] for c in answer["citations"]}):
         raise EvaluationStopped("旧原始输出与发布结果不一致，不能复用")
+    if validated.citation_bindings:
+        from app.rag_citation_identity import citation_identity
+        citations = {c["reference_id"]: c for c in answer["citations"]}
+        identities = {}
+        for ref, binding in validated.citation_bindings.items():
+            item = pack.item_by_ref(binding["source_ref"])
+            expected = citation_identity(item.document_id, item.parse_version_id, item.chunk_id,
+                binding["char_start"], binding["char_end"], validated.quotes[ref])
+            if (citations[ref].get("source_reference_id") != binding["source_ref"]
+                    or any(citations[ref].get(k) != v for k,v in expected.items())):
+                raise EvaluationStopped("旧回答的证据身份与原始选择不一致")
+            identities[ref] = expected["evidence_id"]
+        if any(f.get("evidence_ids") != [identities[ref] for ref in f["refs"]]
+               for f in answer["conclusion"] + answer["explanation"]):
+            raise EvaluationStopped("旧回答的逐事实证据绑定不一致")
 
 
 def branch_retrieval(case, branch, raw, chunks, context_cap):
@@ -185,7 +207,8 @@ def run(directory, *, allow_online=False, repair_revision=None):
         "deepseek_base_url", "deepseek_model", "deepseek_thinking", "deepseek_reasoning_effort",
         "deepseek_max_tokens", "embedding_base_url", "embedding_model", "embedding_batch_size",
         "rag_retrieval_k", "rag_context_k", "question_context_k", "rag_context_max_chars",
-        "rag_input_max_chars", "rag_min_score")}
+        "rag_input_max_chars", "rag_min_score", "question_context_max_chars", "question_input_max_chars",
+        "question_candidate_k")}
     if config != approval["unchanged_provider_and_budget_config"]:
         raise EvaluationStopped("模型、网关或预算配置已变化")
     index = DocumentIndex(repository, APIEmbedding(settings))
@@ -309,6 +332,8 @@ def run(directory, *, allow_online=False, repair_revision=None):
                                        table_blocks=repository.blocks(case["parse_version_id"]),
                                        include_qualifier_cues=True,
                                        preserve_document_order=True,
+                                       max_items=settings.question_context_k,context_max_chars=settings.question_context_max_chars,
+                                       extractive_question=case['question'],
                                        table_prompt_overhead=len(build_task_system_prompt()) - len(base_prompt))
                 if built.fatal_reason or not built.pack.items:
                     raise EvaluationStopped("没有可生成的合格证据")

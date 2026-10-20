@@ -697,6 +697,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "context_k": settings.rag_context_k,
             "context_max_chars": settings.rag_context_max_chars,
             "input_max_chars": settings.rag_input_max_chars,
+            "task_question": {
+                "context_k": settings.question_context_k,
+                "candidate_k": settings.question_candidate_k,
+                "context_max_chars": settings.question_context_max_chars,
+                "input_max_chars": settings.question_input_max_chars,
+            },
             "min_score": settings.rag_min_score,
             # 字符预算不是 token 预算；真正的模型上下文限制仍需供应商实测。
             "budget_unit": "characters",
@@ -742,9 +748,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{_quote(filename)}"})
 
     @app.post("/api/documents/{document_id}/questions", response_model=RagAnswer,
-              response_model_exclude={"answer_parts": True, "citations": {"__all__": {"table_structure"}},
-                                      "conclusion": {"__all__": {"context"}},
-                                      "explanation": {"__all__": {"context"}}})
+              response_model_exclude={"answer_parts": True,
+                                      "conclusion": {"__all__": {"context", "claim_type", "evidence_ids", "support_review"}},
+                                      "explanation": {"__all__": {"context", "claim_type", "evidence_ids", "support_review"}},
+                                      "citations": {"__all__": {"table_structure", "source_reference_id", "evidence_id", "quote_sha256",
+                                          "char_start", "char_end", "offset_basis", "verification", "semantic_status"}}})
     def ask(document_id: str, payload: Question):
         """问答接口：单文档、单轮、非流式，回答带逐事实引用。
 

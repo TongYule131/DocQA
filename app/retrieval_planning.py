@@ -145,7 +145,7 @@ def _plan_retrieval_v1(question: str, vector_result: dict, chunks: list, *, max_
     return result
 
 
-RETRIEVAL_STRATEGY_VERSION = "hybrid-context-v2"
+RETRIEVAL_STRATEGY_VERSION = "hybrid-context-v5"
 
 
 def _search_text(text: str) -> str:
@@ -209,6 +209,41 @@ def _heading_views(pool: list[dict]) -> tuple[list[str], int]:
         result.append(hint)
         derived+=bool(hint)
     return result,derived
+
+
+def _definition_and_section_anchors(question: str, pool: list[dict], texts: list[str],
+                                    headings: list[str], labels: list[bool], scores: dict) -> list[tuple[int, str]]:
+    """有限保护直接定义及用户明确指定章节的各小节正文，不读取答案或页码标签。"""
+    selected = []
+    named = _quoted_terms(question)
+    definition = re.compile(r"意指|是指|指的是|定义为|定义是|被定义|means\b|defined as", re.I)
+    if re.search(r"定义|含义|定位|概念|阐释|归入|一一对应|划分", question):
+        matches = [i for i, text in enumerate(texts) if not labels[i] and definition.search(text)
+                   and any(term in text for term in named)]
+        for i in sorted(matches, key=lambda i: (-scores.get(i, 0), i))[:3]:
+            selected.append((i, "named_direct_definition"))
+    if re.search(r"观点|主张|失效|是否支持|是否赞成|是否反对|是否符合|不符合|因此", question):
+        conclusions = [i for i, heading in enumerate(headings) if not labels[i]
+                       and re.search(r"结论|结语|总结|conclusions?", heading, re.I)]
+        if conclusions:
+            selected.append((max(conclusions, key=lambda i: (scores.get(i, 0), -i)), "author_position_conclusion"))
+    sections = set(re.findall(r"第\s*([1-9]\d*)\s*节", question))
+    if not sections:
+        return selected
+    groups = {}
+    for i, heading in enumerate(headings):
+        if labels[i]:
+            continue
+        tail = heading.split(" / ")[-1]
+        number = re.match(r"\s*([1-9]\d*)\.([1-9]\d*)(?:\D|$)", tail)
+        if number and number[1] in sections:
+            groups.setdefault(number[1] + "." + number[2], []).append(i)
+    for _, group in list(groups.items())[:8]:
+        # 定义词只是检索线索；代表段不等于该小节全部事实已覆盖。
+        representative = max(group, key=lambda i: (scores.get(i, 0)
+            + (max(scores.values(), default=1) * 0.3 if definition.search(texts[i]) else 0), -i))
+        selected.append((representative, "explicit_section_body"))
+    return selected
 
 
 def plan_retrieval(question: str, vector_result: dict, chunks: list, *, max_candidates: int = 40,
@@ -302,6 +337,10 @@ def plan_retrieval(question: str, vector_result: dict, chunks: list, *, max_cand
             if offset < len(group):
                 add(group[offset],"numbered_stage_context")
 
+    # 先装入可核对的定义和明确章节代表段，避免摘要/背景先占满字符预算。
+    for i, reason in _definition_and_section_anchors(question, pool, texts, headings, labels, global_lex):
+        add(i, reason)
+
     anchors = []
     for ranking in ranks:
         if ranking and ranking[0] not in anchors:
@@ -369,6 +408,32 @@ def plan_retrieval(question: str, vector_result: dict, chunks: list, *, max_cand
         add(best,"coverage_rerank")
     for i in vector_floor:
         add(i,"vector_candidate_floor")
+    from app.rag_evidence_slots import evidence_slots, SLOT_PLAN_VERSION
+    slots = evidence_slots(question, pool)
+    # 为每个实际槽位留出候选空间，不能只保留先前宽泛排名中的候选。
+    mandatory = list(dict.fromkeys(slot['candidate_ids'][0] for slot in slots))
+    preferred = list(dict.fromkeys(i for slot in slots for i in slot['candidate_ids'][:2]))
+    definitions = [pool[i]['chunk_id'] for i in selected if reasons.get(pool[i]['chunk_id']) == 'named_direct_definition']
+    section_support = [i for slot in slots if slot['kind'] in {'explicit_subsection','explicit_section'} for i in slot['candidate_ids']]
+    protected = list(dict.fromkeys(definitions + mandatory + preferred + section_support))[:max_candidates]
+    protected_indices = [indexes[i] for i in protected]
+    selected = (protected_indices + [i for i in selected if i not in protected_indices])[:max_candidates]
+    for identifier in protected:
+        reasons.setdefault(identifier, 'evidence_slot_candidate')
+    from app.rag_context import _candidate_from_hit
+    from app.rag_extract_context import continuation_pairs
+    pairs=continuation_pairs([_candidate_from_hit(hit) for hit in pool])
+    selected_ids={pool[i]['chunk_id'] for i in selected}
+    for pair in pairs:
+        left,right=pair['left_chunk_id'],pair['right_chunk_id']
+        if left in selected_ids or right in selected_ids:
+            for identifier in (left,right):
+                if identifier not in selected_ids and len(selected)<max_candidates:
+                    selected.append(indexes[identifier]);selected_ids.add(identifier)
+                    reasons[identifier]='sentence_continuation'
+    # 实际候选上限不足时显式保留空槽，不能把被截掉的候选列为可用证据。
+    actual_ids = {pool[i]['chunk_id'] for i in selected}
+    slots = [{**slot, 'candidate_ids': [i for i in slot['candidate_ids'] if i in actual_ids]} for slot in slots]
     result={k:v for k,v in vector_result.items() if k != "candidate_scores"}
     result.update(strategy=RETRIEVAL_STRATEGY_VERSION,results=[pool[i] for i in selected],
         evidence_order=[pool[i]["chunk_id"] for i in selected],planning={
@@ -379,6 +444,7 @@ def plan_retrieval(question: str, vector_result: dict, chunks: list, *, max_cand
             "selection_reasons":reasons,"numbered_stage_groups":len(stage_ranges),
             "derived_search_heading_count":derived_heading_count,
             "dynamic_candidates":True,"semantic_completeness_verified":False})
+    result['planning'].update(evidence_slots=slots, slot_plan_version=SLOT_PLAN_VERSION)
     return result
 
 

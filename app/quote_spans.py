@@ -29,10 +29,16 @@ def task_evidence_payload(entries: list[dict]) -> list[dict]:
 def quote_choices(text: str) -> list[str]:
     """所有候选均为最长600字符的真实连续子串，窗口重叠并覆盖全部输入。"""
     text = text.replace("\r\n", "\n")
+    return [text[start:end] for start, end in quote_choice_ranges(text)]
+
+
+def quote_choice_ranges(text: str) -> list[tuple[int, int]]:
+    """偏移基于只统一CRLF的解析文本，不能用find定位重复出现的引述。"""
+    text = text.replace("\r\n", "\n")
     if len(text) <= 600:
-        return [text] if text else []
+        return [(0, len(text))] if text else []
     starts = list(range(0, len(text) - 600, 400)) + [len(text) - 600]
-    return [text[start:start + 600] for start in dict.fromkeys(starts)]
+    return [(start, start + 600) for start in dict.fromkeys(starts)]
 
 
 def context_segments(text: str) -> list[str]:
@@ -61,6 +67,12 @@ def context_segments(text: str) -> list[str]:
 
 def task_segment_payload(entries: list[dict]) -> list[dict]:
     # 原窗口只表示一次；不另复制所有限定语，避免为选择器成倍增加输入预算。
-    return [{**entry, 'content': [{'span': index, 'segments': {
-        str(number): value for number, value in enumerate(context_segments(text), 1)}}
-        for index, text in enumerate(quote_choices(entry['content']), 1)]} for entry in entries]
+    from app.rag_extract_context import visible_segments,quote_units
+    return [{**{k:v for k,v in entry.items() if not k.startswith('_')},
+        **({'quote_units':({unit:[p[1:] if p[0]==entry['ref'] else p for p in parts]
+            for unit,parts in entry['_unit_choices'].items()} if '_unit_choices' in entry else
+            quote_units(entry['content'],entry.get('_read_ranges'),strict=entry.get('_strict_segments',False)))}
+           if '_read_ranges' in entry else {}), 'content': [
+        {'span': index, 'segments': segments} for index,segments,_ in visible_segments(
+            entry['content'],entry.get('_read_ranges'),strict=entry.get('_strict_segments',False))]}
+        for entry in entries]

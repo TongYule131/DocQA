@@ -8,7 +8,7 @@ import sys
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from app.config import Settings
-from app.quote_spans import task_evidence_payload
+from app.quote_spans import task_segment_payload as task_evidence_payload
 from app.rag_context import build_evidence
 from app.rag_evaluation import EvaluationError,digest,validate_case
 from app.rag_prompts import TASK_PROMPT_VERSION,build_task_system_prompt,build_task_user_prompt
