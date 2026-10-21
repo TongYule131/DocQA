@@ -142,14 +142,26 @@ def test_health_reports_actual_database_and_running_code(tmp_path):
 def test_page_assets_follow_running_code_and_do_not_reuse_old_cache(tmp_path):
     with TestClient(create_app(Settings(data_dir=tmp_path))) as client:
         fingerprint = client.get('/api/health').json()['runtime']['code_fingerprint']
-        page = client.get('/')
-        assert page.headers['cache-control'] == 'no-store'
-        for asset in ['app.js', 'style.css']:
-            path = f'/static/{asset}?v={fingerprint}'
-            assert f'"{path}"' in page.text
-            response = client.get(path)
-            assert response.status_code == 200
-            assert response.headers['cache-control'] == 'no-store'
+        # 新入口与管理/工具入口都绑定运行版本，不能有一个页面绕过缓存或版本保护。
+        for route, assets in [('/', ['conversation.js', 'conversation.css', 'workspace.css']),
+                              ('/app', ['conversation.js', 'conversation.css', 'workspace.css']),
+                              ('/single', ['workspace.js', 'workspace.css']),
+                              ('/knowledge', ['knowledge.js', 'product.css']),
+                              ('/login', ['login.js', 'product.css']),
+                              ('/admin', ['admin.js', 'admin.css', 'product.css']),
+                              ('/admin/users', ['admin.js', 'admin.css']),
+                              ('/admin/settings', ['admin.js', 'admin.css']),
+                              ('/admin/documents', ['app.js', 'style.css', 'admin-workspace.js']),
+                              ('/setup', ['setup.js', 'product.css']),
+                              ('/tools', ['app.js', 'style.css', 'admin-workspace.js'])]:
+            page = client.get(route)
+            assert page.headers['cache-control'] == 'no-store'
+            for asset in assets:
+                path = f'/static/{asset}?v={fingerprint}'
+                assert f'"{path}"' in page.text
+                response = client.get(path)
+                assert response.status_code == 200
+                assert response.headers['cache-control'] == 'no-store'
         assert 'renderLegacyChunks' in client.get(f'/static/app.js?v={fingerprint}').text
 
 

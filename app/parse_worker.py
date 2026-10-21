@@ -167,7 +167,7 @@ class ParseWorker:
             content = path.read_bytes()
             origin_hash = hashlib.sha256(content).hexdigest()
             fmt = document.format or self._format_from_name(document.filename)
-            if fmt == "txt":
+            if fmt in {"txt","md"}:
                 self._process_local_text(task, token, document, content, origin_hash)
                 return
             upstream_id = task.upstream_task_id
@@ -280,7 +280,13 @@ class ParseWorker:
         # TXT 不能永远作为一个全文块：长文件会因此无法进入分析分批。
         # 仅在原有空白行边界分段，不裁切句子、改写字符或丢弃尾部；长单段仍由预算受控拒绝。
         spans = _text_paragraph_spans(text)
-        nodes = [{"self_ref": f"#/texts/{index}", "label": "text", "text": text[start:end],
+        if document.format=='md':
+            # 标题独立为结构节点；代码围栏内部的 # 保持原文，不当标题。
+            from app.markdown_document import markdown_spans
+            spans = [(a,b) for a,b,_ in markdown_spans(text)]
+            labels = [label for _,_,label in markdown_spans(text)]
+        else:labels=['text']*len(spans)
+        nodes = [{"self_ref": f"#/texts/{index}", "label": labels[index], "text": text[start:end],
                   "parent": {"$ref": "#/body"},
                   "prov": [{"page_no": 1, "charspan": [start, end]}]}
                  for index, (start, end) in enumerate(spans)]
@@ -293,7 +299,7 @@ class ParseWorker:
             "pages": {"1": {"page_no": 1}},
         }
         self.repository.update_task_progress(task.id, token, stage="normalizing")
-        normalized = normalize_docling_result(document.id, payload, "txt",
+        normalized = normalize_docling_result(document.id, payload, document.format or "txt",
                                              parser_version="local-text-2")
         # 补充 TXT 的行范围来源，并说明其页码不是物理 PDF 页码。
         lines = text.splitlines()
@@ -347,6 +353,9 @@ class ParseWorker:
 
         self.repository.update_task_progress(task.id, token, stage="chunking")
         config = ChunkingConfig.from_settings(self.settings)
+        with self.repository.connect() as db:
+            base=db.execute('SELECT k.* FROM knowledge_bases k JOIN knowledge_base_documents d ON d.knowledge_base_id=k.id WHERE d.document_id=?',(document.id,)).fetchone()
+        if base:config=ChunkingConfig(max_chars=base['chunk_max_chars'],overlap_chars=base['chunk_overlap_chars'],table_rows_per_chunk=config.table_rows_per_chunk)
         try:
             chunks = chunk_document(normalized, config)
         except ValueError as exc:
@@ -494,7 +503,7 @@ class ParseWorker:
     @staticmethod
     def _format_from_name(filename: str) -> str:
         suffix = Path(filename).suffix.lower().lstrip(".")
-        return suffix if suffix in {"txt", "pdf", "docx", "xlsx"} else "pdf"
+        return suffix if suffix in {"txt", "md", "pdf", "docx", "xlsx"} else "pdf"
 
     def _handle_docling_error(self, task: ParseTask, token: str, exc: DoclingError) -> None:
         """把客户端错误映射为任务终态；不泄露上游原始响应。"""

@@ -19,7 +19,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # 当前代码期望的数据库结构版本；新增迁移时递增。
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 11
 
 # 旧 source_signature 算法标识：sha256(json(chunk.model_dump()))，保留用于验证旧索引。
 SIGNATURE_ALGO_LEGACY = "sha256-chunk-dump-v1"
@@ -850,8 +850,40 @@ def _apply_v5(db: sqlite3.Connection) -> None:
     _exec_script(db, _QUESTION_TABLES)
 
 
+def _apply_v6(db: sqlite3.Connection) -> None:
+    # 新表默认没有成员或发布指针；迁移旧库绝不隐式公开任何资料。
+    from app.product_schema import PRODUCT_TABLES
+    _exec_script(db, PRODUCT_TABLES)
+
+
+def _apply_v7(db: sqlite3.Connection) -> None:
+    from app.conversation_schema import CONVERSATION_TABLES
+    _exec_script(db, CONVERSATION_TABLES)
+
+
+def _apply_v8(db: sqlite3.Connection) -> None:
+    from app.attachment_schema import ATTACHMENT_TABLES
+    _exec_script(db, ATTACHMENT_TABLES)
+
+
+def _apply_v9(db: sqlite3.Connection) -> None:
+    from app.admin_schema import ADMIN_TABLES
+    _exec_script(db, ADMIN_TABLES)
+
+
 # 版本 -> 迁移函数；按顺序执行。
-MIGRATIONS = {1: _apply_v1, 2: _apply_v2, 3: _apply_v3, 4: _apply_v4, 5: _apply_v5}
+def _apply_v10(db: sqlite3.Connection) -> None:
+    from app.knowledge_schema import KNOWLEDGE_TABLES, seed_intents
+    _exec_script(db, KNOWLEDGE_TABLES)
+    seed_intents(db)
+
+
+def _apply_v11(db: sqlite3.Connection) -> None:
+    from app.profile import AVATAR_TABLE
+    _exec_script(db, AVATAR_TABLE)
+
+
+MIGRATIONS = {1: _apply_v1, 2: _apply_v2, 3: _apply_v3, 4: _apply_v4, 5: _apply_v5, 6: _apply_v6, 7: _apply_v7, 8: _apply_v8, 9: _apply_v9, 10: _apply_v10, 11: _apply_v11}
 
 
 def _index_shapes(db: sqlite3.Connection) -> dict:

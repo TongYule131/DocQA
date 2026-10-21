@@ -175,7 +175,22 @@ for ($attempt = 0; $attempt -lt 30; $attempt++) {
         if ($response.StatusCode -eq 200 -and $health.runtime.data_dir -eq $resolvedDataDir -and
             $health.runtime.code_fingerprint -eq $runtimeInfo.code_fingerprint -and
             $health.runtime.schema_version -eq $runtimeInfo.expected_schema_version) { $ready = $true; break }
-    } catch { Start-Sleep -Milliseconds 300 }
+    } catch {
+        # 团队模式保护 health 的运行详情；匿名认证状态只判断 HTTP 就绪，身份和版本仍核对本机角色记录。
+        if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 401) {
+            try {
+                $authResponse = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/auth/me" -TimeoutSec 1 -UseBasicParsing
+                $authState = [System.Text.Encoding]::UTF8.GetString($authResponse.RawContentStream.ToArray()) | ConvertFrom-Json
+                $webRecord = Get-Content -LiteralPath (Join-Path $logDir 'web.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+                $webReadiness = Get-RoleReadiness $webRecord (Get-LocalRuntimeInfo $projectRoot $resolvedDataDir)
+                if ($authResponse.StatusCode -eq 200 -and $authState.team_mode -eq $true -and $webReadiness.ready) {
+                    $ready = $true
+                    break
+                }
+            } catch { }
+        }
+        Start-Sleep -Milliseconds 300
+    }
 }
 if (-not $ready) { throw "Web 未成功就绪；停止启动后续 worker，请查看迁移或启动日志。" }
 if (-not $NoParseWorker) {

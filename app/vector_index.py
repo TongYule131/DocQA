@@ -166,7 +166,7 @@ class DocumentIndex:
     # ------------------------------------------------------------------
     # 构建
     # ------------------------------------------------------------------
-    def build(self, document_id: str, rebuild: bool = False, *, version_id: str | None = None) -> dict:
+    def build(self, document_id: str, rebuild: bool = False, *, version_id: str | None = None, publication_check=None) -> dict:
         """为指定解析版本建立索引；默认使用当前活动解析版本。
 
         流程：固定目标版本 → 登记尝试 → 候选向量 → 发布前核对版本 → 原子切换。
@@ -233,7 +233,7 @@ class DocumentIndex:
                          for chunk, vector in zip(chunks, vectors)],
                 chunking_algo=chunks[0].chunk_type or "structured",
                 # 显式历史版本与开始时的预览版本可以不同；只拒绝构建期间的切换。
-                expected_version_id=document.active_parse_version_id)
+                expected_version_id=document.active_parse_version_id, publication_check=publication_check)
             if not published:
                 raise EmbeddingError(
                     409, "构建期间该文档的活动解析版本已变化，本次索引构建已过期；"

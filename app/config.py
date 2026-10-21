@@ -14,6 +14,11 @@ class Settings:
     data_dir: Path = field(default_factory=lambda: Path(os.getenv("DOCQA_DATA_DIR", "data")).resolve())
     # 已有旧库升级必须明确允许；首次空目录建库不需要这个开关。
     allow_database_upgrade: bool = False
+    # 团队模式必须显式开启；旧的本地单用户数据不会自动成为共享资料。
+    team_mode: bool = False
+    session_cookie_secure: bool = True
+    attachment_ttl_hours: int = 24
+    attachment_max_active: int = 5
     # 单位为 MB，上传接口校验时转换为字节数。
     max_upload_mb: int = field(default_factory=lambda: int(os.getenv("DOCQA_MAX_UPLOAD_MB", "20")))
     # Docling 解析服务地址只来自后端配置，前端不能覆盖；默认本机独立服务。
@@ -118,6 +123,10 @@ class Settings:
         return cls(
             data_dir=Path(value("DOCQA_DATA_DIR", "data")).resolve(),
             allow_database_upgrade=value("DOCQA_ALLOW_DATABASE_UPGRADE", "0") == "1",
+            team_mode=value("DOCQA_TEAM_MODE", "0") == "1",
+            session_cookie_secure=value("DOCQA_SESSION_COOKIE_SECURE", "1") == "1",
+            attachment_ttl_hours=int(value("DOCQA_ATTACHMENT_TTL_HOURS", "24")),
+            attachment_max_active=int(value("DOCQA_ATTACHMENT_MAX_ACTIVE", "5")),
             max_upload_mb=int(value("DOCQA_MAX_UPLOAD_MB", "20")),
             docling_base_url=value("DOCQA_DOCLING_BASE_URL", "http://127.0.0.1:5001"),
             docling_connect_timeout_seconds=float(value("DOCQA_DOCLING_CONNECT_TIMEOUT_SECONDS", "10")),
@@ -170,6 +179,8 @@ class Settings:
         )
 
     def __post_init__(self):
+        if not 1 <= self.attachment_ttl_hours <= 720 or not 1 <= self.attachment_max_active <= 50:
+            raise ValueError('临时附件保留期须为1～720小时，同时可用数量须为1～50')
         # 启动前拒绝无效限制，避免所有上传请求都因配置问题失败。
         if self.max_upload_mb <= 0:
             raise ValueError("DOCQA_MAX_UPLOAD_MB 必须大于 0")

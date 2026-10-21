@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DocQA · 会话助手</title><link rel="stylesheet" href="/static/workspace.css"><link rel="stylesheet" href="/static/conversation.css">
+  <script defer src="/static/auth-bridge.js"></script><script type="module" src="/static/conversation.js"></script><link rel="stylesheet" href="/static/ui-refinements.css"><script type="module" src="/static/chat-shell.js"></script><link rel="stylesheet" href="/static/chat-layout.css"></head>
+<body>
+<div class="app-shell">
+  <aside id="sidebar" class="sidebar" aria-label="工作台导航">
+    <a class="brand" href="/app"><span class="brand-mark">D</span>DocQA</a>
+    <button id="new-conversation" type="button" class="primary new-question">＋ 新建会话</button>
+    <label for="document-picker" class="section-label">新会话的资料范围</label>
+    <select id="document-picker"><option value="">正在读取资料…</option></select><p id="document-hint" class="small-text"></p>
+    <div class="history-title"><h2>我的会话</h2><button id="refresh" type="button" class="icon-button" aria-label="刷新会话">↻</button></div>
+    <label for="history-search" class="sr-only">搜索会话</label><input id="history-search" class="history-search" type="search" placeholder="搜索会话…">
+    <details class="history-options"><summary aria-label="会话筛选">会话筛选</summary><label class="small-text"><input id="archived-list" type="checkbox"> 查看已归档会话</label></details>
+    <div id="history-list" class="history-list"></div>
+    <div class="sidebar-footer"><details class="workspace-menu"><summary><span class="account-avatar">D</span><span class="account-name">工作空间</span></summary><div class="workspace-menu-items"><a href="/app/knowledge">知识库对话</a><a href="/single">独立问答记录</a><a href="/knowledge" data-admin-only>资料管理</a><a href="/admin" data-admin-only>管理后台</a><button type="button" class="text-button" data-logout hidden>退出登录</button></div></details></div>
+  </aside>
+  <main class="main-column">
+    <header class="workspace-header"><button id="menu-toggle" type="button" class="icon-button menu-toggle" aria-label="展开工作台导航" aria-expanded="false">☰</button><h1 id="workspace-title">新会话</h1><button id="memory-toggle" type="button" class="secondary" disabled>会话设置</button><button id="archive" type="button" class="text-button" disabled>归档</button></header>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <section id="attachment-panel" class="attachment-panel" hidden aria-label="临时资料准备"><strong id="attachment-name"></strong><p id="attachment-state" class="small-text"></p><div class="memory-buttons"><button id="attachment-parse" class="secondary" type="button">解析资料</button><button id="attachment-index" class="secondary" type="button">建立检索索引（可能计费）</button><button id="attachment-remove" class="text-button" type="button">移除并停止使用</button></div></section>
+    <section id="memory-panel" class="memory-panel" hidden aria-label="会话记忆设置">
+      <form id="memory-form"><div class="memory-header"><h2>当前会话记忆</h2><label><input id="memory-enabled" type="checkbox"> 开启记忆</label><button id="memory-close" class="text-button" type="button">关闭</button></div>
+        <p class="small-text">仅使用最近3轮已完成的用户提问及你保存的条件。旧回答不作为事实证据；关闭后不发送历史，清除后不再带入旧轮次。</p>
+        <label for="memory-notes">本会话的条件与偏好</label><textarea id="memory-notes" rows="2" maxlength="800" placeholder="例如：优先比较研发与发行两个方面，使用中文回答。"></textarea>
+        <div class="memory-buttons"><button class="secondary" id="memory-save" type="submit">保存设置</button><button id="memory-clear" class="text-button" type="button">清除会话记忆</button></div>
+        <p class="small-text" id="remembered-questions"></p>
+      </form>
+      <form id="rename-form"><label for="conversation-title">会话名称</label><div class="rename-row"><input id="conversation-title" maxlength="80" required><button class="secondary" type="submit">重命名</button></div></form>
+    </section>
+    <div class="main-body"><div class="chat-column"><div id="chat-scroll" class="chat-scroll">
+      <section id="welcome" class="welcome"><div class="brand-mark">D</div><h2>围绕资料，继续讨论。</h2><p>选择一份已准备好的资料，发送后建立会话。<br>会话与各轮回答会保存，事实仍从原文取证。</p></section>
+      <div id="turn-list" class="conversation"></div><button id="return-latest" class="return-latest" type="button" hidden>回到最新 ↓</button>
+    </div>
+    <div class="composer-area"><form id="question-form" class="composer"><div class="composer-context"><span id="scope-label">尚未选择资料</span><span id="input-count">0 / 4000</span></div>
+      <label class="sr-only" for="question-input">输入问题或继续追问</label><textarea id="question-input" rows="3" maxlength="4000" placeholder="输入问题，或继续当前会话…" disabled></textarea>
+      <div class="composer-actions"><button id="open-attachment" type="button" class="composer-add" aria-label="上传临时资料并新建会话" title="上传临时资料（新建会话）">＋</button><button id="memory-status" type="button" class="memory-switch" role="switch" aria-checked="true" aria-label="会话记忆"><span class="switch-track" aria-hidden="true"></span><span class="switch-label">会话记忆</span></button><span class="small-text">Enter 发送 · Shift+Enter 换行</span><button id="confirm" class="secondary" type="button" hidden>确认原提交（可能计费）</button><button id="send" type="submit" class="send-button" aria-label="发送问题" disabled>↑</button></div>
+    </form></div></div>
+    <aside id="source-drawer" class="source-drawer" aria-label="原文来源" hidden><div class="drawer-header"><h2>原文来源</h2><button id="close-sources" type="button" class="icon-button" aria-label="关闭来源">×</button></div><div id="source-content" class="source-content"></div></aside></div>
+  </main>
+</div>
+<dialog id="attachment-dialog" class="attachment-dialog"><div class="dialog-title"><h2>上传临时资料</h2><button id="close-attachment" type="button" class="icon-button" aria-label="关闭临时上传">×</button></div>    <form id="attachment-upload" class="temporary-upload"><label for="attachment-file">或上传临时资料，建立专属会话</label><input id="attachment-file" type="file" accept=".pdf,.txt,.docx,.xlsx" required><button class="secondary" id="attachment-submit" type="submit">上传临时资料</button><p class="small-text">仅本会话使用，不加入知识库。具体到期时间上传后显示。</p></form>
+</dialog></body></html>

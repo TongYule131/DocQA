@@ -1,0 +1,74 @@
+/* 同一输入基线和工具行；SVG的几何中心与点击区域中心一致。 */
+.composer{padding:16px 18px 14px}
+.composer-context{margin:0 0 10px;line-height:20px;min-height:20px;align-items:center}
+.composer textarea,.kb-composer textarea{padding:0;margin:0;vertical-align:top;line-height:1.7}
+.composer-actions{min-height:40px;gap:10px;padding-top:10px;flex-wrap:nowrap}
+.composer-actions>.small-text{margin:0 4px 0 0;line-height:20px;white-space:nowrap}
+.composer-add,.send-button,#kb-send{display:grid;place-items:center;padding:0;border:0;line-height:1;box-sizing:border-box;flex:none;margin:0}
+.composer-add{width:36px;height:36px;border-radius:10px}
+.composer-add .ui-icon{width:22px;height:22px;display:block}
+.send-button,#kb-send{width:38px;height:38px;border-radius:12px;background:#2563eb;color:white}
+.send-button .ui-icon,#kb-send .ui-icon{width:22px;height:22px;display:block;stroke-width:1.9}
+.composer-actions .memory-switch{height:36px;padding:0 4px!important;line-height:20px;gap:8px;align-items:center}
+.composer-actions .switch-label{line-height:20px}
+.composer-area{padding-bottom:20px}
+.kb-composer{padding:16px 18px 14px}
+.kb-composer-footer{padding-top:10px;min-height:48px}
+.kb-compose-area{padding:12px 24px 20px}
+
+/* 工作台收起后保留品牌、切换、新会话、历史和个人菜单。 */
+.sidebar,.kb-chat-sidebar{position:relative}
+.sidebar>.brand,.kb-chat-sidebar>.brand{padding-right:32px;gap:10px}
+.chat-collapse{position:absolute;right:15px;top:27px;width:32px;height:34px;display:grid;place-items:center;padding:0;border:0;background:transparent;border-radius:8px;color:#69809f;line-height:1}
+.chat-collapse:hover,.rail-history:hover{background:#e5edfb;color:#245bb7}
+.sidebar .new-question,.kb-chat-sidebar>#new-chat{display:flex;align-items:center;justify-content:flex-start;gap:9px;min-height:42px;padding:11px 14px;line-height:20px}
+.sidebar .new-question .ui-icon,.kb-chat-sidebar>#new-chat .ui-icon{width:18px;height:18px}
+.rail-history{display:none}
+.history-title .icon-button{display:grid;place-items:center;width:32px;height:32px;padding:0;line-height:1}
+.history-title .icon-button .ui-icon{width:18px;height:18px}
+.workspace-menu>summary{min-height:48px;padding:7px 8px;gap:11px}
+.account-avatar{width:34px;height:34px;border:0;background:#3167d6;color:#fff;font-size:14px;font-weight:600;line-height:1;box-shadow:0 1px 3px #1b438522;overflow:hidden}
+.account-avatar img{width:100%;height:100%;object-fit:cover;display:block}
+.account-name{color:#425a7c;font-size:13px;margin:0}
+.workspace-menu-items{width:220px;max-width:calc(100vw - 24px)}
+.chat-nav-collapsed .sidebar,.chat-nav-collapsed .kb-chat-sidebar{width:72px;padding:22px 12px 14px;align-items:center;gap:0}
+.chat-nav-collapsed .kb-chat-shell{grid-template-columns:72px minmax(0,1fr)}
+.chat-nav-collapsed .sidebar>:not(.brand):not(.chat-collapse):not(.new-question):not(.rail-history):not(.sidebar-footer),
+.chat-nav-collapsed .kb-chat-sidebar>:not(.brand):not(.chat-collapse):not(#new-chat):not(.rail-history):not(.sidebar-bottom){display:none}
+.chat-nav-collapsed .sidebar>.brand,.chat-nav-collapsed .kb-chat-sidebar>.brand{padding:0;justify-content:center;margin:0 0 16px}
+.chat-nav-collapsed .brand-label,.chat-nav-collapsed .nav-text,.chat-nav-collapsed .account-name{display:none}
+.chat-nav-collapsed .chat-collapse{position:static;flex:none;margin:0 0 16px;width:44px;height:40px}
+.chat-nav-collapsed .sidebar .new-question,.chat-nav-collapsed .kb-chat-sidebar>#new-chat{width:44px;height:44px;min-height:44px;justify-content:center;padding:0;margin:0 0 8px;border-radius:12px}
+.chat-nav-collapsed .rail-history{display:grid;place-items:center;width:44px;height:44px;padding:0;border:0;background:transparent;color:#627a9c;border-radius:10px}
+.chat-nav-collapsed .sidebar-footer,.chat-nav-collapsed .sidebar-bottom{margin-top:auto;padding:0;width:48px}
+.chat-nav-collapsed .workspace-menu>summary{justify-content:center;padding:7px}
+.chat-nav-collapsed .workspace-menu-items{left:0;bottom:calc(100% + 8px);top:auto;right:auto}
+.kb-chat-sidebar>.brand .brand-label{background:transparent;border:0;color:inherit;font:inherit;width:auto;height:auto}
+
+.profile-dialog{width:min(420px,calc(100vw - 32px));padding:22px 26px;border:1px solid #dce6f5;border-radius:18px;color:#344a69;box-shadow:0 20px 90px #17355526;font-size:13px}
+.profile-dialog::backdrop{background:#1a325244}
+.profile-heading{display:flex;align-items:center;justify-content:space-between;margin-bottom:22px}
+.profile-heading h2{font-size:18px;margin:0;font-weight:600}
+.profile-close{width:32px;height:32px;padding:0;border:0;background:transparent;border-radius:8px;color:#7185a1;font-size:24px;line-height:1;display:grid;place-items:center}
+.profile-close:hover{background:#f0f5fc}
+.profile-preview{width:84px;height:84px;font-size:30px;margin:0 auto}
+.profile-name{text-align:center;color:#405778;margin:12px 0 20px}
+.profile-hint{font-size:12px;line-height:1.8;color:#788ba6;margin:0 0 12px}
+.profile-dialog input[type=file]{width:100%;min-width:0;font-size:12px;color:#566e90}
+.profile-status{font-size:12px;line-height:1.8;min-height:22px;color:#466dad;margin:14px 0}
+.profile-actions{display:flex;justify-content:space-between;gap:12px;align-items:center}
+.profile-actions button{font-size:12px;padding:10px 13px;line-height:20px;border-radius:9px}
+@media(max-width:800px){
+ .composer{padding:12px 14px}.composer-actions{gap:5px}.composer-actions>.small-text{display:none}
+ .composer-area{padding-bottom:12px}.kb-compose-area{padding:10px 12px 12px}
+ .chat-nav-collapsed .sidebar{display:flex;width:64px;position:relative;inset:auto;box-shadow:none;padding:18px 8px 12px;flex-wrap:nowrap}
+ .chat-nav-collapsed .menu-toggle{display:none}
+ .kb-chat-shell{display:grid;grid-template-columns:64px minmax(0,1fr);height:100dvh}
+ .kb-chat-sidebar{position:fixed;top:0;left:0;z-index:15;width:240px;height:100dvh;padding:22px 14px 14px;display:flex;flex-direction:column;align-items:stretch;flex-wrap:nowrap;gap:16px;border-right:1px solid #e3eaf5;background:#f5f8ff;box-shadow:10px 0 30px #20385c16}
+ .kb-chat-main{grid-column:2;height:100dvh}
+ .kb-chat-sidebar>select{order:initial;width:100%}.kb-chat-sidebar>.kb-history{order:initial;flex:1;width:100%;max-height:none}
+ .kb-chat-sidebar>.sidebar-bottom{margin-top:auto}.kb-chat-sidebar>.brand{font-size:20px;padding:0 32px 8px 0;margin:0}
+ .kb-chat-sidebar .workspace-menu-items{top:auto;bottom:calc(100% + 8px);right:auto;left:0}
+ .chat-nav-collapsed .kb-chat-shell{grid-template-columns:64px minmax(0,1fr)}
+ .chat-nav-collapsed .kb-chat-sidebar{position:sticky;width:64px;box-shadow:none;padding:18px 8px 12px}
+}

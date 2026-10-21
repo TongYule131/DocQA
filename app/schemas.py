@@ -10,7 +10,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # 支持的输入格式：TXT 在本地解析，其余交给 Docling。
-DocumentFormat = Literal["txt", "pdf", "docx", "xlsx"]
+DocumentFormat = Literal["txt", "md", "pdf", "docx", "xlsx"]
 
 # 任务状态机：queued → running → succeeded / failed；提交结果不确定时进入 needs_attention。
 ParseTaskStatus = Literal["queued", "running", "succeeded", "failed", "needs_attention"]
@@ -40,7 +40,7 @@ class SourceLocation(BaseModel):
 
     不把 DOCX/XLSX 的来源强制转换成 PDF 页码；无真实页码时 page 为 None。
     """
-    format: Literal["pdf", "docx", "xlsx", "txt"]
+    format: Literal["pdf", "docx", "xlsx", "txt", "md"]
     node_ref: str | None = None
     # PDF：一基页号、原始 bbox、坐标原点与单位；空白页继续占原页号。
     page: int | None = None

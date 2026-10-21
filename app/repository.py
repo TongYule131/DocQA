@@ -13,6 +13,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from app import migrations
+from app.attachment_schema import attachment_available
 from app.schemas import (
     AnalysisCallEntry,
     AnalysisJob,
@@ -284,6 +285,8 @@ class Repository:
         with self.connect() as db:
             # 检查与写入处于同一写事务，避免两个 HTTP 请求同时穿过预检查。
             db.execute("BEGIN IMMEDIATE")
+            if not attachment_available(db, task.document_id):
+                raise TaskConflict('临时资料已到期或移除')
             if task.idempotency_key:
                 old = self._parse_task_by_key(db, task.document_id, task.idempotency_key)
                 if old:
@@ -409,6 +412,9 @@ class Repository:
                     " ORDER BY created_at LIMIT 1").fetchone()
             if row is None:
                 return None
+            if not attachment_available(db, row['document_id']):
+                db.execute("UPDATE parse_tasks SET status='cancelled',cancel_requested=1 WHERE id=?", (row['id'],))
+                return None
             updated = db.execute(
                 """UPDATE parse_tasks SET status='running', lease_token=?, lease_expires_at=?,
                    heartbeat_at=?, started_at=COALESCE(started_at,?), updated_at=?,
@@ -456,9 +462,10 @@ class Repository:
             return result.rowcount == 1
 
     def task_token_valid(self, db: sqlite3.Connection, task_id: str, token: str) -> bool:
-        row = db.execute("SELECT lease_token, status, lease_expires_at FROM parse_tasks WHERE id=?", (task_id,)).fetchone()
+        row = db.execute("SELECT document_id, lease_token, status, lease_expires_at FROM parse_tasks WHERE id=?", (task_id,)).fetchone()
         return bool(row and row["status"] == "running" and row["lease_token"] == token
-                    and row["lease_expires_at"] and row["lease_expires_at"] > now_iso())
+                    and row["lease_expires_at"] and row["lease_expires_at"] > now_iso()
+                    and attachment_available(db, row['document_id']))
 
     def finish_task(self, task_id: str, token: str, *, status: str, stage: str,
                     error_code: str | None = None, error_message: str | None = None) -> bool:
@@ -900,7 +907,7 @@ class Repository:
                        version_id: str, model_signature: str, source_signature: str,
                        source_signature_algo: str, dimension: int, chunk_count: int,
                        vectors: list[tuple[str, str, int]], chunking_algo: str,
-                       expected_version_id: str) -> bool:
+                       expected_version_id: str, publication_check=None) -> bool:
         """原子发布候选索引：核对目标解析版本未变化后，写入向量并切换活动索引。
 
         返回 False 表示目标解析版本已变化（例如建 B 索引期间 C 成为活动版本），
@@ -909,6 +916,8 @@ class Repository:
         now = now_iso()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            if publication_check is not None and not publication_check(db):
+                return False
             current = db.execute(
                 "SELECT active_parse_version_id FROM documents WHERE id=?", (document_id,)).fetchone()
             if current is None or current["active_parse_version_id"] != expected_version_id:
@@ -920,7 +929,8 @@ class Repository:
                 return False
             candidate = db.execute("SELECT status, lease_expires_at FROM embedding_indexes WHERE id=?", (index_id,)).fetchone()
             if (candidate is None or candidate['status'] != 'indexing'
-                    or not candidate['lease_expires_at'] or candidate['lease_expires_at'] <= now):
+                    or not candidate['lease_expires_at'] or candidate['lease_expires_at'] <= now
+                    or not attachment_available(db, document_id)):
                 return False
             db.execute("UPDATE embedding_indexes SET is_active=0 WHERE document_id=?", (document_id,))
             db.execute("DELETE FROM embedding_vectors_v2 WHERE index_id=?", (index_id,))
@@ -963,6 +973,8 @@ class Repository:
         """独立候选索引；唯一约束以事务方式阻止同文档并发构建。"""
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            if not attachment_available(db, document_id):
+                raise TaskConflict('临时资料已到期或移除')
             now = now_iso()
             # 崩溃后的候选可在租约过期后重新建立，永远不失效化已发布索引。
             db.execute("UPDATE index_attempts SET status='failed', error_code='lease_expired', finished_at=? "
@@ -984,6 +996,9 @@ class Repository:
     def renew_index_lease(self, index_id: str) -> bool:
         """只有未过期的候选可以续租，过期执行者不能重新发布。"""
         with self.connect() as db:
+            row = db.execute('SELECT document_id FROM embedding_indexes WHERE id=?', (index_id,)).fetchone()
+            if not row or not attachment_available(db, row['document_id']):
+                return False
             return db.execute("UPDATE embedding_indexes SET lease_expires_at=? WHERE id=? "
                               "AND status='indexing' AND lease_expires_at>?",
                               (lease_expiry_iso(300),

@@ -12,6 +12,7 @@ from uuid import uuid4
 from app.rag_context import RagError
 from app.repository import Repository, TaskConflict, lease_expiry_iso, now_iso
 from app.schemas import RagAnswer
+from app.attachment_schema import attachment_available
 
 
 def _dump(value) -> str:
@@ -91,11 +92,16 @@ class QuestionJobStore:
         return dict(row) if row else None
 
     def create(self, *, document_id: str, question: str, key: str | None, fingerprint: str,
-               snapshot: dict, max_requests: int, request_id: str) -> tuple[str, bool]:
+               snapshot: dict, max_requests: int, request_id: str,
+               owner_user_id: str | None = None, knowledge_snapshot_id: str | None = None,
+               conversation: dict | None = None) -> tuple[str, bool]:
         """幂等键比较与插入同事务，两个并发 POST 不会产生第二个任务。"""
         stamp, job_id = now_iso(), f"qjob-{uuid4().hex}"
         with self.repository.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            attachment = db.execute('SELECT * FROM conversation_attachments WHERE document_id=?', (document_id,)).fetchone()
+            if attachment and (not conversation or not attachment_available(db, document_id, conversation_id=conversation['id'])):
+                raise TaskConflict('临时资料已到期、移除或不属于本会话')
             if key:
                 existing = db.execute("SELECT * FROM question_request_keys WHERE document_id=? AND idempotency_key=?",
                                       (document_id, key)).fetchone()
@@ -103,12 +109,39 @@ class QuestionJobStore:
                     if existing["operation"] != "submit" or existing["request_fingerprint"] != fingerprint:
                         raise TaskConflict("该幂等键已用于不同的问答请求，请更换幂等键")
                     return existing["job_id"], True
+            if conversation:
+                current = db.execute('SELECT * FROM conversations WHERE id=? AND owner_user_id IS ? AND deleted_at IS NULL',
+                                     (conversation['id'], owner_user_id)).fetchone()
+                if not current or current['archived'] or current['revision'] != conversation['revision']:
+                    raise TaskConflict('会话已变更，请刷新后提交')
+                if current['document_id'] != document_id:
+                    raise TaskConflict('会话资料范围不一致')
+                if db.execute("SELECT 1 FROM question_jobs WHERE conversation_id=? AND status IN ('queued','running')", (conversation['id'],)).fetchone():
+                    raise TaskConflict('当前会话已有任务，请等待完成或停止后再提问')
+            if owner_user_id:
+                owner = db.execute('SELECT * FROM product_users WHERE id=? AND active=1', (owner_user_id,)).fetchone()
+                allowed = owner and ((attachment and attachment['owner_user_id'] == owner_user_id) or owner['role'] == 'admin' or db.execute('SELECT 1 FROM knowledge_base_snapshots s '
+                    'JOIN knowledge_base_members m ON m.knowledge_base_id=s.knowledge_base_id '
+                    'JOIN knowledge_bases k ON k.id=s.knowledge_base_id '
+                    'JOIN knowledge_base_snapshot_documents d ON d.snapshot_id=k.active_snapshot_id '
+                    'WHERE s.id=? AND m.user_id=? AND d.document_id=?', (knowledge_snapshot_id, owner_user_id, document_id)).fetchone())
+                if not allowed:
+                    raise TaskConflict('账号或资料权限已变更，请刷新后操作')
             db.execute("""INSERT INTO question_jobs
                 (id,document_id,parse_version_id,index_id,question,idempotency_key,request_id,
-                 request_fingerprint,snapshot_json,max_requests,created_at,updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 request_fingerprint,snapshot_json,max_requests,created_at,updated_at,owner_user_id,knowledge_snapshot_id,conversation_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (job_id, document_id, snapshot["parse_version_id"], snapshot["index_id"], question,
-                 key, request_id, fingerprint, _dump(snapshot), max_requests, stamp, stamp))
+                 key, request_id, fingerprint, _dump(snapshot), max_requests, stamp, stamp, owner_user_id, knowledge_snapshot_id,
+                 conversation['id'] if conversation else None))
+            if conversation:
+                number = db.execute('SELECT COALESCE(MAX(turn_no),0)+1 FROM conversation_turns WHERE conversation_id=?', (conversation['id'],)).fetchone()[0]
+                if number > 100:
+                    raise TaskConflict('当前会话已达100轮，请新建会话')
+                db.execute('INSERT INTO conversation_turns VALUES (?,?,?,?,?,?,?)',
+                           (conversation['id'], number, conversation['request_key'], question, job_id, conversation['memory_epoch'], stamp))
+                db.execute('UPDATE conversations SET revision=revision+1,updated_at=?,title=CASE WHEN title=? THEN ? ELSE title END WHERE id=?',
+                           (stamp, '新会话', question[:50], conversation['id']))
             if key:
                 db.execute("INSERT INTO question_request_keys VALUES (?,?,?,?,?,?)",
                            (document_id, key, job_id, "submit", fingerprint, stamp))
@@ -118,10 +151,34 @@ class QuestionJobStore:
 
     @staticmethod
     def _valid(db, job_id: str, token: str) -> bool:
-        row = db.execute("SELECT status,lease_token,lease_expires_at FROM question_jobs WHERE id=?",
+        row = db.execute("SELECT * FROM question_jobs WHERE id=?",
                          (job_id,)).fetchone()
-        return bool(row and token and row["status"] == "running" and row["lease_token"] == token
+        valid = bool(row and token and row["status"] == "running" and row["lease_token"] == token
                     and row["lease_expires_at"] and row["lease_expires_at"] > now_iso())
+        if valid:
+            valid = attachment_available(db, row['document_id'], conversation_id=row['conversation_id'])
+        if valid and row['conversation_id']:
+            conversation = db.execute('SELECT * FROM conversations WHERE id=?', (row['conversation_id'],)).fetchone()
+            frozen = json.loads(row['snapshot_json'])
+            valid = bool(conversation and not conversation['deleted_at'] and not conversation['archived']
+                         and conversation['memory_epoch'] == frozen.get('conversation_memory_epoch'))
+        if not valid or not row['owner_user_id']:
+            return valid
+        user = db.execute('SELECT role,active FROM product_users WHERE id=?', (row['owner_user_id'],)).fetchone()
+        if not user or not user['active']:
+            return False
+        attachment = db.execute('SELECT owner_user_id FROM conversation_attachments WHERE document_id=?', (row['document_id'],)).fetchone()
+        if attachment:
+            return attachment['owner_user_id'] == row['owner_user_id']
+        if user['role'] == 'admin':
+            return True
+        # 每个外调预扣与最终发布都重查成员关系；排队之后撤权不能继续读取或发起下一次请求。
+        return bool(db.execute('SELECT 1 FROM knowledge_base_snapshots s '
+            'JOIN knowledge_base_members m ON m.knowledge_base_id=s.knowledge_base_id '
+            'JOIN knowledge_bases k ON k.id=s.knowledge_base_id '
+            'JOIN knowledge_base_snapshot_documents d ON d.snapshot_id=k.active_snapshot_id '
+            'WHERE s.id=? AND m.user_id=? AND d.document_id=?',
+            (row['knowledge_snapshot_id'], row['owner_user_id'], row['document_id'])).fetchone())
 
     def lease_valid(self, job_id: str, token: str) -> bool:
         with self.repository.connect() as db:
@@ -440,13 +497,17 @@ class QuestionJobService:
         self.settings, self.repository, self.rag = settings, repository, rag
         self.store = QuestionJobStore(repository)
 
-    def submit(self, document_id: str, payload, *, request_id: str | None = None) -> tuple[dict, int]:
+    def submit(self, document_id: str, payload, *, request_id: str | None = None,
+               owner_user_id: str | None = None, knowledge_snapshot_id: str | None = None,
+               conversation: dict | None = None) -> tuple[dict, int]:
         question = _request_value(payload, "question", "")
         if not isinstance(question, str) or not question.strip() or len(question) > 4000:
             raise RagError(422, "invalid_question", "问题不能为空且不能超过4000字符")
         key = (_request_value(payload, "idempotency_key") or "").strip() or None
         if key and len(key) > 200:
             raise RagError(422, "invalid_idempotency_key", "幂等键不能超过200字符")
+        if key and owner_user_id:
+            key = f'user/{owner_user_id}/{key}'
         fingerprint = _fingerprint({"question": question})
         # 重发只读取旧任务，不受此时索引切换或模型配置变化影响。
         if key:
@@ -456,7 +517,22 @@ class QuestionJobService:
                     raise TaskConflict("该幂等键已用于不同的问答请求，请更换幂等键")
                 job = self.get_job(existing["job_id"])
                 return {"job": job, "reused": True}, 200 if job["status"] not in {"queued", "running"} else 202
-        snapshot = self.rag.capture_snapshot(document_id, question)
+        if knowledge_snapshot_id:
+            with self.repository.connect() as db:
+                published = db.execute('SELECT * FROM knowledge_base_snapshot_documents WHERE snapshot_id=? AND document_id=?',
+                                       (knowledge_snapshot_id, document_id)).fetchone()
+            if not published:
+                raise RagError(409, 'published_version_unavailable', '知识库发布版本不可用，请联系管理员')
+            snapshot = self.rag.capture_snapshot(document_id, question, published=dict(published),
+                **({'conversation_context': conversation['memory']} if conversation and conversation['memory'] else {}))
+        else:
+            snapshot = self.rag.capture_snapshot(document_id, question,
+                **({'conversation_context': conversation['memory']} if conversation and conversation['memory'] else {}))
+        if conversation:
+            from app.conversation_memory import MEMORY_SIGNATURE
+            snapshot['conversation_context'] = conversation['memory']
+            snapshot['conversation_memory_epoch'] = conversation['memory_epoch']
+            snapshot['conversation_policy_signature'] = MEMORY_SIGNATURE
         if (snapshot.get("document_id") != document_id or not snapshot.get("index_id")
                 or not snapshot.get("parse_version_id")):
             raise RagError(409, "invalid_question_snapshot", "问答输入快照无效，请重新建立有效索引")
@@ -465,7 +541,8 @@ class QuestionJobService:
             raise RagError(503, "invalid_question_budget", "问答请求预算配置无效")
         job_id, reused = self.store.create(document_id=document_id, question=question, key=key,
             fingerprint=fingerprint, snapshot=snapshot, max_requests=maximum,
-            request_id=request_id or f"req-{uuid4().hex}")
+            request_id=request_id or f"req-{uuid4().hex}", owner_user_id=owner_user_id,
+            knowledge_snapshot_id=knowledge_snapshot_id, conversation=conversation)
         job = self.get_job(job_id)
         return {"job": job, "reused": reused}, 200 if job["status"] not in {"queued", "running"} else 202
 
@@ -476,6 +553,11 @@ class QuestionJobService:
         # 快照和检查点包含证据正文；普通状态轮询只提供安全诊断摘要。
         excluded = {"snapshot_json", "request_fingerprint", "lease_token", "lease_expires_at", "heartbeat_at"}
         job = {key: value for key, value in row.items() if key not in excluded}
+        if row['owner_user_id']:
+            prefix = f'user/{row["owner_user_id"]}/'
+            for field in ('idempotency_key', 'last_retry_key'):
+                if isinstance(job.get(field), str) and job[field].startswith(prefix):
+                    job[field] = job[field][len(prefix):]
         job["cancel_requested"] = bool(job["cancel_requested"])
         with self.repository.connect() as db:
             calls = db.execute("SELECT sequence_no,role,status,error_code,started_at,settled_at,elapsed_ms,provider_usage_json"
@@ -500,7 +582,8 @@ class QuestionJobService:
         if self.repository.get(document_id) is None:
             raise RagError(404, "document_not_found", "文档不存在")
         with self.repository.connect() as db:
-            ids = db.execute("SELECT id FROM question_jobs WHERE document_id=? ORDER BY created_at DESC,rowid DESC",
+            ids = db.execute("SELECT j.id FROM question_jobs j LEFT JOIN conversations c ON c.id=j.conversation_id "
+                             "WHERE j.document_id=? AND c.deleted_at IS NULL ORDER BY j.created_at DESC,j.rowid DESC",
                              (document_id,)).fetchall()
         return [self.get_job(row[0]) for row in ids]
 
@@ -524,6 +607,8 @@ class QuestionJobService:
         key = (idempotency_key or _request_value(payload, "idempotency_key") or "").strip() or None
         if key and len(key) > 200:
             raise RagError(422, "invalid_idempotency_key", "幂等键不能超过200字符")
+        if key and job.get('owner_user_id'):
+            key = f'user/{job["owner_user_id"]}/{key}'
         fingerprint, stamp = _fingerprint({"retry_job_id": job_id}), now_iso()
         with self.repository.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -536,6 +621,15 @@ class QuestionJobService:
                     # 重复重试不能把后来再次失败的任务重新放回队列。
                     return self.get_job(job_id)
             row = db.execute("SELECT * FROM question_jobs WHERE id=?", (job_id,)).fetchone()
+            if row['conversation_id']:
+                if not attachment_available(db, row['document_id'], conversation_id=row['conversation_id']):
+                    raise TaskConflict('临时资料已到期或移除，不能重试')
+                conv = db.execute('SELECT * FROM conversations WHERE id=?', (row['conversation_id'],)).fetchone()
+                if (not conv or conv['deleted_at'] or conv['archived']
+                        or conv['memory_epoch'] != json.loads(row['snapshot_json']).get('conversation_memory_epoch')):
+                    raise TaskConflict('会话或记忆已变更，请在当前会话重新提问')
+                if db.execute("SELECT 1 FROM question_jobs WHERE conversation_id=? AND id<>? AND status IN ('queued','running')", (row['conversation_id'], job_id)).fetchone():
+                    raise TaskConflict('当前会话已有活动任务，不能同时重试旧轮次')
             if row["status"] not in {"failed", "needs_attention"}:
                 if row["status"] in {"queued", "running", "succeeded"}:
                     return self.get_job(job_id)

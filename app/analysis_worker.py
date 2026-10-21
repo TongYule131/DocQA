@@ -75,6 +75,8 @@ class AnalysisWorker:
         from app.question_worker import QuestionWorker
         self.question_worker = QuestionWorker(settings, self.repository, worker_id=self.worker_id + "-qa",
                                                runtime=self.runtime)
+        from app.knowledge_worker import KnowledgeWorker
+        self.knowledge_worker=KnowledgeWorker(settings,self.repository,self.runtime)
         # 当前正在执行任务的输入计划：只用于失败时给出真实的覆盖口径。
         self._active_plan: AnalysisPlanResult | None = None
 
@@ -85,6 +87,7 @@ class AnalysisWorker:
         """SIGINT/SIGTERM 处理：只设置标记，让当前任务留下可恢复状态后退出。"""
         self.stop_requested = True
         self.question_worker.request_stop()
+        self.knowledge_worker.request_stop()
         logger.warning("收到停止请求：当前任务将保留可恢复状态后退出")
 
     def run_forever(self, *, max_tasks: int | None = None) -> int:
@@ -93,8 +96,14 @@ class AnalysisWorker:
         self.repository.initialize()
         self.runtime.mark_ready()
         question_turn = True
+        knowledge_turn = True
         while not self.stop_requested:
             self.runtime.check()
+            if knowledge_turn and self.knowledge_worker.run_once():
+                processed+=1;knowledge_turn=False
+                if max_tasks is not None and processed>=max_tasks:break
+                continue
+            knowledge_turn=True
             # 轮换队列，持续问答不会让摘要／提取饥饿，反之亦然。
             if question_turn and self.question_worker.run_once():
                 processed += 1

@@ -82,6 +82,15 @@ def restore_admission(repository,snapshot,selected,retrieval,question):
     profile=snapshot.get('evidence_profile') or {}
     expected=budget_profile(question,max_items=profile.get('max_items',0),context_chars=profile.get('context_chars',0))
     if expected!=profile:raise ValueError('admission_profile_changed')
+    # 快照按当前问题固定预算；生成时使用含会话上下文的检索问题做抽取，恢复必须重放同一输入。
+    from app.conversation_memory import MEMORY_SIGNATURE,retrieval_question,valid_memory
+    memory=snapshot.get('conversation_context')
+    if 'conversation_context' in snapshot and snapshot.get('conversation_policy_signature')!=MEMORY_SIGNATURE:
+        raise ValueError('conversation_policy_changed')
+    if memory is not None and not valid_memory(memory):
+        raise ValueError('conversation_context_invalid')
+    question=retrieval_question(question,memory)
+    profile=budget_profile(question,max_items=profile['max_items'],context_chars=profile['context_chars'])
     chunks={c.id:c for c in repository.chunks(snapshot['document_id'],snapshot['parse_version_id'])}
     candidates=[]
     for hit in retrieval.get('results',[]):

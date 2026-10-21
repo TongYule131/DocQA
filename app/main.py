@@ -13,8 +13,10 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import Body, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
 
 from app import migrations
 from app.analysis_jobs import AnalysisJobService
@@ -30,6 +32,12 @@ from app.question_jobs import QuestionJobService
 from app.rag_prompts import PROMPT_VERSION
 from app.repository import Repository, TaskConflict, now_iso
 from app.runtime import RuntimeGuard, RuntimeMismatch
+from app.product_access import COOKIE, ProductAccess, actor_context
+from app.product_routes import authorize_request, install_product_routes, verify_mutation, protect_temporary_request
+from app.admin_routes import install_admin_routes
+from app.profile import install_profile_routes
+from app.conversations import Conversations
+from app.conversation_routes import install_conversation_routes
 from app.schemas import (
     AnalysisJob,
     AnalysisJobRequest,
@@ -68,11 +76,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     repository = Repository(settings.data_dir / "docqa.db")
     embedding = APIEmbedding(settings)
     index = DocumentIndex(repository, embedding)
+    access = ProductAccess(repository, settings, index)
     # RAG 服务在应用装配阶段构造一次；每次提问只调用一次查询 embedding 与一次生成。
     rag = RagService(settings, repository, index, model)
     # 分析任务服务只做规划与任务生命周期；生成由独立 worker 进程执行。
     analysis = AnalysisJobService(settings, repository)
     questions = QuestionJobService(settings, repository, rag)
+    conversations = Conversations(access, questions)
     upload_dir = settings.data_dir / "uploads"
     web_dir = Path(__file__).parent / "web"
 
@@ -95,21 +105,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="智能文档分析与知识问答系统", version="0.2.0", lifespan=lifespan)
     app.state.runtime_guard = runtime
     app.state.question_service = questions
+    app.state.product_access = access
+    app.state.conversations = conversations
     app.mount("/static", StaticFiles(directory=web_dir), name="static")
+
+    @app.exception_handler(RequestValidationError)
+    async def input_error(request, exc):
+        if request.url.path.startswith(('/api/auth/', '/api/admin/users')):
+            # 账号表单错误不能通过默认 validation input 字段回显口令。
+            return JSONResponse(status_code=422, content={'detail': '账号资料格式无效，请检查各项长度和类型'})
+        return await request_validation_exception_handler(request, exc)
 
     @app.middleware("http")
     async def require_compatible_runtime(request, call_next):
         request.state.request_id = f"req-{uuid4().hex}"
+        page_route = request.url.path in {"/", "/app", "/single", "/admin", "/tools", "/knowledge", "/login", "/setup"} or request.url.path.startswith(('/admin/','/app/'))
         # 代码更新或库被外部替换后，旧进程不得继续提交/领取收费任务。
-        if request.url.path == "/" or request.url.path.startswith(("/api/", "/static/")):
+        if page_route or request.url.path.startswith(("/api/", "/static/")):
             try:
                 runtime.check()
             except RuntimeMismatch as exc:
                 return JSONResponse(status_code=503, content={
                     "status": "not_ready", "code": "runtime_mismatch", "detail": str(exc)})
-        response = await call_next(request)
+        actor = access.session(request.cookies.get(COOKIE)) if access.team_mode else None
+        token = actor_context.set(actor)
+        try:
+            path = request.url.path
+            if access.team_mode and not path.startswith('/static/') and path not in ('/login', '/setup', '/api/auth/login', '/api/auth/me', '/api/auth/setup-status', '/api/auth/setup'):
+                if not actor:
+                    if page_route:
+                        return RedirectResponse('/login', status_code=303, headers={'Cache-Control': 'no-store'})
+                    raise HTTPException(401, '请先登录')
+                authorize_request(access, request)
+            if access.team_mode:
+                verify_mutation(request, actor)
+            protect_temporary_request(access, request)
+            response = await call_next(request)
+        except HTTPException as exc:
+            response = JSONResponse(status_code=exc.status_code, content={'detail': exc.detail})
+        finally:
+            actor_context.reset(token)
         response.headers["X-Request-ID"] = request.state.request_id
-        if request.url.path == "/" or request.url.path.startswith("/static/"):
+        if page_route or request.url.path.startswith(("/static/", "/api/")):
             # 本地升级后普通刷新也必须拿到当前页面，不能继续复用旧 JS/CSS。
             response.headers["Cache-Control"] = "no-store"
         return response
@@ -150,6 +187,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def require_document(document_id: str) -> Document:
         # 各文档接口共用存在性校验，统一返回 404。
+        access.require_document(document_id)
         document = repository.get(document_id)
         if document is None:
             raise HTTPException(404, "文档不存在")
@@ -160,15 +198,72 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         version = repository.get_parse_version(version_id)
         if version is None or version.document_id != document_id:
             raise HTTPException(404, "解析版本不存在或不属于该文档")
+        if access.team_mode and access.actor['role'] != 'admin':
+            published = access.require_document(document_id)
+            with repository.connect() as db:
+                own = db.execute('SELECT 1 FROM question_results r JOIN question_jobs j ON j.id=r.job_id '
+                    'WHERE j.owner_user_id=? AND r.document_id=? AND r.parse_version_id=?',
+                    (access.actor['id'], document_id, version_id)).fetchone()
+            if published and version_id != published['parse_version_id'] and not own:
+                raise HTTPException(404, '解析版本未发布或未获授权')
         return version
 
-    @app.get("/", include_in_schema=False)
-    def home():
-        # HTML 和静态资源与 API 同源，前端使用相对路径调用后端。
-        html = (web_dir / "index.html").read_text(encoding="utf-8")
-        for asset in ("app.js", "style.css"):
+    def workspace_page(filename: str, view: str = ""):
+        # 文件名仅来自下面固定路由，绝不接受任意路径。模块资源也使用 no-store。
+        html = (web_dir / filename).read_text(encoding="utf-8")
+        html = html.replace('<body>', f'<body data-workspace-view="{view}">')
+        html = html.replace('<body ', f'<body data-team-mode="{str(access.team_mode).lower()}" ', 1)
+        for asset in ("app.js", "style.css", "workspace.js", "workspace.css", "admin-workspace.js", "knowledge.js", "product.css", "login.js", "conversation.js", "conversation.css", "admin.css", "admin.js", "setup.js"):
             html = html.replace(f'"/static/{asset}"', f'"/static/{asset}?v={runtime.fingerprint}"')
         return HTMLResponse(html)
+
+    @app.get("/", include_in_schema=False)
+    @app.get("/app", include_in_schema=False)
+    def home():
+        return workspace_page('conversation.html', 'conversation')
+
+    @app.get('/single', include_in_schema=False)
+    def independent_questions():
+        return workspace_page("workspace.html", "chat")
+
+    @app.get("/admin", include_in_schema=False)
+    def admin_workspace():
+        return workspace_page("admin.html", "knowledge")
+
+    @app.get('/admin/users', include_in_schema=False)
+    def admin_users():
+        return workspace_page('admin.html', 'users')
+
+    @app.get('/admin/settings', include_in_schema=False)
+    def admin_settings():
+        return workspace_page('admin.html', 'settings')
+
+    @app.get('/admin/documents', include_in_schema=False)
+    def admin_documents():
+        return workspace_page('index.html', 'admin')
+
+    @app.get("/tools", include_in_schema=False)
+    def document_tools():
+        return workspace_page("index.html", "tools")
+
+    @app.get('/knowledge', include_in_schema=False)
+    def knowledge_workspace():
+        return workspace_page('knowledge.html', 'knowledge')
+
+    @app.get('/login', include_in_schema=False)
+    def login_page():
+        return workspace_page('login.html', 'login')
+
+    @app.get('/setup', include_in_schema=False)
+    def setup_page():
+        return workspace_page('setup.html', 'setup')
+
+    install_product_routes(app, access)
+    install_profile_routes(app, access)
+    install_admin_routes(app, access)
+    install_conversation_routes(app, conversations)
+    from app.knowledge_routes import install_knowledge_routes
+    install_knowledge_routes(app, access, rag)
 
     @app.get("/api/health")
     def health():
@@ -203,7 +298,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # 区分“格式支持”与“解析服务可达”：可达性由 /api/parsing/status 单独探测。
         return {
             "upload": True,
-            "formats": {"txt": True, "pdf": True, "docx": True, "xlsx": True,
+            "max_upload_mb": settings.max_upload_mb,
+            "formats": {"md": True, "txt": True, "pdf": True, "docx": True, "xlsx": True,
                         "doc": False, "xls": False, "pptx": False, "image": False},
             "text_pdf_parsing": True,
             "utf8_txt_parsing": True,
@@ -272,63 +368,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/documents", response_model=list[Document])
     def list_documents():
         # 返回工作台所需的元数据列表，正文通过分块接口单独获取。
-        return repository.list_documents()
+        return access.visible_documents(repository.list_documents())
 
     @app.post("/api/documents", response_model=UploadResponse, status_code=201)
-    def upload_document(file: UploadFile = File(...)):
+    def upload_document(file: UploadFile = File(...), idempotency_key: str | None = Header(default=None, alias='Idempotency-Key')):
         """上传文档：内容识别格式 → 大小限制 → 服务端随机 ID 落盘 → 写入元数据。
 
         上传不会自动建立收费索引；解析也必须由用户显式触发。
         """
-        filename = sanitize_filename(file.filename or "")
-        document_id = uuid4().hex
-        target = upload_dir / document_id
-        limit = settings.max_upload_mb * 1024 * 1024
-        # 数据目录在运行期间被外部清理时，上传目录可能不存在；这里按需重建，
-        # 避免返回难以理解的 500，而不是静默丢失文件。
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            # 先读取头部字节用于内容识别，同时统计大小；剩余内容流式写入，避免整份入内存。
-            head = file.file.read(_SNIFF_BYTES)
-            if len(head) > limit:
-                raise UploadFormatError(413, f"文件不得超过 {settings.max_upload_mb} MB")
-            size = len(head)
-            # 识别需要完整内容（ZIP 目录/PDF 结构），但必须同时强制大小上限：
-            # 多读 1 字节用于判断是否超限，超出即拒绝，绝不先落盘再校验。
-            probe = head
-            rest = b""
-            if size <= limit:
-                rest = file.file.read(limit - size + 1)
-                size += len(rest)
-                if size > limit:
-                    raise UploadFormatError(413, f"文件不得超过 {settings.max_upload_mb} MB")
-                probe = head + rest
-            detected = detect_format(filename, probe, max_pdf_pages=settings.max_pdf_pages)
-            if size == 0:
-                raise UploadFormatError(422, "文件为空")
-            with target.open("xb") as output:
-                output.write(head)
-                if rest:
-                    output.write(rest)
-            document = Document(id=document_id, filename=filename, size=size,
-                                created_at=datetime.now(timezone.utc).isoformat(), status="uploaded",
-                                format=detected.format, format_source=detected.source,
-                                page_count=detected.page_count or 0)
-            repository.create(document)
-            return {"document": document, "format": detected.format,
-                    "format_source": detected.source, "format_note": detected.note}
-        except Exception:
-            # 上传校验或元数据写入失败时清理本次原件，避免残留无记录文件。
-            target.unlink(missing_ok=True)
-            raise
-        finally:
-            # 无论上传成功与否，都释放上传文件句柄。
-            file.file.close()
+        from app.uploads import store_upload
+        return store_upload(repository, settings, file, idempotency_key,
+                            scope=access.actor['id'] if access.actor else 'local')
 
     @app.get("/api/documents/{document_id}", response_model=Document)
     def get_document(document_id: str):
         # 查询单份文档：包含当前预览版本、可用索引版本、最近任务与质量状态。
-        return require_document(document_id)
+        return access.present_document(require_document(document_id))
 
     @app.get("/api/documents/{document_id}/original")
     def get_original(document_id: str):
@@ -354,14 +409,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def list_versions(document_id: str):
         # 列出该文档的全部解析版本（含旧库迁移生成的 legacy 版本）。
         require_document(document_id)
-        return repository.list_parse_versions(document_id)
+        versions = repository.list_parse_versions(document_id)
+        if access.team_mode and access.actor['role'] != 'admin':
+            published = access.require_document(document_id)
+            if published:
+                versions = [v for v in versions if v.id == published['parse_version_id']]
+        return versions
 
     @app.get("/api/documents/{document_id}/content")
     def document_content(document_id: str, version_id: str | None = None,
                          offset: int = Query(0, ge=0), limit: int = Query(200, ge=1, le=1000)):
         """受控返回预览内容与来源；较大结果分页读取，返回稳定契约。"""
         document = require_document(document_id)
-        target = version_id or document.active_parse_version_id
+        published = access.require_document(document_id)
+        target = version_id or (published['parse_version_id'] if published else document.active_parse_version_id)
         if not target:
             raise HTTPException(404, "该文档尚无成功解析版本")
         version = require_version(document_id, target)
@@ -388,9 +449,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         不允许串文档读取：version_id 必须属于该文档。
         """
         document = require_document(document_id)
-        if version_id is not None:
-            require_version(document_id, version_id)
-        return repository.chunks(document_id, version_id or document.active_parse_version_id)
+        published = access.require_document(document_id)
+        target = version_id or (published['parse_version_id'] if published else document.active_parse_version_id)
+        if target:
+            require_version(document_id, target)
+        return repository.chunks(document_id, target)
 
     # ------------------------------------------------------------------
     # 解析任务
@@ -514,7 +577,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def index_status(document_id: str):
         """查询当前可用索引与构建尝试，并标注索引版本是否等于当前预览版本。"""
         document = require_document(document_id)
-        info = index.index_info(document_id)
+        published = access.require_document(document_id)
+        info = access.published_index_info(published) if published else index.index_info(document_id)
         return IndexInfo(
             id=info["index_id"], document_id=document_id,
             parse_version_id=info["parse_version_id"], status=info["status"],
@@ -717,32 +781,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/documents/{document_id}/question-jobs")
     def submit_question_job(document_id: str, payload: QuestionJobRequest, request: Request):
         # 新入口只固定本地快照并入队；保留下面原同步 /questions 契约。
-        body, code = questions.submit(document_id, payload, request_id=request.state.request_id)
+        published = access.require_document(document_id)
+        snapshot_id = None
+        if published:
+            snapshot_id = published['snapshot_id']
+        body, code = questions.submit(document_id, payload, request_id=request.state.request_id,
+            owner_user_id=access.actor['id'] if access.actor else None, knowledge_snapshot_id=snapshot_id)
         return JSONResponse(status_code=code, content=body,
                             headers={"Location": f"/api/question-jobs/{body['job']['id']}"})
 
     @app.get("/api/documents/{document_id}/question-jobs")
     def question_history(document_id: str):
-        return questions.list_jobs(document_id)
+        access.require_document(document_id)
+        jobs = questions.list_jobs(document_id)
+        if access.team_mode:
+            jobs = [j for j in jobs if j.get('owner_user_id') == access.actor['id'] or
+                    (j.get('owner_user_id') is None and access.actor['role'] == 'admin')]
+        return jobs
 
     @app.get("/api/question-jobs/{job_id}")
     def question_job(job_id: str):
+        access.require_question(job_id)
         return questions.get_job(job_id)
 
     @app.post("/api/question-jobs/{job_id}/cancel")
     def cancel_question_job(job_id: str, payload: QuestionRetryRequest | None = Body(default=None)):
+        access.require_question(job_id)
         return questions.cancel_job(job_id, payload)
 
     @app.post("/api/question-jobs/{job_id}/retry")
     def retry_question_job(job_id: str, payload: QuestionRetryRequest):
+        access.require_question(job_id)
         return questions.retry_job(job_id, payload)
 
     @app.get("/api/question-results/{result_id}")
     def question_result(result_id: str):
-        return questions.get_result(result_id)
+        result = questions.get_result(result_id)
+        access.require_question(result['job_id'])
+        return result
 
     @app.get("/api/question-results/{result_id}/export")
     def question_export(result_id: str, fmt: str = Query(default="markdown", alias="format")):
+        access.require_question(questions.get_result(result_id)['job_id'])
         body, media_type, filename = questions.export(result_id, fmt)
         return Response(content=body, media_type=media_type,
                         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{_quote(filename)}"})
@@ -762,6 +842,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """
         return rag.answer(document_id, payload.question.strip()).answer
 
+    from app.attachments import install_attachment_routes
+    install_attachment_routes(app, conversations, parse, build_index)
     return app
 
 

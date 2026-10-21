@@ -1,0 +1,20 @@
+.memory-panel { margin: 0 24px; padding: 18px 22px; border: 1px solid var(--border, #e3eaf5); border-radius: 14px; background: #f5f8ff; max-height: 44vh; overflow: auto; }
+.memory-panel h2 { margin: 0; font-size: 16px; }
+.memory-panel label { font-size: 13px; color: #445572; }
+.memory-header,.memory-buttons,.rename-row { display: flex; gap: 14px; align-items: center; margin: 8px 0; }
+.memory-header h2 { margin-right: auto; }
+.memory-panel textarea,.memory-panel input:not([type=checkbox]) { width: 100%; background: white; border: 1px solid #dbe4f3; border-radius: 9px; padding: 10px; font: inherit; }
+.memory-panel textarea { resize: vertical; }
+.memory-panel form + form { margin-top: 14px; }
+.rename-row input { min-width: 0; flex: 1; }
+.rename-row button { flex-shrink: 0; }
+.turn { margin-bottom: 30px; }
+.turn .assistant { margin-top: 18px; }
+.turn-scope { font-size: 12px; color: #69758b; margin: 8px 0; }
+.turn .answer-actions { flex-wrap: wrap; }
+.sidebar .small-text input { vertical-align: middle; }
+@media(max-width:800px) { .memory-panel { margin: 0 10px; padding: 12px; max-height: 48vh; } .memory-header { gap: 8px; flex-wrap: wrap; } .workspace-header { gap: 8px; } .workspace-header .mode-label { display: none; } .composer-actions { flex-wrap: wrap; } }
+
+.temporary-upload { padding: 12px 0; display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; gap: 8px; font-size: 12px; }
+.temporary-upload input { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; font-size: 12px; }
+.attachment-panel { padding: 12px 24px; border-bottom: 1px solid #dce8f6; background: #f7faff; }

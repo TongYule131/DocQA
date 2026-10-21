@@ -206,5 +206,5 @@ def test_v5_migration_from_v4_preserves_old_tables_and_rolls_back(tmp_path):
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='question_jobs'").fetchone() is None
         assert db.execute("SELECT filename FROM documents WHERE id='keep'").fetchone()[0] == "保留.txt"
         migrations.run_migrations(db)
-        assert migrations.validate_schema(db) == 5
+        assert migrations.validate_schema(db) == migrations.SCHEMA_VERSION
         assert db.execute("SELECT filename FROM documents WHERE id='keep'").fetchone()[0] == "保留.txt"

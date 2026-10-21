@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DocQA · 文档助手</title>
+  <link rel="stylesheet" href="/static/workspace.css">
+  <script defer src="/static/auth-bridge.js"></script>
+  <script type="module" src="/static/workspace.js"></script>
+<link rel="stylesheet" href="/static/ui-refinements.css"><script type="module" src="/static/chat-shell.js"></script><link rel="stylesheet" href="/static/chat-layout.css"></head>
+<body>
+  <div class="app-shell">
+    <aside id="sidebar" class="sidebar" aria-label="工作台导航">
+      <a class="brand" href="/app"><span class="brand-mark">D</span>DocQA</a>
+      <button id="new-question" class="primary new-question" type="button">＋ 新提问</button>
+      <nav class="main-nav" aria-label="工作区"><a href="/app" aria-current="page">文档问答</a><a id="tools-link" href="/tools" data-admin-only>摘要与提取</a></nav>
+      <label class="section-label" for="document-picker">回答范围</label>
+      <select id="document-picker" aria-describedby="document-hint"><option value="">正在读取资料…</option></select>
+      <p id="document-hint" class="small-text">选择已准备好的文档</p>
+      <a href="/app/knowledge" class="add-document">知识库对话 →</a><a id="add-document" class="add-document" href="/knowledge" data-admin-only>＋ 上传 / 准备文档</a>
+      <div class="history-title"><h2>问答历史</h2><button id="refresh-history" class="icon-button" type="button" aria-label="刷新已有记录">↻</button></div>
+      <label class="sr-only" for="history-search">搜索当前文档的问答</label><input id="history-search" class="history-search" placeholder="搜索当前文档的问答…" type="search">
+      <div id="history-list" class="history-list"><p class="small-text">暂无问答</p></div>
+      <div class="sidebar-footer"><details class="workspace-menu"><summary><span class="account-avatar">D</span><span class="account-name">工作空间</span></summary><div class="workspace-menu-items"><a href="/app">会话对话</a><a href="/app/knowledge">知识库对话</a><a href="/admin" data-admin-only>管理后台</a><button type="button" class="text-button" data-logout hidden>退出登录</button></div></details></div>
+    </aside>
+    <main class="main-column">
+      <header class="workspace-header"><button id="menu-toggle" type="button" class="icon-button menu-toggle" aria-label="展开工作台导航" aria-expanded="false">☰</button><h1 id="workspace-title">文档问答</h1><span class="mode-label">独立提问</span><button id="show-sources" class="secondary" type="button" disabled>查看来源</button></header>
+      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+      <div class="main-body">
+        <div class="chat-column">
+          <div id="chat-scroll" class="chat-scroll">
+            <section id="welcome" class="welcome"><div class="brand-mark">D</div><h2>从资料中，找到有据可循的答案。</h2><p id="welcome-description">选择一份文档开始提问，回答可展开来源核对。<br>已有回答可以从左侧历史重新打开。</p><div class="suggestions"><button type="button" data-prompt="这份文档的核心结论是什么？请保留条件与引用。">梳理核心结论</button><button type="button" data-prompt="资料给出了哪些重要限制或例外？请逐项说明来源。">核对条件与例外</button></div></section>
+            <div id="conversation" class="conversation" hidden>
+              <p id="user-question" class="user-question"></p>
+              <article class="assistant"><span class="assistant-mark" aria-hidden="true">D</span><div class="assistant-content"><div class="answer-heading"><strong>DocQA</strong><span id="job-status"></span></div><p id="stage-status" class="stage-status" role="status" aria-live="polite"></p><div id="answer-body" class="answer-body"></div><div id="answer-actions" class="answer-actions" hidden><button id="copy-answer" type="button" class="text-button">复制回答</button><a id="export-markdown">导出 Markdown</a><a id="export-json">导出 JSON</a></div></div></article>
+            </div>
+            <button id="return-latest" type="button" class="return-latest" hidden>回到最新 ↓</button>
+          </div>
+          <div class="composer-area"><form id="question-form" class="composer">
+            <div class="composer-context"><span id="scope-label">尚未选择资料</span><span id="input-count">0 / 4000</span></div>
+            <label class="sr-only" for="question-input">输入文档问题</label><textarea id="question-input" rows="3" maxlength="4000" placeholder="输入你的问题，可以粘贴多行内容…" aria-describedby="input-help" disabled></textarea>
+            <div class="composer-actions"><a id="composer-tools" href="/tools" data-admin-only>文档工具</a><span id="input-help">Enter 发送 · Shift+Enter 换行</span><button id="cancel-question" type="button" class="secondary" hidden>停止后续处理</button><button id="confirm-question" type="button" class="secondary" hidden>确认原提交（可能计费）</button><button id="retry-question" type="button" class="secondary" hidden>明确重试（可能计费）</button><button id="send-question" type="submit" class="send-button" aria-label="发送问题" disabled>↑</button></div>
+          </form><p class="composer-note">问题及入选原文会发送给配置的模型服务，可能计费。刷新与查看历史不会重新生成。当前每次提问独立处理。</p></div>
+        </div>
+        <aside id="source-drawer" class="source-drawer" aria-label="原文来源" hidden><div class="drawer-header"><h2>原文来源</h2><button id="close-sources" type="button" class="icon-button" aria-label="关闭来源">×</button></div><div id="source-content" class="source-content"></div></aside>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

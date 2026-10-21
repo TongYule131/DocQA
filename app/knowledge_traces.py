@@ -1,0 +1,55 @@
+"""链路只展示运行元数据；后台管理员不因诊断获得客户问题、原文或回答。"""
+import math
+from app.repository import parse_iso
+
+
+def milliseconds(start,end):
+    a,b=parse_iso(start),parse_iso(end)
+    return max(0,round((b-a).total_seconds()*1000)) if a and b else None
+
+
+class KnowledgeTraces:
+    def __init__(self,repository):self.repository=repository
+
+    def records(self):
+        result=[]
+        with self.repository.connect() as db:
+            for table,kind in [('kb_tasks','knowledge'),('question_jobs','question')]:
+                for row in db.execute(f'SELECT j.*,u.username FROM {table} j LEFT JOIN product_users u ON u.id=j.owner_user_id ORDER BY j.created_at DESC LIMIT 500'):
+                    result.append({'id':row['id'],'name':('knowledge-index' if row['kind']=='index' else 'knowledge-chat') if table=='kb_tasks' else 'document-chat',
+                        'source':kind,'status':row['status'],'owner':row['username'] or '本地用户',
+                        'created_at':row['created_at'],'started_at':row['started_at'],'finished_at':row['finished_at'],
+                        'elapsed_ms':milliseconds(row['started_at'],row['finished_at']),'requests_used':row['requests_used'],
+                        'error_code':row['error_code'],'stage':row['stage']})
+            for row in db.execute('SELECT * FROM parse_tasks ORDER BY created_at DESC LIMIT 500'):
+                result.append({'id':row['id'],'name':'document-parse','source':'parse','status':row['status'],
+                    'owner':'管理员 / 文档处理','created_at':row['created_at'],'started_at':row['started_at'],'finished_at':row['finished_at'],
+                    'elapsed_ms':milliseconds(row['started_at'],row['finished_at']),'requests_used':None,'error_code':row['error_code'],'stage':row['stage']})
+        return sorted(result,key=lambda r:r['created_at'],reverse=True)
+
+    def list(self,query='',status='',page=1):
+        rows=[r for r in self.records() if (not query or query.casefold() in (r['id']+' '+r['name']+' '+r['owner']).casefold()) and (not status or r['status']==status)]
+        times=sorted(r['elapsed_ms'] for r in rows if r['elapsed_ms'] is not None)
+        completed=[r for r in rows if r['status'] not in ('queued','running')]
+        stats={'succeeded':sum(r['status']=='succeeded' for r in rows),'failed':sum(r['status'] in ('failed','needs_attention') for r in rows),
+            'running':sum(r['status'] in ('queued','running') for r in rows),
+            'success_rate':round(100*sum(r['status']=='succeeded' for r in completed)/len(completed),1) if completed else None,
+            'average_ms':round(sum(times)/len(times)) if times else None,'p95_ms':times[max(0,math.ceil(.95*len(times))-1)] if times else None}
+        return {'items':rows[(page-1)*20:page*20],'total':len(rows),'page':page,'stats':stats,'window':'解析、索引与问答各最新500条任务；筛选后的统计'}
+
+    def detail(self,identifier):
+        record=next((r for r in self.records() if r['id']==identifier),None)
+        if not record:return None
+        with self.repository.connect() as db:
+            if record['source']=='knowledge':
+                spans=[dict(r) for r in db.execute('SELECT * FROM kb_trace_spans WHERE task_id=? ORDER BY started_at,rowid',(identifier,))]
+                calls=[dict(r) for r in db.execute('SELECT sequence_no,role,status,error_code,started_at,finished_at,elapsed_ms FROM kb_task_calls WHERE task_id=? ORDER BY sequence_no',(identifier,))]
+            elif record['source']=='parse':
+                calls=[]
+                spans=[dict(id=r['id'],parent_id=None,name='解析尝试 '+str(r['attempt_no']),kind='PARSE',status=r['status'],started_at=r['started_at'],finished_at=r['finished_at'],elapsed_ms=milliseconds(r['started_at'],r['finished_at']),error_code=r['error_code']) for r in db.execute('SELECT * FROM parse_attempts WHERE task_id=? ORDER BY attempt_no',(identifier,))]
+            else:
+                calls=[dict(r) for r in db.execute('SELECT sequence_no,role,status,error_code,started_at,settled_at AS finished_at,elapsed_ms FROM question_calls WHERE job_id=? ORDER BY sequence_no',(identifier,))]
+                spans=[dict(id='legacy-call-'+str(r['sequence_no']),parent_id=None,name='查询向量' if r['role']=='embedding' else '回答生成',kind=r['role'].upper(),**r) for r in calls]
+        for span in spans:span['offset_ms']=milliseconds(record['started_at'],span['started_at'])
+        return {**record,'spans':spans,'calls':calls,'content_policy':'仅含运行元数据；不展示用户问题、提示词、文档正文或原始响应。',
+                'timing_note':'旧任务只展示实际记录的外调节点；未记录的阶段不补造耗时。'}

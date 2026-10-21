@@ -16,6 +16,7 @@ jiter==0.17.0
 openai==2.54.0
 openpyxl==3.1.5
 packaging==26.3
+Pillow==13.0.0
 pluggy==1.6.0
 pydantic==2.13.5
 pydantic_core==2.46.5

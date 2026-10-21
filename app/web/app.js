@@ -27,7 +27,8 @@ const indexLabels = {
 };
 
 // 页面状态保存在内存中；实际文档、任务与内容以服务端返回的数据为准。
-let selectedId = sessionStorage.getItem('docqa.selectedDocument');
+let selectedId = (window.location ? new URLSearchParams(window.location.search).get('document') : null)
+  || sessionStorage.getItem('docqa.selectedDocument');
 let documents = [];
 let busy = false;
 let modelConfigured = false;
@@ -91,7 +92,7 @@ let extractionSettingsRevision = 0; // 丢弃设置变更前的迟到规划响�
 
 async function api(path, options = {}) {
   // 统一 API 前缀与错误转换，让操作入口只处理成功数据或错误提示。
-  const response = await fetch(`/api${path}`, options);
+  const response = await (window.docqaFetch || fetch)(`/api${path}`, options);
   let data = null;
   try { data = await response.json(); } catch (error) { data = null; }
   if (!response.ok) {

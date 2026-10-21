@@ -1213,7 +1213,7 @@ def test_capabilities_and_parsing_status_are_honest(tmp_path):
         assert capabilities['analysis']['configured'] is False
         assert capabilities['analysis']['requires_embedding_index'] is False
         assert capabilities['async_parse_tasks'] is True
-        assert capabilities['formats'] == {'txt': True, 'pdf': True, 'docx': True, 'xlsx': True,
+        assert capabilities['formats'] == {'md': True, 'txt': True, 'pdf': True, 'docx': True, 'xlsx': True,
                                            'doc': False, 'xls': False, 'pptx': False, 'image': False}
         status = client.get('/api/parsing/status').json()
         # 离线环境无法连接解析服务：必须如实报告不可达，而不是假定可用。

@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 
 from app import vector_index
+from app.conversation_memory import MEMORY_RULE, MEMORY_SIGNATURE, retrieval_question, valid_memory, with_memory_prompt
 from app.config import Settings
 from app.rag_context import (
     EvidencePack,
@@ -167,19 +168,38 @@ class RagService:
         payload["retrieval_strategy_version"] = RETRIEVAL_STRATEGY_VERSION
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
-    def capture_snapshot(self, document_id: str, question: str) -> dict:
+    def capture_snapshot(self, document_id: str, question: str, *, published: dict | None = None, conversation_context=None) -> dict:
         """零外部调用地固定问答范围，供持久化任务在稍后读取同一个索引。"""
-        document, start_version_id, info = self._preflight(document_id)
-        self._context_cap(build_task_system_prompt(include_table_structure=False), question, document.filename)
+        if published is None:
+            document, start_version_id, info = self._preflight(document_id)
+        else:
+            # 发布快照来自服务端权限层，不接受前端指定任意版本。草稿更新不能让客户读到新稿。
+            document = self.repository.get(document_id)
+            version = self.repository.get_parse_version(published.get('parse_version_id'))
+            if (not document or published.get('document_id') != document_id or not version
+                    or version.document_id != document_id or version.quality_status == 'invalid'
+                    or version.origin_hash != published.get('origin_hash')):
+                raise RagError(409, 'published_version_unavailable', '知识库发布版本不可用，请联系管理员')
+            ok, reason = self.ready()
+            if not ok:
+                raise RagError(503, 'provider_not_configured', reason)
+            start_version_id = version.id
+            info = {'parse_version_id': version.id, 'index_id': published['index_id'], 'is_legacy': version.is_legacy}
+        if conversation_context is not None and not valid_memory(conversation_context):
+            raise RagError(409, 'conversation_context_invalid', '会话上下文无效，请重新提问')
+        self._context_cap(build_task_system_prompt(include_table_structure=False) + (MEMORY_RULE if conversation_context else ''),
+                          question, document.filename, memory=conversation_context)
         with self.repository.connect() as db:
             state = db.execute(
                 "SELECT * FROM embedding_indexes WHERE document_id=? AND id=? AND status='indexed'",
                 (document_id, info["index_id"])).fetchone()
         if state is None:
             raise RagError(409, "index_changed_midflight", "索引状态已变化，请重新提交")
+        if published and state['source_signature'] != published['source_signature']:
+            raise RagError(409, 'published_version_changed', '知识库发布索引的原文签名已变更，已停止处理')
         from app.rag_extract_context import SELECTION_VERSION,budget_profile
         from app.rag_support_review import REVIEW_VERSION
-        return {
+        frozen = {
             'evidence_selection_version':SELECTION_VERSION,
             'claim_review_version':REVIEW_VERSION,
             'evidence_profile':budget_profile(question,max_items=self.settings.question_context_k,
@@ -200,6 +220,9 @@ class RagService:
             "evidence_signature": vector_index.evidence_signature(
                 self.repository.chunks(document_id, info["parse_version_id"])),
         }
+        if published:
+            self.index.verify_snapshot(document_id, frozen)
+        return frozen
 
     def answer(self, document_id: str, question: str, *, snapshot: dict | None = None,
                observer=None, retrieval_checkpoint: dict | None = None) -> RagOutcome:
@@ -233,10 +256,19 @@ class RagService:
             self._verify_table_snapshot(frozen)
 
         # 固定规则和问题本身已超限时直接报错，不能伪装成“没有证据”。
+        memory = frozen.get('conversation_context') if frozen else None
+        if frozen and 'conversation_context' in frozen and frozen.get('conversation_policy_signature') != MEMORY_SIGNATURE:
+            raise RagError(409, 'conversation_policy_changed', '会话上下文策略已变化，请创建新任务')
+        if memory is not None and not valid_memory(memory):
+            raise RagError(409, 'conversation_context_invalid', '会话上下文无效，请重新提问')
+        search_question = retrieval_question(question, memory)
         system_prompt = (build_task_system_prompt(include_table_structure=False) if frozen is not None
                          else build_system_prompt())
         user_prompt_builder = build_task_user_prompt if frozen is not None else build_user_prompt
-        context_cap = self._context_cap(system_prompt, question, document.filename, task_protocol=frozen is not None)
+        if memory:
+            system_prompt += MEMORY_RULE
+            user_prompt_builder = with_memory_prompt(user_prompt_builder, memory)
+        context_cap = self._context_cap(system_prompt, question, document.filename, task_protocol=frozen is not None, memory=memory)
         # 唯一一次查询 embedding + 检索；检索固定版本由 DocumentIndex 返回。
         # 先记住检索前的活动索引，用于识别“检索期间索引被切换”的情况。
         index_before_search = info["index_id"]
@@ -252,11 +284,11 @@ class RagService:
                 search_result = self.index.search(document_id, question, self.settings.rag_retrieval_k)
             else:
                 search_result = self.index.search_snapshot(
-                    document_id, question, self.settings.rag_retrieval_k, snapshot=frozen,
+                    document_id, search_question, self.settings.rag_retrieval_k, snapshot=frozen,
                     include_scores=self.settings.question_retrieval_strategy == "hybrid-context")
                 if self.settings.question_retrieval_strategy == "hybrid-context":
                     from app.retrieval_planning import plan_retrieval
-                    search_result = plan_retrieval(question, search_result,
+                    search_result = plan_retrieval(search_question, search_result,
                         self.repository.chunks(document_id, frozen["parse_version_id"]),
                         max_candidates=self.settings.question_candidate_k,
                         fulltext_budget=context_cap, max_items=self.settings.question_context_k,
@@ -290,14 +322,14 @@ class RagService:
                                    if frozen is not None else 0,
                                include_qualifier_cues=frozen is not None,
                                preserve_document_order=frozen is not None,
-                               extractive_question=question if frozen is not None
+                               extractive_question=search_question if frozen is not None
                                    and frozen.get('evidence_selection_version')==SELECTION_VERSION else None)
         if build.fatal_reason:
             # 证据混入其他文档或版本：受控失败，不生成、不拼接。
             raise RagError(409, "evidence_scope_mismatch", build.fatal_reason)
         pack = build.pack
         if any(item.table_projection_included for item in pack.items):
-            system_prompt = build_task_system_prompt()
+            system_prompt = build_task_system_prompt() + (MEMORY_RULE if memory else '')
         from app.retrieval_planning import input_coverage_hints
         coverage_hints = input_coverage_hints(search_result.get("planning") or {},
                                              {item.chunk_id for item in pack.items})
@@ -439,13 +471,15 @@ class RagService:
             raise RagError(409, "parse_version_invalid", "索引绑定的解析版本质量无效，不能用于问答")
         return version
 
-    def _context_cap(self, system_prompt: str, question: str, filename: str | None, *, task_protocol: bool = True) -> int:
+    def _context_cap(self, system_prompt: str, question: str, filename: str | None, *, task_protocol: bool = True, memory=None) -> int:
         """反推参考资料可用的字符预算，保证最终消息体不超限。
 
         预算里显式计入问题、文件名、转义字符、固定包装与输出 schema 的字符数；
         字符预算不等于 token 预算，这里只做本地输入限流。
         """
         builder = build_task_user_prompt if task_protocol else build_user_prompt
+        if memory:
+            builder = with_memory_prompt(builder, memory)
         empty_user = builder(question=question, document_name=filename,
                                        evidence_payload=[])
         overhead = len(system_prompt) + len(empty_user)

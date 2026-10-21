@@ -16,7 +16,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # 允许的扩展名到期望格式的映射；.doc/.xls 等旧二进制格式明确不支持。
-SUPPORTED_SUFFIXES = {".txt": "txt", ".pdf": "pdf", ".docx": "docx", ".xlsx": "xlsx"}
+SUPPORTED_SUFFIXES = {".txt": "txt", ".md": "md", ".pdf": "pdf", ".docx": "docx", ".xlsx": "xlsx"}
 
 # 各格式对应的媒体类型；提交给 Docling 时使用清理后的文件名与匹配 MIME。
 FORMAT_MIME = {
@@ -24,6 +24,7 @@ FORMAT_MIME = {
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "txt": "text/plain",
+    "md": "text/markdown",
 }
 
 # Office 包安全检查上限：条目数量与解压后总字节数。
@@ -150,7 +151,7 @@ def detect_format(filename: str, data: bytes, *, max_pdf_pages: int = 100) -> De
     expected = SUPPORTED_SUFFIXES.get(suffix)
     if expected is None:
         raise UploadFormatError(
-            415, "当前仅支持 .pdf、.txt、.docx、.xlsx；.doc、.xls 等旧格式需要先转换")
+            415, "当前支持 .pdf、.txt、.md、.docx、.xlsx；.doc、.xls 等旧格式需要先转换")
     if not data:
         raise UploadFormatError(422, "文件为空")
 
@@ -174,4 +175,4 @@ def detect_format(filename: str, data: bytes, *, max_pdf_pages: int = 100) -> De
     if magic in {"pdf", "zip"}:
         raise UploadFormatError(422, "扩展名为 .txt，但文件内容不是文本（检测到 PDF 或 ZIP 容器）")
     _inspect_text(data)
-    return DetectedFormat("txt", "UTF-8 解码与内容检查", "本地解析，不发送给 Docling")
+    return DetectedFormat(expected, "UTF-8 解码与内容检查", "本地解析，不发送给 Docling")
