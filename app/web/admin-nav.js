@@ -3,7 +3,7 @@ import { icon } from './ui-icons.js';
 
 const sidebar=document.querySelector('.admin-sidebar'),nav=sidebar?.querySelector('nav');
 if (sidebar && nav) {
-  const path=location.pathname,view=new URLSearchParams(location.search).get('view')==='list'?'list':'tree';
+  const path=location.pathname,view=['list','test'].includes(new URLSearchParams(location.search).get('view'))?new URLSearchParams(location.search).get('view'):'tree';
   const brand=sidebar.querySelector('.brand');
   brand.replaceChildren(node('span','D','brand-symbol'),node('span','DocQA','nav-label'));
   const toggle=node('button','','admin-collapse');toggle.type='button';toggle.append(icon('panel'));sidebar.insertBefore(toggle,brand.nextSibling);
@@ -23,12 +23,12 @@ if (sidebar && nav) {
   trigger.type='button';trigger.title='意图管理';trigger.setAttribute('aria-label','意图管理');trigger.setAttribute('aria-controls','intent-navigation');children.id='intent-navigation';
   trigger.append(icon('layers'),node('span','意图管理','nav-label'),icon('chevron'));
   const treeLink=link('意图树配置','/admin/intents?view=tree','tree',path==='/admin/intents'&&view==='tree');
-  const listLink=link('意图列表','/admin/intents?view=list','list',path==='/admin/intents'&&view==='list');children.append(treeLink,listLink);
+  const listLink=link('意图列表','/admin/intents?view=list','list',path==='/admin/intents'&&view==='list');const testLink=link('意图测试台','/admin/intents?view=test','chat',path==='/admin/intents'&&view==='test');children.append(treeLink,listLink,testLink);
   function expanded(value){children.hidden=!value;trigger.setAttribute('aria-expanded',String(value));}
   expanded(path==='/admin/intents');trigger.onclick=()=>expanded(children.hidden);group.append(trigger,children);nav.append(group);
   nav.append(link('链路追踪','/admin/traces','trace',path==='/admin/traces'),link('用户管理','/admin/users','users',path==='/admin/users'),link('系统设置','/admin/settings','settings',path==='/admin/settings'));
   const bottom=sidebar.querySelector('.sidebar-bottom');if(bottom)bottom.replaceChildren(link('返回对话','/app','chat'));
   window.addEventListener('docqa:intent-view',event=>{
-    for (const [a,key] of [[treeLink,'tree'],[listLink,'list']]) { const active=event.detail===key;a.classList.toggle('active',active);if(active)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current'); }
+    for (const [a,key] of [[treeLink,'tree'],[listLink,'list'],[testLink,'test']]) { const active=event.detail===key;a.classList.toggle('active',active);if(active)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current'); }
   });
 }

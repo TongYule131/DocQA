@@ -77,6 +77,10 @@ class AnalysisWorker:
                                                runtime=self.runtime)
         from app.knowledge_worker import KnowledgeWorker
         self.knowledge_worker=KnowledgeWorker(settings,self.repository,self.runtime)
+        from app.ingestion import IngestionCoordinator
+        from app.unified_chat import ChatSubmissionCoordinator
+        self.ingestion=IngestionCoordinator(settings,self.repository)
+        self.chat_submissions=ChatSubmissionCoordinator(settings,self.repository)
         # 当前正在执行任务的输入计划：只用于失败时给出真实的覆盖口径。
         self._active_plan: AnalysisPlanResult | None = None
 
@@ -99,6 +103,8 @@ class AnalysisWorker:
         knowledge_turn = True
         while not self.stop_requested:
             self.runtime.check()
+            self.ingestion.run_once()
+            self.chat_submissions.run_once()
             if knowledge_turn and self.knowledge_worker.run_once():
                 processed+=1;knowledge_turn=False
                 if max_tasks is not None and processed>=max_tasks:break

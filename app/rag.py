@@ -7,7 +7,7 @@
       → DocumentIndex.search（一次查询 embedding + 一次检索）
       → EvidenceBuilder（固定版本、去重、预算、服务器分配引用编号）
       → PromptBuilder（固定系统规则 + 不可信问题/参考资料）
-      → 一次非流式生成
+      → 一次生成请求（任务按冻结协议流式，旧同步请求保持非流式）
       → 严格结构与引用校验
       → 由已校验结构渲染 Markdown 与引用列表
 
@@ -84,7 +84,7 @@ class RagOutcome:
 
 
 class RagService:
-    """单文档、单轮、非流式 RAG 问答编排器。
+    """固定文档证据的 RAG 编排器；会话由上层管理，任务支持已校验事实流。
 
     repository / index / model 可注入：测试可替换为 mock 传输或可控桩，
     但编排、上下文构建、输出解析、校验与渲染始终是生产代码路径。
@@ -200,6 +200,7 @@ class RagService:
         from app.rag_extract_context import SELECTION_VERSION,budget_profile
         from app.rag_support_review import REVIEW_VERSION
         frozen = {
+            'stream_protocol':'validated-fact-stream-v1',
             'evidence_selection_version':SELECTION_VERSION,
             'claim_review_version':REVIEW_VERSION,
             'evidence_profile':budget_profile(question,max_items=self.settings.question_context_k,
@@ -233,6 +234,9 @@ class RagService:
         if frozen is None:
             document, start_version_id, info = self._preflight(document_id)
         else:
+            from app.answer_stream import STREAM_VERSION
+            if frozen.get('stream_protocol') not in (None,STREAM_VERSION):
+                raise RagError(409,'question_snapshot_changed','流式协议已变更，请创建新任务')
             from app.rag_extract_context import SELECTION_VERSION,budget_profile
             from app.rag_support_review import REVIEW_VERSION
             if frozen.get('task_prompt_version')==TASK_PROMPT_VERSION and (
@@ -388,12 +392,29 @@ class RagService:
                            "系统规则、问题与固定元数据已超过输入字符预算；"
                            "请缩短问题或调整对应问答输入预算后重试")
 
-        # 一次非流式生成；不重试、不改写、不追加第二次调用。
+        # 一次生成请求；按任务快照选择流式，不重试、不改写、不追加调用。
         generation_started = time.perf_counter()
         if frozen is not None:
             self._verify_table_snapshot(frozen)
         emit("generation_started", {})
-        raw = self.model.generate(system_prompt, user_prompt)
+        from app.answer_stream import STREAM_VERSION, FactStreamParser, checked_block
+        if frozen and frozen.get('stream_protocol')==STREAM_VERSION and hasattr(self.model,'generate_stream') and observer:
+            def completed(category,ordinal,fact):
+                block=checked_block(category,ordinal,fact,pack,question,self)
+                emit('stream_block',block)
+            parser=FactStreamParser(completed)
+            emit('stream_started',{'version':STREAM_VERSION})
+            last_check=[0.0]
+            def stream_active():
+                # 不按每个token重算全部源码/库结构；完整论断落盘仍单独核对租约与权限。
+                if time.perf_counter()-last_check[0]>=.25:
+                    emit('stream_check',{});last_check[0]=time.perf_counter()
+            try:
+                raw=self.model.generate_stream(system_prompt,user_prompt,parser.feed,stream_active)
+            except ModelOutputError:
+                raise RagError(502,'rag_output_invalid','流式内容未通过结构或引用校验，未发布回答') from None
+        else:
+            raw = self.model.generate(system_prompt, user_prompt)
         generation_ms = _elapsed_ms(generation_started)
 
         emit("validation_started", {})

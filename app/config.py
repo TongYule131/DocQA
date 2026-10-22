@@ -17,6 +17,8 @@ class Settings:
     # 团队模式必须显式开启；旧的本地单用户数据不会自动成为共享资料。
     team_mode: bool = False
     session_cookie_secure: bool = True
+    # 预览实例使用独立名称；正式实例保持既有Cookie。
+    session_cookie_name: str = "docqa_session"
     attachment_ttl_hours: int = 24
     attachment_max_active: int = 5
     # 单位为 MB，上传接口校验时转换为字节数。
@@ -69,7 +71,7 @@ class Settings:
     embedding_timeout_seconds: float = 60
     embedding_batch_size: int = 8
     # ------------------------------------------------------------------
-    # RAG 问答（第一版：单文档、单轮、非流式）
+    # 旧同步 /questions 预算（单文档、单轮、非流式）；任务／会话使用 question_*。
     # 预算单位是字符不是 token：真正可容纳的内容仍受供应商上下文限制，
     # 这里只做本地输入限流，避免一次提问送入过多原文。
     # ------------------------------------------------------------------

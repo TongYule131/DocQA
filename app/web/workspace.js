@@ -1,12 +1,14 @@
 import { createApiClient, encoded } from './api-client.js';
 import { createQuestionClient, activeStatuses, jobLabels, stageLabels } from './question-client.js';
 import { node, renderAnswer, sourceLocationsText, answerTextForDisplay } from './answer-view.js';
+import { createAnswerStream } from './answer-stream.js';
 
 const $ = id => document.getElementById(id), api = createApiClient();
 let renderedResult = null, renderedQuestion = '', sourceSequence = 0, lastSourceFocus = null;
 let historySignature = '', documentSignature = '', previousDocument = null;
 const controller = createQuestionClient({ api, storage: sessionStorage, changed: paint,
   isVisible: () => !document.hidden });
+const stream=createAnswerStream({changed:()=>paint(controller.state),finished:()=>controller.refresh()});
 
 function announce(text, kind = 'info') {
   $('notice').textContent = text; $('notice').hidden = !text; $('notice').dataset.kind = kind;
@@ -61,11 +63,13 @@ function paint(state) {
   const job = state.job;
   $('stage-status').textContent = job?.error_message || (uncertain ? '等待提交确认' : job?.cancel_requested
     ? '已请求停止后续处理；已在途的请求仍可能计费。' : activeStatuses.includes(job?.status)
-      ? `${stageLabels[job.stage] || '正在处理'}，可稍后从历史查看。当前不是流式输出。` : '');
+      ? `${stageLabels[job.stage] || '正在处理'}，可稍后从历史查看。` : '');
+  stream.watch(state.job?[state.job]:[]);
   if (state.result && state.result.id !== renderedResult) {
     renderAnswer($('answer-body'), state.result.answer, openSource); renderedResult = state.result.id;
   }
   if (!state.result && renderedResult !== null) { renderedResult = null; $('answer-body').replaceChildren(); closeSources(false); }
+  if(!state.result){$('answer-body').replaceChildren();stream.render($('answer-body'),state.job||{},openSource);}
   $('answer-actions').hidden = !state.result;
   $('show-sources').disabled = !state.result?.answer.citations?.length;
   if (state.result) {
@@ -148,6 +152,7 @@ $('copy-answer').onclick = async () => {
 };
 document.querySelectorAll('[data-prompt]').forEach(button => button.onclick = () => { $('question-input').value = button.dataset.prompt; inputChanged(); $('question-input').focus(); });
 document.addEventListener('visibilitychange', () => controller.visibility());
+document.addEventListener('visibilitychange',()=>stream.pause(document.hidden));window.addEventListener('pagehide',()=>stream.dispose());
 $('chat-scroll').addEventListener('scroll', updateScrollControl, { passive: true });
 $('return-latest').onclick = () => { const scroll = $('chat-scroll'); scroll.scrollTo({ top: scroll.scrollHeight, behavior: 'smooth' }); };
 document.addEventListener('keydown', event => { if (event.key === 'Escape') { if (!$('source-drawer').hidden) closeSources(); else closeMenu(); } });

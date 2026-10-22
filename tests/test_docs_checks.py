@@ -64,3 +64,41 @@ def test_deployment_links_are_checked_after_document_relocation(tmp_path):
     deploy=tmp_path/'deploy/docling';deploy.mkdir(parents=True)
     (deploy/'README.md').write_text('[obsolete](../../docs/old-location.md)',encoding='utf-8')
     assert any(i['kind']=='broken_link' and 'deploy' in i['path'] for i in check(tmp_path)['issues'])
+
+
+def test_stale_readme_version_is_caught_without_importing_application(tmp_path):
+    fixture(tmp_path)
+    app = tmp_path/'app'; app.mkdir()
+    (app/'migrations.py').write_text('SCHEMA_VERSION = 13\nraise RuntimeError("must not import")\n', encoding='utf-8')
+    readme = tmp_path/'README.md'
+    readme.write_text('| 数据库 schema | `5` |\n', encoding='utf-8')
+    result = check(tmp_path)
+    assert not result['passed']
+    assert any(i['kind']=='readme_version_mismatch' and i['expected']=='13' for i in result['issues'])
+    readme.write_text('| 数据库 schema | `13` |\n', encoding='utf-8')
+    assert check(tmp_path)['passed']
+
+
+def test_missing_or_changed_example_defaults_fail_without_echoing_values(tmp_path):
+    fixture(tmp_path)
+    app = tmp_path/'app'; app.mkdir()
+    (app/'config.py').write_text('value("DOCQA_TEAM_MODE", "0")\nvalue("DEEPSEEK_API_KEY", "")\n', encoding='utf-8')
+    example = tmp_path/'.env.example'
+    example.write_text('DEEPSEEK_API_KEY=private-value-must-not-echo\n', encoding='utf-8')
+    result = check(tmp_path)
+    assert not result['passed'] and result['config_defaults_checked']==2
+    assert 'private-value-must-not-echo' not in json.dumps(result)
+    example.write_text('DOCQA_TEAM_MODE=0\nDEEPSEEK_API_KEY=\n', encoding='utf-8')
+    assert check(tmp_path)['passed']
+
+
+def test_dependency_documents_are_pruned_but_project_fixture_docs_are_checked(tmp_path):
+    fixture(tmp_path)
+    own = tmp_path/'tests/fixtures/sample'; own.mkdir(parents=True)
+    (own/'README.md').write_text('[project](../../../docs/README.md)', encoding='utf8')
+    vendor = own/'node_modules/pkg'; vendor.mkdir(parents=True)
+    (vendor/'README.md').write_text('[vendor-only](../../../../outside.md)', encoding='utf8')
+    result = check(tmp_path)
+    assert result['passed'] and result['documents']==3
+    (own/'README.md').write_text('[missing](missing.md)', encoding='utf8')
+    assert not check(tmp_path)['passed']

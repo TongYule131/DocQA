@@ -41,6 +41,7 @@ class BaseCreate(StrictBody):
     embedding_model: str | None = Field(default=None, max_length=150)
     chunk_max_chars: int = Field(default=800, ge=200, le=4000)
     chunk_overlap_chars: int = Field(default=120, ge=0, le=1000)
+    activation_policy: Literal['auto','review'] = 'auto'
 
 
 class Publish(StrictBody):
@@ -60,7 +61,7 @@ def authorize_request(access, request):
     actor, path, method = access.actor, request.url.path, request.method
     if path.startswith('/api/auth/'):
         return
-    if path.startswith(('/api/kb-conversations','/api/kb-tasks/')) or path=='/app/knowledge':
+    if path.startswith(('/api/kb-conversations','/api/kb-tasks/','/api/chat/','/api/ingestions')) or path=='/app/knowledge':
         # 库级服务逐对象核对归属、发布快照和当前授权。
         return
     if path == '/api/conversations' or path.startswith('/api/conversations/'):
@@ -72,7 +73,7 @@ def authorize_request(access, request):
         if method != 'GET':
             access.admin()
         return
-    match = re.fullmatch(r'/api/question-jobs/([^/]+)(?:/(cancel|retry))?', path)
+    match = re.fullmatch(r'/api/question-jobs/([^/]+)(?:/(cancel|retry|events))?', path)
     if match:
         access.require_question(match[1]); return
     match = re.fullmatch(r'/api/question-results/([^/]+)(?:/export)?', path)
@@ -100,11 +101,19 @@ def authorize_request(access, request):
 def protect_temporary_request(access, request):
     """旧入口也不能绕过会话范围；管理员不默认拥有客户临时原件。"""
     match = re.fullmatch(r'/api/documents/([^/]+)(?:/.*)?', request.url.path)
+    if match:
+        with access.repository.connect() as db:managed=db.execute('SELECT 1 FROM ingestion_jobs WHERE document_id=?',(match[1],)).fetchone()
+        if managed:
+            access.require_document(match[1])
+            if request.method!='GET':raise HTTPException(409,'请从知识库自动处理任务操作此文档')
     if match and access.attachment(match[1]) and request.method != 'GET':
         raise HTTPException(403, '临时资料请在所属会话准备或提问')
     match = re.fullmatch(r'/api/parse-tasks/([^/]+)(?:/.*)?', request.url.path)
     if match:
         task = access.repository.get_task(match[1])
+        if task:
+            access.require_document(task.document_id)
+            if (task.request_summary or {}).get('ingestion_id') and request.method!='GET':raise HTTPException(409,'请从知识库自动处理任务操作此文档')
         if task and access.attachment(task.document_id) and request.method != 'GET':
             raise HTTPException(403, '临时资料请在所属会话操作')
 
@@ -125,19 +134,19 @@ def install_product_routes(app, access):
             raise HTTPException(409, '当前为本地单用户模式，无需登录')
         user, token, csrf = access.login(body.username.strip(), body.password,
                                          request.client.host if request.client else 'unknown')
-        old = request.cookies.get(COOKIE)
+        old = request.cookies.get(access.cookie_name)
         if old:
             with access.repository.connect() as db:
                 db.execute('DELETE FROM product_sessions WHERE token_hash=?', (digest(old),))
-        response.set_cookie(COOKIE, token, max_age=12 * 3600, secure=access.cookie_secure,
+        response.set_cookie(access.cookie_name, token, max_age=12 * 3600, secure=access.cookie_secure,
                             httponly=True, samesite='strict', path='/')
         return {'user': user, 'csrf_token': csrf}
 
     @router.post('/api/auth/logout')
     def logout(request: Request, response: Response):
         with access.repository.connect() as db:
-            db.execute('DELETE FROM product_sessions WHERE token_hash=?', (digest(request.cookies.get(COOKIE, '')),))
-        response.delete_cookie(COOKIE, path='/', secure=access.cookie_secure, httponly=True, samesite='strict')
+            db.execute('DELETE FROM product_sessions WHERE token_hash=?', (digest(request.cookies.get(access.cookie_name, '')),))
+        response.delete_cookie(access.cookie_name, path='/', secure=access.cookie_secure, httponly=True, samesite='strict')
         return {'status': 'signed_out'}
 
     @router.get('/api/admin/users')

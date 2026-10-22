@@ -72,3 +72,12 @@
  .chat-nav-collapsed .kb-chat-shell{grid-template-columns:64px minmax(0,1fr)}
  .chat-nav-collapsed .kb-chat-sidebar{position:sticky;width:64px;box-shadow:none;padding:18px 8px 12px}
 }
+.stream-preview{margin:14px 0;padding:14px 0;border-top:1px solid #e3ebf7}.stream-label{font-size:12px;color:#64748b}.stream-fact{margin:14px 0}.stream-fact>p{white-space:pre-wrap;line-height:1.85}.stream-sources{display:flex;gap:6px;flex-wrap:wrap}.stream-sources .source-chip{font-size:12px}
+
+/* 引用是行内导航，不继承主操作按钮的大块填充；相邻引文保留点击间距。 */
+.kb-assistant .reference,.kb-assistant .source-chip{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;width:auto;min-width:0;height:auto;border:1px solid #dce7f7;background:#eff4fd;color:#3563a5;font-weight:500;box-shadow:none;cursor:pointer;vertical-align:baseline}
+.kb-assistant .reference{min-width:22px;min-height:22px;padding:1px 6px;margin:0 3px;border-radius:6px;font-size:11px;line-height:18px;white-space:nowrap}
+.kb-assistant .reference:hover,.kb-assistant .source-chip:hover{background:#e1ebfc;color:#204f9f;border-color:#bdd1f1}
+.kb-assistant .reference:focus-visible,.kb-assistant .source-chip:focus-visible{outline:2px solid #739fe9;outline-offset:2px}
+.kb-assistant .source-list{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start}
+.kb-assistant .source-chip{padding:4px 8px;margin:0;border-radius:7px;font-size:11px;line-height:18px;max-width:100%;text-align:left;overflow-wrap:anywhere}

@@ -166,6 +166,18 @@ class ParseWorker:
                 return
             content = path.read_bytes()
             origin_hash = hashlib.sha256(content).hexdigest()
+            if (task.request_summary or {}).get('ingestion_id'):
+                from app.ingestion import ingestion_configuration
+                from app.knowledge_scope import base_allowed
+                with self.repository.connect() as db:
+                    ingest=db.execute('SELECT * FROM ingestion_jobs WHERE id=?',((task.request_summary or {})['ingestion_id'],)).fetchone()
+                    base=db.execute('SELECT * FROM knowledge_bases WHERE id=?',(ingest['base_id'],)).fetchone() if ingest else None
+                    allowed=bool(ingest and base and ingest['status'] in ('queued','running') and
+                        base_allowed(db,base['id'],ingest['owner_user_id'],write=True) and
+                        ingest['source_hash']==origin_hash and ingest['configuration']==ingestion_configuration(self.settings,base))
+                if not allowed:
+                    self.repository.finish_task(task.id,token,status='failed',stage='done',error_code='ingestion_changed',error_message='上传任务、权限、原件或配置已变化，未继续解析')
+                    return
             fmt = document.format or self._format_from_name(document.filename)
             if fmt in {"txt","md"}:
                 self._process_local_text(task, token, document, content, origin_hash)

@@ -143,9 +143,10 @@ def test_page_assets_follow_running_code_and_do_not_reuse_old_cache(tmp_path):
     with TestClient(create_app(Settings(data_dir=tmp_path))) as client:
         fingerprint = client.get('/api/health').json()['runtime']['code_fingerprint']
         # 新入口与管理/工具入口都绑定运行版本，不能有一个页面绕过缓存或版本保护。
-        for route, assets in [('/', ['conversation.js', 'conversation.css', 'workspace.css']),
-                              ('/app', ['conversation.js', 'conversation.css', 'workspace.css']),
-                              ('/single', ['workspace.js', 'workspace.css']),
+        for route, assets in [('/', ['unified-chat.js', 'unified-chat.css', 'conversation.css']),
+                              ('/app', ['unified-chat.js', 'unified-chat.css', 'conversation.css']),
+                              ('/single', ['unified-chat.js', 'unified-chat.css']),
+                              ('/app/knowledge', ['unified-chat.js', 'unified-chat.css']),
                               ('/knowledge', ['knowledge.js', 'product.css']),
                               ('/login', ['login.js', 'product.css']),
                               ('/admin', ['admin.js', 'admin.css', 'product.css']),

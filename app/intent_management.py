@@ -7,7 +7,7 @@ from app.repository import now_iso
 from app.knowledge_tasks import dump
 
 
-def normalized(text):return re.sub(r'[\s，。！？!?、,.；;：:]+','',text).casefold()
+from app.intent_routing import normalized, decide
 
 
 class IntentManagement:
@@ -18,6 +18,7 @@ class IntentManagement:
         mapping={r['id']:r for r in rows}
         for row in rows:
             row['examples']=json.loads(row.pop('examples_json'));row['enabled']=bool(row['enabled'])
+            row['keywords']=json.loads(row.pop('keywords_json','[]'))
             parents=[];parent=row['parent_id'];seen={row['id']}
             while parent and parent in mapping and parent not in seen:
                 seen.add(parent);parents.insert(0,mapping[parent]['name']);parent=mapping[parent]['parent_id']
@@ -29,6 +30,16 @@ class IntentManagement:
         if not re.fullmatch(r'[a-z][a-z0-9-]{1,63}',value['code']):raise HTTPException(422,'意图编码使用小写字母、数字和连字符，以字母开头')
         if value['kind']=='KB' and not value.get('base_id'):raise HTTPException(422,'知识问答意图需要关联知识库')
         if value['kind']=='MCP' and not value.get('tool_id'):raise HTTPException(422,'工具意图需要关联已注册工具')
+        mode=value.get('match_mode','exact'); family=value.get('interaction_kind'); keywords=value.get('keywords',[])
+        if mode not in ('exact','interaction','keywords') or family not in (None,'welcome','about','thanks','correction'):
+            raise HTTPException(422,'匹配策略无效')
+        if mode=='interaction' and (value['kind']!='SYSTEM' or not family):
+            raise HTTPException(422,'纯交互匹配须选择SYSTEM类型及交互类别')
+        if mode=='keywords' and (value['kind']!='KB' or not keywords):
+            raise HTTPException(422,'关键词匹配仅适用于知识问答，并须填写关键词')
+        if not isinstance(keywords,list) or len(keywords)>20 or any(not isinstance(w,str) or not 2<=len(normalized(w))<=30 for w in keywords):
+            raise HTTPException(422,'关键词最多20个，每个归一化后2～30字符')
+        if len({normalized(w) for w in keywords})!=len(keywords):raise HTTPException(422,'关键词不可重复')
         with self.repository.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             existing=db.execute('SELECT * FROM intent_nodes WHERE id=?',(identifier,)).fetchone()
@@ -56,6 +67,7 @@ class IntentManagement:
             if existing:
                 db.execute('UPDATE intent_nodes SET code=?,name=?,parent_id=?,kind=?,base_id=?,tool_id=?,description=?,examples_json=?,response_text=?,top_k=?,sort_order=?,enabled=?,revision=revision+1,updated_at=? WHERE id=?',params+(stamp,identifier))
             else:db.execute('INSERT INTO intent_nodes(code,name,parent_id,kind,base_id,tool_id,description,examples_json,response_text,top_k,sort_order,enabled,created_at,updated_at,id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',params+(stamp,stamp,identifier))
+            db.execute('UPDATE intent_nodes SET match_mode=?,interaction_kind=?,keywords_json=? WHERE id=?', (mode,family,dump(keywords),identifier))
         return next(r for r in self.list() if r['id']==identifier)
 
     def delete(self,identifier,revision):
@@ -64,16 +76,9 @@ class IntentManagement:
             if db.execute('SELECT 1 FROM intent_nodes WHERE parent_id=?',(identifier,)).fetchone():raise HTTPException(409,'请先处理子节点')
             if not db.execute('DELETE FROM intent_nodes WHERE id=? AND revision=?',(identifier,revision)).rowcount:raise HTTPException(409,'节点已变更或不存在')
 
-    def resolve(self,question,base_id):
-        rows=self.list();by_id={r['id']:r for r in rows};matches=[];query=normalized(question)
-        for row in rows:
-            if not row['enabled'] or row['base_id'] not in (None,base_id):continue
-            parent=row['parent_id'];enabled=True
-            while parent:
-                ancestor=by_id[parent]
-                if not ancestor['enabled']:enabled=False;break
-                parent=ancestor['parent_id']
-            # 纯交互按整句识别，混合业务问题不会被“你好/谢谢”截走。
-            if enabled and any(query==normalized(sample) for sample in row['examples']):matches.append(row)
-        if len(matches)==1:return matches[0]
-        return {'kind':'KB','code':'knowledge-default','base_id':base_id,'top_k':None}
+    def evaluate(self,question,base_id=None,scope='knowledge'):
+        route,decision=decide(question,base_id,self.list(),scope)
+        return {'route':route,'decision':decision}
+
+    def resolve(self,question,base_id,scope='knowledge'):
+        return self.evaluate(question,base_id,scope)['route']

@@ -1,12 +1,85 @@
-"""离线检查当前文档链接和冻结原文哈希；不导入应用或读取模型配置。"""
+"""离线核对文档链接、冻结原文、版本表和配置样例；不导入应用或读取 .env。"""
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
+import tomllib
+
+
+def literal_constant(path: Path, name: str):
+    tree = ast.parse(path.read_text(encoding='utf-8-sig'))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            return ast.literal_eval(node.value)
+    raise ValueError(f'Missing literal constant: {path.name}:{name}')
+
+
+def source_consistency(root: Path) -> tuple[list[dict], int, int]:
+    """读取源码字面量，不导入 main（导入可能装配实际数据库与供应商客户端）。"""
+    issues, versions, defaults = [], {}, {}
+    mapping = {
+        '数据库 schema': ('app/migrations.py', 'SCHEMA_VERSION'),
+        '任务式问答 Prompt': ('app/rag_prompts.py', 'TASK_PROMPT_VERSION'),
+        '检索策略': ('app/retrieval_planning.py', 'RETRIEVAL_STRATEGY_VERSION'),
+        '事实引用协议': ('app/rag_answer_contract.py', 'ANSWER_CONTRACT_VERSION'),
+        '意图路由': ('app/intent_routing.py', 'ROUTING_VERSION'),
+        '流式协议': ('app/answer_stream.py', 'STREAM_VERSION'),
+        '知识库任务协议': ('app/knowledge_tasks.py', 'KNOWLEDGE_PROMPT_VERSION'),
+    }
+    for label, (relative, name) in mapping.items():
+        if (root / relative).is_file():
+            versions[label] = str(literal_constant(root / relative, name))
+    package = root / 'pyproject.toml'
+    if package.is_file():
+        versions['项目包'] = tomllib.loads(package.read_text(encoding='utf-8-sig'))['project']['version']
+        main = root / 'app/main.py'
+        if main.exists():
+            for node in ast.walk(ast.parse(main.read_text(encoding='utf-8-sig'))):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'FastAPI':
+                    for argument in node.keywords:
+                        if argument.arg == 'version' and ast.literal_eval(argument.value) != versions['项目包']:
+                            issues.append({'kind': 'api_package_version_mismatch', 'path': 'app/main.py'})
+    readme = (root / 'README.md').read_text(encoding='utf-8-sig') if (root / 'README.md').is_file() else ''
+    for label, expected in versions.items():
+        match = re.search(r'^\|\s*' + re.escape(label) + r'\s*\|\s*`([^`]+)`\s*\|', readme, re.M)
+        if not match or match[1] != expected:
+            issues.append({'kind': 'readme_version_mismatch', 'path': 'README.md', 'field': label,
+                           'expected': expected, 'actual': match[1] if match else None})
+    config, example = root / 'app/config.py', root / '.env.example'
+    if config.is_file():
+        for node in ast.walk(ast.parse(config.read_text(encoding='utf-8-sig'))):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'value'
+                    and len(node.args) == 2 and all(isinstance(a, ast.Constant) for a in node.args)):
+                defaults[node.args[0].value] = node.args[1].value
+        values = dict(re.findall(r'^([A-Z][A-Z0-9_]*)=(.*)$', example.read_text(encoding='utf-8-sig'), re.M)) if example.exists() else {}
+        for name, expected in defaults.items():
+            actual = values.get(name)
+            # ./data 与 data 指向相同的示例相对目录；不解析到当前机器的绝对路径。
+            if name == 'DOCQA_DATA_DIR' and actual is not None:
+                actual = Path(actual).as_posix()
+            if actual is None or actual.strip() != expected:
+                # 不记录样例中的取值，避免有人误把真实密钥填入样例时由检查器再次输出。
+                issues.append({'kind': 'config_example_mismatch', 'path': '.env.example', 'field': name})
+    return issues, len(versions), len(defaults)
+
+
+def project_documents(root: Path) -> list[Path]:
+    """只检查项目维护的文档；不遍历依赖缓存、node_modules或指向库外的目录联接。"""
+    paths = set(root.glob('*.md'))
+    excluded = {'node_modules', '.venv', 'site-packages', '__pycache__', '.git', '.pytest_cache'}
+    for parent in (root/'docs', root/'deploy', root/'skills', root/'tests/fixtures'):
+        for folder, directories, files in os.walk(parent, followlinks=False):
+            directory = Path(folder)
+            directories[:] = [name for name in directories if name not in excluded
+                               and (directory/name).resolve().is_relative_to(root)]
+            paths.update(directory/name for name in files if name.lower().endswith('.md'))
+    return sorted(paths)
 
 
 def archive_records(root: Path) -> list[dict]:
@@ -46,10 +119,7 @@ def check(root: Path, freezes: list[Path] | None = None) -> dict:
         if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != record['sha256']:
             issues.append({'kind':'archive_hash_mismatch','path':record['archived']})
         archived_count += 1
-    paths = sorted([*(root/'docs').rglob('*.md'), *(root/'deploy').rglob('*.md'),
-                    *(root/'skills').rglob('*.md')])
-    if (root/'README.md').exists():
-        paths.append(root/'README.md')
+    paths = project_documents(root)
     links = 0
     for path in paths:
         text = path.read_text(encoding='utf-8-sig')
@@ -84,7 +154,10 @@ def check(root: Path, freezes: list[Path] | None = None) -> dict:
             frozen_refs += 1
             if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
                 issues.append({'kind':'frozen_document_mismatch','freeze':str(freeze),'path':relative})
+    source_issues, version_count, config_count = source_consistency(root)
+    issues.extend(source_issues)
     return {'passed':not issues,'documents':len(paths),'links_checked':links,'archives_verified':archived_count,
+            'source_versions_checked':version_count, 'config_defaults_checked':config_count,
             'frozen_document_refs_verified':frozen_refs,'issues':issues,'deferred_local_evidence':deferred,
             'provider_calls':0}
 

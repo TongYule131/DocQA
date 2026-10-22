@@ -1,456 +1,208 @@
-# 智能文档分析与知识问答系统
+# DocQA 智能文档分析与知识问答系统
 
-依据 [原始需求](智能文档分析与知识问答系统.md) 建立的本地文档与知识库工作台，已接通团队账号、资料发布与授权、多轮问答、来源复核、信息提取和摘要。运行与配置见下文；任务书、质量边界和历史报告统一从 [文档索引](docs/README.md) 查找，继续开发先读 [接力说明](docs/稳定试用版接力说明.md)。
+面向小团队／企业内网的本地文档助手。管理员维护并授权知识库，客户依据获授权资料进行多轮问答、查看引用，也可上传临时资料；管理员工具提供解析、检索、摘要和信息提取。
 
-**当前交付版本（2026-10-22）**：任务式问答为rag-task-v29／hybrid-context-v5、fact-context-parts-v7。已接入证据槽位、按题型抽取、连续证据段与跨页单元、服务端逐事实引用绑定，以及恢复时的来源重验。三题的同一17组关键原文实际输入覆盖由8/17提高至17/17；三题核心内容与DOCX/XLSX两题回归通过实施者开发复核。Q1最后一条证据范围说明的性质声明仍需复核，不能称全部论断或任意文档已获语义认证。
+**当前状态（2026-10-22）：已部署的本地团队试用版，尚未完成完整生产验收。** 本地8000已切换统一知识库对话和自动入库链路、数据库schema14，保留原历史、引用和索引；账号隔离、会话记忆、意图规则分流、链路追踪和真实分段流式已接通。服务驻留／异常退出、反馈工单、用户／全局配额、团队容量及完整运维出口仍待完成。数据库版本不是产品版本，历史测试成绩也不是当前服务在线的证明。
 
-RAG阶段的单次1191项工程测试、81项网页检查及14题合成输入覆盖属于对应历史版本成绩。最新产品化交付为schema11：团队登录、知识库处理与库内问答、后台意图／链路模块、工作台收缩及头像设置；最近66项关联回归（含10项头像）与9项迁移检查通过。累计验收账本97/128，余31；产品化开发新增真实供应商HTTP为0。升级保持旧资料、历史结果、来源及配置，备份与正式核验记录在`data/avatar-layout-release-20261021/`。当前为本地团队试用形态，真实流式、真实业务MCP、团队容量与完整运维出口尚未完成。最新事实见[接力说明](docs/稳定试用版接力说明.md)，后续建议见[下一阶段优化计划书](docs/product/下一阶段优化计划书.md)。
+## 当前版本与入口
 
-## 当前链路
+以下版本由 `scripts/check_docs.py` 对照源码检查；修改实现后应同步维护。
 
-客户端入口为`/`与`/app`，库级问答为`/app/knowledge`，原独立记录为`/single`，文档工具为`/tools`。已支持私有多轮会话、重命名／归档／恢复、近期用户问题及条件记忆、临时附件与到期禁读。记忆可关闭和清除，不把旧回答当证据，不隐含增加摘要调用；刷新和历史读取不重新生成。
+| 项目 | 版本 |
+| --- | --- |
+| 项目包 | `0.2.0` |
+| 数据库 schema | `14` |
+| 任务式问答 Prompt | `rag-task-v29` |
+| 检索策略 | `hybrid-context-v5` |
+| 事实引用协议 | `fact-context-parts-v7` |
+| 意图路由 | `intent-rules-v2` |
+| 流式协议 | `validated-fact-stream-v1` |
+| 知识库任务协议 | `knowledge-task-v2` |
 
-管理员在`/admin`建库、设置Collection及当前向量模型；`/knowledge`用于库内上传、解析／分块、异步索引、检查、发布及授权。支持PDF、TXT、DOCX、XLSX和UTF-8 Markdown，旧二进制DOC须先转换。`/admin/chunks`可检查和修订分块边界，生成新草稿；旧发布版保持。库级会话固定授权发布快照，支持库内多文档召回和各文档来源。
+| 入口 | 用途／访问范围 |
+| --- | --- |
+| `/`、`/app` | 统一知识库对话：历史、库内文档筛选、自动入库、记忆、流式与个人头像 |
+| `/app/knowledge`、`/single` | 旧链接跳转统一对话；旧记录与原引用继续读取 |
+| `/setup`、`/login` | 本机首次初始化、团队登录 |
+| `/admin` | 管理后台与知识库配置 |
+| `/knowledge`、`/admin/chunks` | 上传、解析／分块、索引、发布授权；检查和调整分块边界 |
+| `/admin/users`、`/admin/settings` | 账号管理；只读模型连接与运行配置，连接测试需主动操作 |
+| `/admin/intents`、`/admin/traces` | 意图树／列表／测试台；实际任务链路和已记录节点时序 |
+| `/admin/documents`、`/tools` | 文档工程工具、摘要／提取 |
+| `/docs` | OpenAPI 交互文档，团队模式下限管理员 |
 
-`/admin/intents`提供意图树与列表，当前仅按整句示例归一化匹配；`/admin/traces`展示真实任务及已记录节点的时序。只读MCP适配器经过离线协议模拟，尚无已验收的真实业务接口。工作台／后台侧栏均可收缩；左下角头像菜单“个人设置”支持预览、上传、保存及恢复默认头像。界面与功能边界见[产品化计划](docs/product/产品化升级计划书.md)。
+完整标准、实现证据与后续工作从[文档索引](docs/README.md)进入。继续开发先读[接力说明](docs/稳定试用版接力说明.md)和[下一阶段计划](docs/product/下一阶段优化计划书.md)。[原始需求](智能文档分析与知识问答系统.md)及旧任务书保留编写时的范围，不作为当前功能清单。
 
-正式数据目录仍为`D:/python/DocQA/data`。独立后台入口为`/admin`，账号管理`/admin/users`，模型连接与运行信息`/admin/settings`；资料准备保留`/knowledge`，原工程工具`/admin/documents`。首次在服务器本机打开`http://127.0.0.1:8000/setup`，亲自设置管理员账号及4～32位密码；提交后原子启用团队登录，配置随数据库持久化，重启保留。没有默认密码，未完成初始化前仍为本地单用户。客户只能看到授权发布版和自己的会话。
+## 安装与启动
 
-HTTPS部署显式设置`DOCQA_TEAM_MODE=1`和`DOCQA_SESSION_COOKIE_SECURE=1`并完整重启，覆盖本机HTTP试用Cookie设置。旧CLI`.venv\Scripts\python.exe -m app.product_admin --data-dir <数据目录> --username <账号>`仍可交互初始化，但须另行开启团队模式；不隐式迁移旧库。最新升级与验证详情见[产品化计划第21.6节](docs/product/产品化升级计划书.md#216-输入区对齐工作台侧栏与个人头像2026-10-21)，正式切换前需一致性备份；旧代码不能读取新版库，产生新数据后回退须先保全。团队容量与安全试点出口尚未完成。
-
-不连接真实模型的界面预览可设置`DOCQA_DATA_DIR`为本工作树`data`下的独立子目录，再运行`.venv\Scripts\python.exe scripts/product_preview.py --data-dir <同一目录> --port 8997`。该脚本运行实际上传/解析worker（PDF、DOCX、XLSX需要本地Docling）和模拟索引/生成服务，页面会明确标注；桩回答不能证明真实模型质量。预览建议通过`http://localhost:8997`访问，正式本机使用`http://127.0.0.1:8000`；仅更换端口不能隔离同主机的登录Cookie。普通启动仍按下文使用实际配置。
-
-任务式问答现可独立调整容量（项目字符上限，不是供应商token保证）：
-
-```dotenv
-DOCQA_QUESTION_CONTEXT_MAX_CHARS=24000
-DOCQA_QUESTION_INPUT_MAX_CHARS=32000
-DOCQA_QUESTION_CONTEXT_K=32
-DOCQA_QUESTION_CANDIDATE_K=64
-```
-
-可在`.env`或环境变量中调整；资料上限必须小于总输入上限，装入块数不超过候选数，候选最多100。需要更大输入时可将两项字符数设为40000/48000，须另做真实服务容量、延迟和费用验证。旧`DOCQA_RAG_*`继续控制同步接口，摘要/提取使用分析任务预算；更改预算后旧排队快照受控失败，新任务才使用新配置。原文/版本校验与逐请求预扣不放宽；上述四项现已写入正式`.env`并由新进程加载。
-
-```text
-网页上传扫描 PDF / TXT / DOCX / XLSX / Markdown
-  → 创建持久化解析任务（SQLite）
-  → 独立 worker 领取任务并调用 Docling（TXT、Markdown 在本地解析）
-  → 保存结构化结果、来源与质量告警（不可变解析版本）
-  → 结构化分块（正文按标题、表格按行组，均带来源）
-  → 网页查看带来源的预览与告警
-  → 用户主动建立 embedding 索引（固定目标解析版本）
-  → 检索并展示原文与来源
-  → 基于当前文档提问：提交持久化任务 → analysis-worker 混合检索 → 固定证据 → 生成及引用校验 → 保存结果
-  → 网页展示答案、逐事实引用与可核对来源
-
-基于**解析版本**（不需要向量索引）的两条新链路：
-  → 信息提取：查看分析范围 → 创建任务 → 分析 worker 分批生成与校验 → 确定性合并
-                → 持久化已校验结果 → 页面逐条来源 / 复制 / 导出 Markdown、JSON
-  → 文档摘要：单批直接完成；长文档分批生成已校验中间结果 + 一次汇总
-                → 最终引用回落原文连续子串 → 持久化与导出
-```
-
-三类状态彼此独立：**任务状态**（排队/执行/失败/完成）、**内容质量**（结构是否可用、有何告警）、**索引状态**（哪个解析版本的向量可用）。分析任务另有独立状态与**覆盖口径**：任务失败不会把已有解析内容或已有成功结果标记为失效。
-
-## 启动（最多四个进程）
-
-需要 Python 3.11 或更新版本，以及本机可用的 Docling 解析服务（见下一节）。
+需要 Python 3.11+。PDF、DOCX、XLSX 的新解析需要独立 Docling + RapidOCR 服务；UTF-8 TXT、Markdown 在本地解析。读取已有历史结果不需要重新解析或调用模型。
 
 ```powershell
-# 1) 安装依赖（首次）
+# 在项目根目录执行；首次安装
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.lock.txt
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.venv\Scripts\python.exe -m pip install -r requirements.lock.txt
+.venv\Scripts\python.exe -m pip install -e ".[dev]"
+# 仅首次且不存在 .env 时复制；已有配置须保留
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 
-# 2) 启动 Docling 解析服务（独立 Docker 服务；只有解析新文档时才必需）
-$dc = @('compose', '--env-file', 'deploy/docling/lab.env', '-f', 'deploy/docling/compose.yaml', '-f', 'deploy/docling/compose.ocr-gpu.yaml')
-$env:PARSER_DEVICE = 'cuda'
-docker @dc up -d --pull never --wait --wait-timeout 240
-
-# 3) 启动 Web（终端 A）
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
-
-# 4) 启动解析 worker（终端 B；不启动则解析任务停在 queued）
-.\.venv\Scripts\python.exe -m app.parse_worker
-
-# 5) 启动分析 worker（终端 C；负责摘要／提取及任务式问答，不启动则任务停在 queued）
-.\.venv\Scripts\python.exe -m app.analysis_worker
+# 只读预检，再启动 Web + parse-worker + analysis-worker
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start_local.ps1 -DataDir data -Port 8000 -DryRun
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start_local.ps1 -DataDir data -Port 8000
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/status_local.ps1 -DataDir data
+# 只停止此数据目录下身份匹配的三个角色
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop_local.ps1 -DataDir data
 ```
 
-访问工作台 http://127.0.0.1:8000 ，交互接口文档 http://127.0.0.1:8000/docs 。首次使用空目录会创建数据库和上传目录；已有旧库默认拒绝启动，必须明确允许增量升级，升级前自动备份到所选数据目录的 `db-backups/`。未来版本、断裂迁移登记或不匹配的表／列／主键／外键／唯一约束／索引均拒绝继续操作。
+填写本机 `.env` 中独立的生成／Embedding 密钥。配置优先级为进程环境变量 > `.env` > 代码默认值；相对数据目录以项目工作目录解析。管理后台不在线保存或回显密钥；修改服务器配置后须整体重启三个角色。生成使用 DeepSeek 适配器；Embedding 默认使用配置样例中的独立网关，不自动复用生成密钥。
 
-**或用 Windows 脚本一次启动**（推荐，带端口检查与进程归属记录）：
+正式本机实例使用 `D:\python\DocQA\data`、`http://127.0.0.1:8000`。脚本目录优先级为显式 `-DataDir` > 环境 `DOCQA_DATA_DIR` > `.env` > 项目 `data`。首次空目录自动建库；已有旧库默认拒绝启动，确认备份及升级范围后才加 `-AllowDatabaseUpgrade`。v13→14需增量迁移，先在一致性副本演练；v14库不再重复迁移。
+
+三个角色共用同一数据目录。就绪需同时满足 `running`、`identity_match`、`data_dir_match`、`ready`、`code_match`、`schema_match`；过期 `.ready` 文件不能证明进程存活。源码更新后旧进程拒绝继续处理，须整体重启。团队模式下匿名 `/api/health` 返回401；启动脚本结合 `/api/auth/me` 和本机角色身份核对就绪，不公开运行详情。
+
+脚本不安装 Windows 服务、开机启动或进程守护。宿主关闭、系统重启或启动环境回收进程后，应重新检查状态并启动；无人值守部署及异常退出监控仍属运维待办。不要用历史验收日志代替实时检查。
+
+也可在三个独立终端手动运行（均从项目根目录、使用相同配置）：
 
 ```powershell
-# 预检：只核对数据目录、端口与迁移状态，不启动进程
-powershell -ExecutionPolicy Bypass -File scripts/start_local.ps1 -DataDir data -Port 8000 -DryRun
-# 启动 Web + 解析 worker + 分析 worker（隐藏窗口，PID 写入所选数据目录/.local-service/）
-powershell -ExecutionPolicy Bypass -File scripts/start_local.ps1 -DataDir data -Port 8000
-powershell -ExecutionPolicy Bypass -File scripts/status_local.ps1 -DataDir data
-powershell -ExecutionPolicy Bypass -File scripts/stop_local.ps1 -DataDir data
-# 仅当预检显示已有旧库需要升级，且已决定升级该目录时，启动命令加：
-# -AllowDatabaseUpgrade
+.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+.venv\Scripts\python.exe -m app.parse_worker
+.venv\Scripts\python.exe -m app.analysis_worker
 ```
 
-三个脚本使用同一数据目录优先级：显式 `-DataDir` > 环境 `DOCQA_DATA_DIR` > 项目 `.env` > 项目 `data`。运行状态须同时满足 `running`、`identity_match`、`data_dir_match`、`ready`、`code_match`、`schema_match`；仅 PID 存活不代表就绪。`GET /api/health` 返回 Web 实际目录、数据库路径、结构版本和代码指纹；两个 worker 的就绪记录由进程自身初始化完成后发布。
+Docling 为第四个独立服务，标准本地脚本不启动或停止它。沿用已有镜像和模型缓存，构建／GPU／健康检查命令见[解析服务部署](deploy/docling/README.md)。不要重建镜像或清除模型卷来解决 Web 登录／数据库问题。
 
-脚本行为边界：端口被占用时**只报告不杀进程**；停止核对 PID、可执行路径、创建时间和所属进程树，数据目录记录必须匹配。启动前检查全部旧角色，部分启动失败会回收本轮角色。不启动、不拉取、不停止 Docling 容器；闲置库启动与只读检查不会创建业务任务或模型调用，已有排队任务仍由 worker 正常执行。
+## 首次设置与账号权限
 
-**启动顺序**：Docling → Web → worker。Web 与两个 worker 可以任意先后启动，但对应 worker 必须运行才能执行任务；三者使用同一个 `DOCQA_DATA_DIR`。
+首次在服务器本机打开 `http://127.0.0.1:8000/setup`，设置管理员账号和 **4～32字符**密码，没有默认密码。提交后团队登录配置随数据库持久化。CLI `python -m app.product_admin --data-dir <目录> --username <账号>` 仍可交互创建管理员，但须另行开启团队模式。
 
-**停止**：在各自终端按 `Ctrl+C`，或使用 `scripts/stop_local.ps1`。worker 收到停止请求后会保留当前任务的可恢复状态（上游 task_id、租约、已校验检查点）后退出。
+客户只能访问自己的会话和当前获授权的发布资料；管理员不因诊断权限默认获得客户私聊和临时原件。账号停用、撤权、附件到期影响后续任务、事件发送及历史读取。变更请求使用会话 Cookie、CSRF 和同源检查。
 
-**端口冲突**：解析服务默认 `127.0.0.1:5001`，Web 默认 `8000`。解析服务端口由 `deploy/docling/lab.env` 与 `compose.yaml` 决定；如需更换，同时修改 `DOCQA_DOCLING_BASE_URL`。Web 端口冲突时用 `--port` 指定其他端口。
+HTTPS／内网部署显式设置 `DOCQA_TEAM_MODE=1`、`DOCQA_SESSION_COOKIE_SECURE=1` 并重启，覆盖本机 HTTP 初始化保存的 Cookie 配置。当前没有公网 SaaS、多租户或企业单点登录的完整验收。
 
-**任务恢复**：已保存上游 task_id 的解析任务在租约过期后恢复查询与领取，**不会重新上传**。提交阶段中断且没有上游 ID 时进入 `needs_attention`。分析任务：租约过期且**没有**残留调用意图时回到 `queued` 可继续；存在“已发出请求但未保存结果”的调用时转 `needs_attention`，**不会自动重发**（供应商是否已接收无法确定，重试可能重复计费）。
+## 知识库完整使用流程
 
-**升级现有项目**：先停止 Web 与两个 worker，再用新代码执行预检；已有旧库使用 `-AllowDatabaseUpgrade` 明确升级。直接 Python 入口同样默认拒绝旧库，仅在明确决定升级时设置 `DOCQA_ALLOW_DATABASE_UPGRADE=1`。空新库不需要该许可。代码更新后旧 Web 返回 503，旧 worker 停止领取／发起后续模型请求；需整体重启三个角色。网页资源绑定同一代码指纹，普通刷新会读取当前 JS/CSS。schema v2～v5 的迁移保留现有版本、分块和向量；回退代码须同时恢复匹配的备份并保留、移开现库 WAL/SHM。后续更高版本的正式升级仍需按具体范围决定。
+1. **建库**：管理员在 `/admin` 设置名称、Collection 和当前服务器使用的 Embedding 模型。Collection 为2～64位小写英文字母／数字且唯一，不能任意选择未配置模型。
+2. **上传**：后台 `/knowledge` 或对话输入区“＋”选择目标库，上传 PDF、DOCX、XLSX、TXT 或 UTF-8 Markdown。团队库仅管理员可写；客户可建立私有会话临时库。对话支持一批多文件，逐文件反馈。旧二进制 `.doc`、`.xls` 应先转换；独立图片、PPTX 尚不支持。
+3. **自动准备**：原件与上传任务同事务登记，worker衔接解析、分块和索引，关闭浏览器仍继续。Markdown 识别标题结构；表格保留表头、单位和注释。上传不自动生成回答；索引批次调用向量服务并保留预算和检查点。
+4. **检查／修订**：从 `/admin/chunks` 检查真实原文，可拆分／合并相邻块并调整连续范围，必须保留全部原文和顺序。文字纠错通过上传新版原件完成。修订建立新草稿，不覆盖旧发布版。
+5. **生效策略**：默认自动生效，每份资料成功后加入新的可用快照；也可在库内设为审核生效，逐份确认。失败、待处理或待审核文件不阻塞旧可用资料。手动分块修订与旧接口继续保留明确索引／发布操作。
+6. **替换和授权**：上传时可明确替换已有文档，成功后切换新版，旧原件与快照保留引用；失败保留旧版。管理员另行授权客户，不因上传扩大成员权限。
+7. **客户提问**：统一从 `/app` 进入，选择知识库，可筛选一份或多份文档。资料处理中也可保存一个等待问题，就绪后提交一次；指定文件失败会明确失败，不改用其他资料。每轮固定实际快照、文档及记忆版本。
 
-2026-10-10 已按用户明确授权完成正式 `data/docqa.db` 的 v2→v4 升级；当时工作台及两个worker已切回正式目录，当前运行状态需重新核对。原有5份文档和全部版本、分块、向量保留，备份与验证见[阶段03：稳定版工程与恢复](docs/阶段03-稳定版工程与恢复.md)。
+当前存储为 **SQLite + 本地文件**：向量和版本记录保存在 SQLite，原件在数据目录 `uploads/`。Collection 是逻辑标识。没有接入 RustFS、Redis 或独立向量数据库，不会因建库自动创建这些外部服务的桶／集合。
 
-## Docling 解析服务
+## 会话、意图与流式回答
 
-沿用已验证的 GPU 派生镜像与模型缓存卷，启动必须同时包含 `compose.ocr-gpu.yaml`，跳过 CPU 基线，不重新下载镜像或清空缓存。详细说明见 [deploy/docling/README.md](deploy/docling/README.md)。
+只有一个客户对话入口和历史列表。单篇文档问答是知识库内的文档筛选；切换知识库开始新会话。旧文档会话、独立问答和库级会话通过适配层合并展示，保留原ID、结果和引用，不重新生成；原会话中的问答不再作为独立记录重复列出。继续旧会话时，新轮次转入所属知识库，未归库资料先提示管理员处理。
 
-- 固定参数：`rapidocr`、`ocr_lang=ch`、`do_ocr=true`、`force_ocr=false`、`table_mode=accurate`、输出 JSON + Markdown、图片占位；不默认启用远程 VLM、图片描述或公式增强。
-- 服务地址只来自后端配置，前端不能修改；客户端禁用环境代理与重定向，也不会把 DeepSeek / embedding 密钥发送给解析服务。
-- `GET /api/parsing/status` 只探测 HTTP 可达性：**可达不代表模型已预热或解析内容质量合格**。
+近期最多3条已成功的用户问题和主动保存的800字符条件参与检索理解，旧回答不是新证据。记忆可开关、清除，支持名称、归档和恢复；变化会取消等待中的旧记忆请求。结构化对象指代与比较规划的真实语义验收尚未完成。
 
-## 上传与格式识别
+意图为受控规则引擎：完整示例、限定纯交互、当前库内业务关键词。纯问候／反馈可持久化短回复，0供应商请求；混合业务和歧义回到知识检索。管理员测试台最多100条问题，展示候选、回退原因和配置版本，不调用模型／工具，不要求发布知识库。规则用例通过不等于通用语义理解准确率。MCP 只读适配器有离线协议验证，尚无已验收的真实销售、工单或天气接口。
 
-支持 `.pdf`、`.txt`、`.docx`、`.xlsx`；`.doc`、`.xls`、图片、PPTX 等明确拒绝。扩展名与客户端 MIME 只作提示，实际格式由内容决定：PDF 检查文件标识与结构（含加密与页数上限），Office 检查 ZIP 包结构与实际包类型，TXT 检查 UTF-8 与非空内容。扩展名与内容冲突、损坏或加密文件都返回可读错误。
-
-原件以服务端随机 ID 保存（无后缀），提交给解析服务时使用清理后的原文件名与匹配 MIME。上传不会自动解析，也不会自动建立收费索引。
-
-## 解析任务与版本
-
-| 接口 | 用途 |
-| --- | --- |
-| `POST /api/documents` | 上传文档，返回 201、识别格式与判定依据 |
-| `POST /api/documents/{id}/parse` | 提交解析任务；新建/复用活动任务返回 202 与 task_id；已有有效版本且未 `force` 返回 200 复用 |
-| `GET /api/parse-tasks/{task_id}` | 任务阶段、时间、告警与错误 |
-| `POST /api/parse-tasks/{task_id}/retry` | 用户明确重试（新建尝试，保留原失败记录） |
-| `POST /api/parse-tasks/{task_id}/cancel` | 停止本次等待，保留上游任务编号 |
-| `GET /api/documents/{id}` | 当前预览版本、可用索引版本、最近任务与质量状态 |
-| `GET /api/documents/{id}/versions` | 解析版本列表（含旧库迁移的 legacy 版本） |
-| `GET /api/documents/{id}/content` | 结构化预览（块、来源、告警），支持 `version_id` 与分页 |
-| `GET /api/documents/{id}/chunks` | 分块，默认活动版本，可读取该文档的历史版本 |
-| `GET /api/documents/{id}/original` | 按文档 ID 获取原件（PDF 内联，Office/TXT 下载） |
-
-版本规则：解析结果写入**不可变解析版本**，分块与来源绑定该版本；重新解析成功后才切换预览版本。旧库（本阶段改造前的数据）迁移为 `legacy` 解析版本，保留原有文档 ID、分块 ID/内容/页码、向量、维度与提供方签名，不重新 OCR、不调用 embedding。
-
-## Embedding 索引与检索
-
-按用户提供的示例接入 `https://tokendance.space/gateway/v1` 网关，模型为 `qwen3.7-text-embedding`。这是用户指定的网关地址，不是阿里云官方直连地址；请使用此网关签发的密钥。DeepSeek 密钥不会被自动复用或发送到该网关。
-
-```dotenv
-EMBEDDING_API_KEY=
-EMBEDDING_BASE_URL=https://tokendance.space/gateway/v1
-EMBEDDING_MODEL=qwen3.7-text-embedding
-EMBEDDING_TIMEOUT_SECONDS=60
-EMBEDDING_BATCH_SIZE=8
-```
-
-使用流程：**测试向量连接 → 上传并解析文档 → 建立向量索引 → 检索当前文档原文**。
-
-| 接口 | 用途 |
-| --- | --- |
-| GET /api/embedding/status | 配置状态，不返回密钥，不验证账户连通性 |
-| POST /api/embedding/test | 固定文本测试，返回实际维度与归一化向量的前五项 |
-| GET /api/documents/{id}/index | 当前可用索引、绑定解析版本、是否对应当前预览版本 |
-| GET /api/documents/{id}/index/attempts | 索引构建尝试（含失败与过期） |
-| POST /api/documents/{id}/index | 建立索引，固定目标解析版本；同版本同模型已存在时复用 |
-| POST /api/documents/{id}/index?rebuild=true | 主动重建，会再次调用网关 |
-| POST /api/documents/{id}/search | 返回 index_id、parse_version_id、是否旧版本与每条来源 |
-
-索引构建是**候选发布**：向量全部成功并核对目标解析版本后才原子切换；失败不改变已有成功索引的可用状态。构建期间活动解析版本发生变化时，本次构建标记为过期（superseded），不会成为“新版本的索引”。
-
-`source_signature` 带算法版本：新算法（`sha256-version-chunks-v2`）绑定解析版本与块结构，旧算法（`sha256-chunk-dump-v1`）保留用于验证旧库索引，不会因为新增来源字段把旧索引误判为过期，也不会重算签名掩盖损坏。
-
-检索会返回命中分块的来源（PDF 页码与 bbox、DOCX 章节与表格、XLSX 工作表与单元格范围、TXT 行范围）；预览版本与索引版本不同时，页面与响应都会明确提示“检索仍使用旧版本”。
-
-## 任务式问答（网页默认，单文档、单轮）
-
-网页采用后台任务：提交后可切换文档，刷新／重启后可重开结果。问答与摘要／提取共用 `analysis-worker`，不增加常驻角色。任务固定解析版本、索引及来源、策略／Prompt／模型配置；提交和状态查询只操作本地库，后续由worker发出模型请求。
-
-| 接口 | 用途 |
-| --- | --- |
-| `POST /api/documents/{id}/question-jobs` | 创建任务，必填 `question` 和 `idempotency_key`，返回202；同键同内容复用，同键不同内容409 |
-| `GET /api/documents/{id}/question-jobs` | 当前文档任务历史 |
-| `GET /api/question-jobs/{id}` | 阶段、请求预算、调用状态、证据身份和耗时；不返回检查点正文 |
-| `POST /api/question-jobs/{id}/cancel` | 取消后续处理；在途请求可能计费 |
-| `POST /api/question-jobs/{id}/retry` | 明确重试，必填新的 `idempotency_key`；累计预算不重置，复用已有检索／回答检查点 |
-| `GET /api/question-results/{id}` | 读取已保存回答、缺项和引用 |
-| `GET /api/question-results/{id}/export?format=markdown` | 导出Markdown；也支持 `format=json` |
-
-```dotenv
-DOCQA_QUESTION_MAX_REQUESTS=4                  # 单任务累计外调上限（2～20），含失败／不确定调用
-DOCQA_QUESTION_RETRIEVAL_STRATEGY=hybrid-context # 可设 vector 做开发对照
-DOCQA_QUESTION_CONTEXT_K=32                    # 装入块数不超过候选数，同时受字符预算约束
-DOCQA_QUESTION_CANDIDATE_K=64                  # 本地混合候选上限，最多100
-DOCQA_QUESTION_CONTEXT_MAX_CHARS=24000
-DOCQA_QUESTION_INPUT_MAX_CHARS=32000
-```
-
-混合策略在一次查询embedding之后进行本地关键词BM25、向量排名融合、分问题锚点和章节／邻接扩展；概述题只有全部索引文本与元数据确实能装入预算时才采用完整索引文本路由。正文按问题抽取连续证据段，保留指代和条件依赖；表格保留整块表头、单位、空白/零和注释，不把改写摘要当原文。已完成3文档6题的开发对照，尚未证明混合策略全面优于向量；路由和召回数量不代表答案正确率。
-
-任务提示词为 `rag-task-v29`、协议为 `fact-context-parts-v7`：最多20条事实，每条从生成前公布的 `ref`／`unit` 中选择1～8个真实证据单元，声明direct/synthesis/inference，并用part_ids说明回答哪个原始子问。正文单元保留实际可见连续段，表格单元按行/句选择；真实跨页未完句在同一选项中列出各页范围。服务器展开独立原文范围并推导refs、稳定证据ID和子问事实索引，不让模型编造页码、坐标或范围。总计最多80个不同范围，每事实展开不超过48段；context只能来自本事实所选范围，全部事实、限定和缺项合计最多4000字符。原协议继续兼容，新任务失败不降级。
-
-输出后检查实际输入、完整原句、本条跨页绑定及高精度结构推断规则；风险随事实保存为support_review，页面/历史/导出保留“需复核”和“语义待复核”。精确匹配与规则通过均不证明一般语义蕴含，论断性质仍是模型声明。可只读展开指定解析版本并高亮文本，PDF坐标仍为分块区域。细节见[阶段02](docs/阶段02-检索与问答.md)。
-
-初次正常执行上界为1次查询embedding＋1次生成；无合格证据时跳过生成。默认累计上限4次为显式重试保留余量，不会自动重试。超时／崩溃留下未确认调用时进入 `needs_attention`。刷新、轮询、历史和导出不会新增模型请求。任务调用记录保留供应商实际返回的用量；未返回时标未知，尚无跨全部功能的累计费用限额。
-
-新代码要求schema v5，增加独立问答表。旧v4库默认拒绝启动；本轮已按用户授权完成正式v4→v5升级并验证数据保留。旧解析／索引不会自动重建；新章节和分块规则只有显式新解析版本才会生效。
-
-## 兼容同步 RAG 接口（旧契约）
-
-选中文档 → 输入问题 → 检索该文档的有效索引 → DeepSeek 基于片段生成回答 → 后端校验引用 → 页面展示答案与可核对来源。
-
-```dotenv
-# 问答预算：单位是字符，不是 token；真正的模型上下文限制仍需供应商实测。
-DOCQA_RAG_RETRIEVAL_K=8            # 一次提问最多检索的候选块数（1～20）
-DOCQA_RAG_CONTEXT_K=5              # 最多送入模型的证据块数（1～retrieval_k）
-DOCQA_RAG_CONTEXT_MAX_CHARS=12000  # 参考资料序列化后的字符上限
-DOCQA_RAG_INPUT_MAX_CHARS=20000    # system + user 消息字符上限
-DOCQA_RAG_MIN_SCORE=               # 空值表示禁用分数阈值；配置时必须是 [-1,1] 的有限数
-```
-
-| 接口 | 用途 |
-| --- | --- |
-| `POST /api/documents/{id}/questions` | 提问，请求体只有 `{"question": "..."}`；返回答案、状态、逐事实引用与检索统计 |
-| `GET /api/rag/status` | 问答配置、Prompt 版本与预算；不调用任何收费接口 |
-
-**回答状态**：`answered`（至少一个带引用的事实）、`clarification_needed`（1～2 个澄清问题，原因同样带引用）、`insufficient_evidence`（后端固定兜底文本，引用与澄清为空，只说明本次检索片段依据不足，不断言全文没有答案）。
-
-**引用规则**：引用编号由服务端对**本次最终入选证据**分配，模型只能引用确实进入 Prompt 的编号；文档 ID、chunk ID、页码、坐标与文件路径全部由后端从证据映射复制，模型看不到也无法伪造。每个引述必须是对应证据正文的连续子串（只允许统一 CRLF），被使用的每个编号恰好对应一条引述。Markdown 中的引用标记例如 `事实。[1][2]` 由后端按已校验编号生成，不集中堆在末尾。
-
-当前 Prompt 为 `rag-qa-v6`：先选原文引述，按论断分别组织引用，并区分用户条件与文档事实；补充说明避免重复结论，澄清问题直接询问缺失条件。答案不设最低字数，但必须保留条件与例外。历史固定集最新13/13及首次失败见[阶段04](docs/阶段04-真实语义验收与提取改进.md)，更早版本与引用边界见[阶段02](docs/阶段02-检索与问答.md)。本轮未重复RAG在线验收。
-
-**上下文与预算**：采用确定性整块装入——块连同必要元数据序列化后计入预算，容纳不下就跳过并继续尝试后续候选；入选块不会被从尾部硬截断，标题、表头、条件与脚注不会为了凑字数被删掉。因字符预算舍弃整块时返回 `retrieval.truncated=true`（表示证据集合不完整，不表示引用文本被截断）。字符预算**不等于** token 预算。
-
-**版本策略**：检索结果返回后，index_id、parse_version_id、chunk 文本与来源作为本次请求快照固定到结束。回答期间发布新解析版本或切换活动索引，都不会把 A 的正文与 B 的来源拼成一次回答：本次仍基于固定快照回答，并通过 `is_old_version` / `is_current_index` 与质量告警提示版本变化，**不会二次生成、不会二次计费**。下次提问才使用新版本（需先为新版本建立索引）。
-
-**错误与降级**：问题空白/超长/含额外字段 → 422；文档不存在 → 404；未解析、无索引或索引与当前 embedding 配置不兼容 → 409（不自动建索引）；缺少模型配置 → 503（不调用任何在线接口）；模型输出结构或引用校验不通过 → 502 + `rag_output_invalid`（不伪装成“资料不足”，不返回未校验内容，不自动重试）；上游超时 → 504。错误响应只含安全提示与稳定错误码，不含上游正文、异常堆栈、密钥或完整 Prompt。
-
-**旧同步接口的费用与幂等**：点击“提问”会发生在线调用并可能产生费用——问题会发送给已配置的 Embedding 服务用于检索，入选片段与问题会发送给已配置的 DeepSeek 服务用于生成回答。旧同步 `/questions` **没有持久化幂等保证**：两个独立的合法 POST 会产生两次费用；刷新页面或中断浏览器也不代表上游停止计费；此旧接口的结果不持久化；网页已切换到上面的任务接口。系统不会自动重发生成请求，页面加载、列表刷新、解析轮询与能力探测都不会触发问答。问答为单轮：不保存会话历史，澄清后的下一轮需要提交补全条件的完整问题，上一轮答案不会被当作事实回传。当前仅限本地服务运行，不应扩展为无鉴权公网部署。
-
-**网页交互**：提问期间按钮与输入框禁用、文档切换被锁定（第一版沿用 busy 锁定），因此重复点击与 Enter 连按不会产生第二次请求；即使如此，成功与失败分支都会校验请求序号与当前选中文档，迟到响应不会覆盖新状态。答案、澄清问题、质量提示、适用范围与引用卡片全部用 `createElement`/`textContent` 渲染，只支持有限 Markdown（标题/列表/加粗），不解析任意 HTML、图片或外链；模型文本中的 `<script>`、`img onerror`、`javascript:` 只能作为文字出现。点击引用标记 `[n]` 会定位到对应引用卡片，卡片提供“查看引用版本”（版本级预览，不声称已精确高亮对应字符）与 PDF 原件页码链接；DOCX/XLSX/TXT 按真实来源展示，不伪造 PDF 页码。
-
-## 文档摘要与信息提取（基于解析版本，不需要向量索引）
-
-选中文档 → 点击“查看分析范围”确认解析版本、可分析单元数、输入批次与**请求数上界** →
-明确发起“生成摘要”或“提取数据 / 结论 / 观点” → 分析 worker 分批生成并由服务端严格校验 →
-结果持久化保存 → 页面逐条展示引用与来源，可复制或导出 Markdown／JSON。
-
-```dotenv
-# 分析预算：单位是字符，不是 token。每个任务的生成尝试次数是费用硬上限。
-DOCQA_ANALYSIS_MAX_REQUESTS=8              # 单个分析任务的生成尝试上限（1～50）
-DOCQA_ANALYSIS_BATCH_MAX_CHARS=12000       # 每批送入模型的输入单元字符上限
-DOCQA_ANALYSIS_REDUCE_MAX_CHARS=16000      # 汇总阶段输入的字符上限
-DOCQA_ANALYSIS_INPUT_MAX_CHARS=20000       # system + user 消息字符上限
-DOCQA_ANALYSIS_MAX_DOCUMENT_CHARS=200000   # 单任务可遍历的解析版本文本上限
-DOCQA_ANALYSIS_MAX_ITEMS_PER_BATCH=15      # 单批提取条目上限
-DOCQA_ANALYSIS_MAX_ITEMS_TOTAL=60          # 单次任务提取条目总量上限
-```
-
-| 接口 | 用途 |
-| --- | --- |
-| `POST /api/documents/{id}/analysis-plan?kind=extraction\|summary` | **只做本地输入规划**：版本、范围、批次、消息长度、请求数上界与是否可执行；零外部调用 |
-| `POST /api/documents/{id}/extract` | 创建／复用信息提取任务；新建或进行中 202，幂等已完成 200 |
-| `POST /api/documents/{id}/summary` | 创建／复用文档摘要任务；状态同上 |
-| `GET /api/analysis-jobs/{job_id}` | 状态、阶段、预算、覆盖口径与结果入口；不返回模型原始正文 |
-| `GET /api/analysis-jobs/{job_id}/calls` | 调用账本：逐次请求的角色、状态与耗时 |
-| `POST /api/analysis-jobs/{job_id}/retry` | 明确重试：预算不重置，已校验步骤复用 |
-| `POST /api/analysis-jobs/{job_id}/cancel` | 取消后续处理，重复取消幂等 |
-| `GET /api/documents/{id}/analysis-jobs` | 该文档的分析任务历史 |
-| `GET /api/documents/{id}/analysis-results?kind=…` | 已校验结果历史（不含正文） |
-| `GET /api/analysis-results/{result_id}` | 已校验结果（含逐条引用与来源） |
-| `GET /api/analysis-results/{result_id}/export?format=markdown\|json` | 导出；文件名安全化、危险语法文本化 |
-| `GET /api/analysis/status` | 分析配置与预算；不调用任何收费接口 |
-
-**请求体只接受必要字段**（`parse_version_id`、`plan_fingerprint`、`idempotency_key`、`regenerate`）。
-类型由 `summary`／`extract` 入口决定；拒绝未知字段，前端不能提交 system 提示、模型端点、证据正文或文件路径。
-计划指纹不匹配（例如预览版本已切换）返回 409 并要求重新查看分析范围，避免静默扩大费用。
-
-**输入规划**：遍历该解析版本的**完整合格正文与表格清单**（不是检索 top-k）。页眉、页脚、图片与空白块
-被排除并单独计数；公式内容缺失时保留占位并标注“不能当作 0”。单个单元超过批次预算时本次规划
-**不可执行**并说明原因——第一版不提供“只处理前几批却称为全文”的降级，也不自动拆成多个收费任务。
-
-**引用规则**：服务端把单元编号**按批独立分配**，模型只能引用本批实际收到的编号；块 ID、页码、章节、
-工作表与单元格范围全部由后端从本次输入映射复制。每条提取项必须有非空 `refs`，每个被使用的编号恰好
-对应一条**原文连续子串**引述（仅允许 CRLF 归一化）。非空的事实字段（对象／数值／单位／时间／主体／口径）
-必须能在**任一**被引用单元的原文中找到，否则判失败——不允许主句有引用、数值或时间字段另行编造。
-
-**摘要的中间结果不是原文**：长文档先逐批生成**已校验**中间摘要，再用一次汇总调用合并；汇总阶段
-只接收已校验条目与其引述，最终引用由服务端沿链**回落到原文单元编号**。任一必需批次未完成、
-校验失败或预算耗尽时，本次不发布“完整全文摘要”，已校验检查点保留供明确重试，旧成功结果继续可读。
-
-**覆盖口径**（与任务状态分开）：`total_units`、`processed_units`、`unresolved_units` 及原因、
-`excluded_units` 及原因、完成批次数、是否执行汇总、`complete`，以及最终引用是否全部回落到原文。
-`complete=true` 表示“该解析版本的可分析内容已全部处理”，**不是** OCR 正确率或任意全文理解率。
-
-**错误与费用**：不存在 404；非法参数 422；解析版本不可用、计划指纹或幂等键冲突 409；缺生成模型配置 503；
-上游错误只返回稳定安全提示与错误码，不含密钥、路径或上游原始响应。**查询状态、查看历史、复制与导出
-都不会触发生成**；重试不会重置预算，页面明确提示重试可能重复计费。
-
-**语义边界（必读）**：后端校验只证明结构合法、编号范围正确、引述可追溯到原文，
-**不能证明每个结论在语义上必然正确**。真实语义由 `scripts/evaluate_analysis.py` 在明确预算内评估，
-逐题结果、版本与失败记录见[阶段04：真实语义验收与提取改进](docs/阶段04-真实语义验收与提取改进.md)。
-
-## 质量边界（必须阅读）
-
-接口 `success` 不等于识别无误。本阶段明确记录并展示：
-
-- PDF `formula` 节点内容为空 → `formula_content_missing` 告警，保留公式位置，不填补内容；
-- XLSX 公式无缓存值 → `formula_cache_missing` 告警，**不得当作 0 或空白**，也不交由模型猜结果；有缓存时也只声明“文件保存的缓存”，不宣称已重新计算；
-- 目录被识别成表格或长点线 → `toc_dot_leaders` 提示，只在目录上下文保守清理点线，不全局删除点号/连字符/百分号；
-- 空白页 → `blank_page` 提示，页码保持原编号不变；
-- 扫描 / 混合 PDF → `ocr_limitation` 提示，可能存在错字、目录页码错位与阅读顺序问题；系统**不声称能自动发现全部 OCR 错误或阅读顺序错误**；
-- 图片 / 统计图 → 未做语义解析，图内文字与数据系列不作为可靠事实；
-- 页眉页脚 → 保留在预览中，但不参与检索分块；
-- 整份文档没有可索引内容 → 明确失败，不创建空的“成功索引”。
-- 表格标题、表头、注释本身超过分块容量 → 报 `chunking_invalid`，保留旧版；可在模型输入限制内调大 `DOCQA_CHUNK_MAX_CHARS` 后重试，不截断关键条件。
-
-已知上游缺陷（见全样本验收报告）不会被自动修复：中文条款错序、扫描目录页码错误、科学计数法被展平、公式内容缺失。页面始终保留原件入口用于人工核对。
-
-## 尚未实现
-
-网站抓取、浏览器插件、多用户系统、多文档知识库、跨文档问答、多轮会话记忆、查询改写、
-重排服务、联网搜索、图表语义识别、公式重算均未接入；`/api/capabilities` 中对应项为 `false`。
-旧 `.doc`/`.xls`、图片、PPTX 等格式未验收，不能因 Docling 支持某格式便直接对外承诺。
-当前为本地单机、单用户部署，未引入 Redis/Celery 或专用向量数据库。
-
-已实现（`/api/capabilities` 为 `true`）：上传与格式识别、Docling 解析（含扫描件 OCR）、
-版本化解析与来源、质量告警、embedding 索引与检索、单文档单轮问答、**文档摘要**、
-**数据／结论／观点提取**、分析任务持久化与结果导出。
-
-已知边界见[阶段04](docs/阶段04-真实语义验收与提取改进.md)和[阶段05](docs/阶段05-代码审查与加固.md)：
-
-- RAG v5的12/13与S03失败保留；后续v6固定集最新13/13，不能回填历史或保证任意来源关系均正确。
-- 历史真实浏览器与启停恢复证据已保留；本轮最新网页48项是离线DOM桩，不冒充新真实浏览器成绩。
-- 摘要采用单层汇总；单引用600字符、条目预算及大表覆盖存在明确限制。
-- 语义成绩绑定有限样本、版本和请求；新合成解析投影未重新经过Docling上传全流程，不代表长期正确率。
-
-## 目录
+新文档／知识库问答任务采用真实上游流式：
 
 ```text
-app/
-  main.py                 应用工厂、API、页面入口
-  config.py               环境配置与校验（含分析预算）
-  schemas.py              数据契约（任务/版本/块/来源/告警/索引/问答/分析）
-  migrations.py           带版本号的数据库迁移与一致性备份（当前 SCHEMA_VERSION=5）
-  repository.py           SQLite 持久化（任务领取、版本发布、索引切换、分析任务与账本）
-  file_detect.py          上传格式识别（内容判定与安全限制）
-  docling_client.py       Docling 客户端（提交/查询/领取、错误分类、期限）
-  parse_worker.py         持久化解析 worker（python -m app.parse_worker）
-  analysis_worker.py      持久化分析 worker（python -m app.analysis_worker）
-  document_normalizer.py  Docling 结果规范化、来源映射与质量告警
-  chunking.py             结构化分块（正文/表格/目录/公式占位）
-  parsing.py              本地 TXT 解析与旧分块兼容
-  vector_index.py         版本化向量索引与检索
-  embedding.py            Embedding 网关调用、分批与向量校验
-  deepseek.py             DeepSeek API 调用与安全错误转换
-  rag.py                  RAG 问答编排（前置检查、快照、生成、降级）
-  rag_context.py          证据构建、字符预算与引用编号分配
-  rag_prompts.py          固定系统规则与内部 JSON 协议（Prompt 版本 rag-qa-v6）
-  rag_validation.py       严格解析、结构与引用校验、Markdown 渲染
-  analysis_sources.py     分析输入规划（单元、批次、上界、覆盖口径、计划指纹）
-  analysis_prompts.py     提取／摘要／汇总提示词与独立版本常量
-  analysis_validation.py  严格解析、字段与引用校验、确定性合并
-  extraction.py           提取分批、校验入口与三类状态汇总
-  summarization.py        摘要分批与汇总、引用链回落
-  analysis_jobs.py        分析任务生命周期服务（规划/创建/重试/取消/结果/导出）
-  providers.py            OCR / Embedding / 向量库 / 大模型协议
-  web/                    工作台页面
-scripts/
-  start_local.ps1         Windows 启动入口（端口检查、角色记录、隐藏窗口）
-  status_local.ps1        服务状态与进程归属核对（只读）
-  stop_local.ps1          只停止自身服务的停止入口
-  seed_recovery_sample.py M5 恢复演练（注入合成解析版本，零真实调用）
-  evaluate_analysis.py    摘要／提取语义评估（默认离线；在线需显式授权与累计预算）
-  evaluate_stable_closure.py 本轮八项固定复验入口（默认离线；首轮失败后已停止）
-  review_analysis_evidence.py 对已保存的原始模型正文做逐条复核（零在线调用）
-  acceptance_e2e.py       真实解析链路验收（上传→异步解析→预览→来源）
-  browser_acceptance.mjs  真实浏览器验收（T21/T22，Chrome + CDP）
-  evaluate_rag.py         RAG 离线语义评估；历史在线入口已关闭
-  evaluate_rag_live.py    历史在线最小批次源码，仅供核对旧证据
-  rag_browser_acceptance.mjs  历史RAG网页验收源码，收费执行入口已关闭
-  inspect_scan_page.py    扫描 PDF 页面结构核对（确认无文本层、来源为 OCR）
-  container_ocr_page.py   容器内独立重新 OCR 指定页（核对引文是否来自原件）
-  check_secrets.py        密钥自检（比对本地密钥是否出现在 Git 可见文件，不输出密钥值）
-  validate_docling.py     独立解析服务验证（仅本机）
-deploy/docling/           解析服务 GPU 部署与验证
-docs/                     索引、接力、主任务书及五份阶段汇总（入口 docs/README.md）
-tests/                    离线自动测试（不依赖 Docker、密钥或现有数据）
-  fixtures/rag/           RAG 语义评估用例、合成样本知识库
-  fixtures/analysis/      分析任务的固定合成样例清单（8 场景 + 4 负例）
-  web/render_safety.mjs   网页渲染安全回归（加载真实 app.js 的 DOM 桩测试，21 项）
+提交幂等任务 → analysis-worker 领取并预扣调用
+  → 意图分流；知识问答检索并固定证据
+  → 一次上游生成请求，接收增量 JSON
+  → 完整论断到达 → 局部引用／限定校验 → 持久化事件 → SSE 展示“生成中”
+  → 全部协议、覆盖和引用复验 → 保存正式结果 → 完成／开放导出
 ```
 
-## 验证
+不显示思考、半截 JSON 或未经局部校验的文字。局部事件不是完整成功答案；失败、截断、取消和 worker 中断保留未完成状态。刷新／SSE 重连按游标读取原任务，不另发生成；每条事件重验登录和权限。原同步 `/questions`、无流式快照的旧任务继续兼容，不在读取旧结果时补造新认证。
 
-```powershell
-# 全部离线自动测试（临时目录、临时 SQLite、可注入客户端与模拟 embedding）
-.\.venv\Scripts\python.exe -m pytest -q
+当前 thinking 参数不变，首块仍需等待模型正文；本轮单题实测首块约41.95秒、上游结束约43.33秒，6个有效块在上游结束前落盘。这证明流式接通，不代表普遍性能或P95成绩。
 
-# 网页渲染安全回归（离线，无需浏览器）
-node tests/web/render_safety.mjs
+## 摘要、信息提取与临时资料
 
-# 分析任务离线语义固件（零在线调用）：8 正例通过、4 负例按设计失败
-.\.venv\Scripts\python.exe scripts/evaluate_analysis.py --offline `
-  --data-dir data/stable-release-dev/analysis-eval
+摘要／提取基于固定解析版本，**不需要向量索引**。先查看分析范围、批次和请求上界，再明确提交。长文档逐批校验并汇总，最终引用回落原文；必要批次未完成时不发布“全文完成”。支持历史、来源、复制和 Markdown／JSON 导出。详细协议及语义边界见[阶段03](docs/阶段03-稳定版工程与恢复.md)和[阶段04](docs/阶段04-真实语义验收与提取改进.md)。
 
-# 分析任务在线语义评估（必须显式授权；受跨目录累计预算约束，不会重置）
-.\.venv\Scripts\python.exe scripts/evaluate_analysis.py --allow-online `
-  --cases E1,E2,E3,E4,S1,S2,S3,S4 --max-requests 24 `
-  --data-dir data/stable-release-dev/analysis-eval
-
-# 逐条复核已保存的原始模型正文（零在线调用）
-.\.venv\Scripts\python.exe scripts/review_analysis_evidence.py
-
-# RAG 语义评估：默认离线模拟（不产生任何在线请求）
-.\.venv\Scripts\python.exe scripts/evaluate_rag.py --all-cases --data-dir data/rag-eval
-
-# 历史 RAG 在线评估及 rag_browser_acceptance.mjs 已关闭收费执行入口。
-# 新在线验收须使用当前冻结计划和累计账本；旧命令的 --max-requests 不能重新授权。
-
-# 真实解析链路验收（需要已启动 Docling、Web 与 worker）
-$env:PYTHONIOENCODING = 'utf-8'
-.\.venv\Scripts\python.exe scripts/acceptance_e2e.py --api http://127.0.0.1:8010 --timeout 2400
-
-# 真实浏览器验收 T21/T22（需要 Chrome 与正在运行的 Web）
-node scripts/browser_acceptance.mjs --api http://127.0.0.1:8010
-```
-
-自动测试默认离线，覆盖旧库迁移、任务幂等与租约、上游错误分类、结果幂等发布、空白页、表格去重、多来源、XLSX 坐标与公式缓存、长表分块、索引候选发布与失败保留、格式伪装与越权访问、RAG 证据范围与字符预算、输出协议与引用校验、HTTP 状态与调用次数、版本竞态与上游错误脱敏，以及**分析任务的迁移 v3、输入规划与覆盖口径、幂等与原子领取、租约与过期令牌、逐请求预算预扣、不确定调用不自动重发、检查点复用与重试、版本竞争、跨批编号拒绝、字段依据校验、多批摘要引用链回落、导出与转义、真实 SDK + MockTransport 的 HTTP 契约**等场景。`tests/test_real_fixtures.py` 使用真实 Docling 结果夹具，夹具缺失时会跳过并提示，不会把跳过当成通过。
-
-## 数据库迁移与恢复
-
-当前 `SCHEMA_VERSION=5`。启动及 API／worker 操作检查实际版本和结构；结构契约直接从同一套迁移生成。已有旧库只在明确允许升级后执行增量迁移，迁移前用 SQLite 在线备份 API 生成一致性副本到所选目录的 `db-backups/`（包含 WAL 中已提交数据）。迁移失败会停止启动并保留原库与备份。v3 新增分析表；v4 新增 `analysis_request_keys` 并结转旧请求键；v5 新增持久化问答表，不改写旧任务或结果。不能靠 `-SkipMigrationCheck` 绕过兼容性检查。
-
-恢复步骤：
-
-1. 停止 Web 与 worker，避免继续写入；
-2. 完整保留现库及其 `-wal`、`-shm`；活跃库另取副本时使用 SQLite backup API；
-3. 在服务全部停止后，把现库及对应 WAL/SHM 移到保留目录，再将选定的迁移前一致备份恢复到目标库路径；不能残留旧 WAL；
-4. 使用与该备份版本匹配的代码启动。先核对工作区未提交修改，不能为了回滚覆盖尚未保存的工作；正式恢复也需用户决定。
-
-正式库曾在2026-10-10按用户授权完成v2→v4，并于2026-10-18按后续授权完成v4→v5，备份及验证见[阶段03](docs/阶段03-稳定版工程与恢复.md)。当前v11表格辅助证据与限定语候选使用现有快照／结果JSON，无新增迁移；正式业务数据保持不变，工作区尚未提交或推送。
-
-
-## 临时资料保留与维护
-
-从聊天页上传会建立该用户的专属单资料会话，不加入知识库；当前不能向已有会话追加多份附件。上传不自动解析、索引或生成，建索引/提问须主动操作。默认保留24小时、同时5份，配置为`DOCQA_ATTACHMENT_TTL_HOURS`（1～720）和`DOCQA_ATTACHMENT_MAX_ACTIVE`（1～50）；大小沿用`DOCQA_MAX_UPLOAD_MB`。到期或移除后，原件、历史回答、来源及导出均停止读取；已发出的上游请求可能继续计费。
-
-物理清理在停止Web及全部worker后执行：
+聊天上传也进入知识库链路；可向当前可写库追加多份文档，或创建本人专属临时库。临时库默认24小时、每人同时5个，其他用户和管理员不能读取其原件及问答。到期／移除后停止读取、事件发送和后续调用。已发出的上游请求可能继续计费。新旧临时资料物理清理共用停机命令：
 
 ```powershell
 .venv\Scripts\python.exe -m app.attachment_maintenance --data-dir D:\python\DocQA\data
 ```
 
-命令保留调用账本与请求键，移除已到期/移除附件的原件及派生正文；有角色存活则拒绝清理。自动定时清理及备份保留策略待M5；此命令不删除历史备份或Docling上游缓存，不承诺安全擦除。恢复服务使用原`start_local.ps1`，不会自动重建附件。
+清理保留调用账本和请求键，不清历史备份或 Docling 缓存，不承诺安全擦除。自动定时清理和备份保留政策待完成。
 
-本轮全量1243项通过，末次前端清屏修正后50项定向及6组网页检查通过。真实供应商HTTP新增0，累计仍97/128；新会话/附件的真实模型语义质量待另行验收。当前最新事实见[接力说明](docs/稳定试用版接力说明.md)，开头RAG schema5/1191为此前阶段成绩。
+## 配置、容量与调用预算
 
+完整参数见 [.env.example](.env.example)。以下为当前默认值，字符容量不等于模型 token 窗口。
 
-知识库团队模块：管理员从 `/admin` 创建并配置知识库，在 `/knowledge` 上传、执行分块、建索引、发布和授权；客户从 `/app/knowledge` 使用库内多文档问答。意图树和链路追踪分别在 `/admin/intents`、`/admin/traces`。分块修改生成新草稿，重新索引并明确发布后才对客户生效。功能范围及验收边界见[产品化计划第21.4节](docs/product/产品化升级计划书.md)。
+| 范围 | 参数与默认值 |
+| --- | --- |
+| 上传 | `DOCQA_MAX_UPLOAD_MB=20`、`DOCQA_MAX_PDF_PAGES=100` |
+| 临时资料 | `DOCQA_ATTACHMENT_TTL_HOURS=24`、`DOCQA_ATTACHMENT_MAX_ACTIVE=5` |
+| 分块 | `DOCQA_CHUNK_MAX_CHARS=800`、`DOCQA_CHUNK_OVERLAP_CHARS=120`、`DOCQA_TABLE_ROWS_PER_CHUNK=20` |
+| 任务式问答 | `DOCQA_QUESTION_CANDIDATE_K=64`、`DOCQA_QUESTION_CONTEXT_K=32`、资料24000／总输入32000字符；`DOCQA_QUESTION_MAX_REQUESTS=4` |
+| 同步兼容问答 | `DOCQA_RAG_*` 独立控制：候选8／装入5、资料12000／总输入20000字符 |
+| 摘要／提取 | `DOCQA_ANALYSIS_*`：最多8请求／任务，批次12000／汇总16000／总输入20000字符，文档200000字符 |
+
+任务问答的装入数≤候选数≤100、资料字符上限<总输入上限；配置变更会使旧排队快照受控失败，新任务使用新配置。必要证据槽位优先装入，正文按问题抽取连续原句，表格保留表头／单位／空白和0；未装入内容不能引用。更大容量须另验供应商窗口、延迟和费用，不靠扩大字符数宣称覆盖必然充分。
+
+一次普通知识问答通常为1次查询向量＋1次生成；无合格证据可跳过生成。每次外调先预扣，失败／不确定也计次，明确重试不重置；不确定在途请求进入 `needs_attention`，不自动重发。刷新、历史、配置、意图测试台、事件重放、导出不新增模型请求。主动连接测试、建索引、业务提问、摘要和提取可能计费。
+
+工程验收另用同一累计账本，当前102/128，余26；包含失败和不确定调用。本轮新增3次用于新TXT自动入库及知识库流式回答。该账本不是全部客户的日用量／货币限额，用户及全局配额仍待实现。
+
+## API 与实现导航
+
+请求体、字段及鉴权以管理员登录后的 `/docs` 为准。不同链路使用各自请求键，不应将文档会话的 `idempotency_key` 与库级的 `request_key` 混用。
+
+| 接口族 | 关键入口 |
+| --- | --- |
+| 账号／知识库 | `/api/auth/*`、`/api/admin/users`、`/api/knowledge-bases`（发布／成员授权） |
+| 库内上传／索引／分块 | `/api/admin/knowledge/bases/{base_id}/documents`、`/api/admin/knowledge/documents/{id}/index-tasks`、`chunks`／`chunk-revisions` |
+| 文档解析／版本／检索 | `/api/documents/{id}/parse`、`/api/parse-tasks/{id}`、`content`／`versions`／`chunks`／`original`、`index`／`search` |
+| 文档会话 | `/api/conversations`、`/{id}/turns`、`PATCH /{id}`（记忆／归档／名称） |
+| 库级会话 | `/api/kb-conversations`、`/{id}/turns`、`/{id}/memory`、`/api/kb-tasks/{id}` |
+| 问答任务／结果 | `/api/documents/{id}/question-jobs`、`/api/question-jobs/{id}`、`/api/question-results/{id}`，含明确重试／取消及结果导出 |
+| 流式重放 | `GET /api/question-jobs/{id}/events`、`GET /api/kb-tasks/{id}/events`，支持 `after`、`Last-Event-ID` |
+| 摘要／提取 | `/api/documents/{id}/analysis-plan`、`summary`／`extract`、`/api/analysis-jobs/{id}`、`/api/analysis-results/{id}` |
+| 意图／链路 | `/api/admin/intents`、`POST /api/admin/intents/test`、`/api/admin/traces` |
+| 运行诊断 | `/api/health`、`/api/runtime/status`、`/api/admin/settings`、`/api/parsing/status`；仅解析状态会探测本地解析服务 |
+
+核心实现：`app/main.py` 装配和权限入口；`product_access.py`／`product_routes.py` 管理账号与发布；`knowledge_pipeline.py`／`knowledge_questions.py` 管理库流程；`conversations.py` 管理文档会话；`intent_routing.py` 执行规则；`question_worker.py`／`knowledge_worker.py` 执行任务；`rag.py`／`rag_answer_contract.py` 处理证据及事实协议；`answer_stream*.py` 与 `web/answer-stream.js` 实现流式持久化和重放；`migrations.py` 是数据库结构来源。
+
+## 数据库升级与恢复
+
+当前代码要求 schema14，迁移为1～14连续登记。v6账号及发布、v7会话、v8临时资料、v9安装设置、v10库级任务／意图／链路、v11头像、v12意图策略、v13流式事件、v14统一知识库链路。v14新增6张表及库／会话属性，旧未归库文档只增加管理员私有范围投影，已有有效索引复用；旧结果、解析及向量不重写或重建。正式升级保全检查以发布核验为准。
+
+升级前停止三个角色，检查活动任务，使用 SQLite backup API 做一致性副本（包含 WAL 已提交数据），在副本演练并验证旧记录／来源后再正式升级。标准入口对获准旧库自动备份至 `db-backups/`；结构不兼容、断裂迁移或未来版本拒绝启动，`-SkipMigrationCheck` 不能绕过。
+
+回退须先保存升级后新增会话、原件、头像、账本及当前库／WAL／SHM，再恢复**匹配版本的源码和一致性备份**，不能让旧 WAL 覆盖恢复库。数据库备份不包含 `uploads/` 原件、服务器 `.env` 或 Docling 模型缓存，完整灾备需分别保存和演练。历次切换证据见[阶段03](docs/阶段03-稳定版工程与恢复.md)；实时状态另查本机进程。
+
+## 验证与质量边界
+
+GitHub Actions 的 `Full regression` 在每次推送、PR更新及手动运行时执行全量离线回归，配置位于[现有工作流](.github/workflows/rag-quality.yml)。使用Windows、Python3.11、Node24和锁定依赖，在项目`.venv`运行，覆盖Windows PowerShell5.1与PowerShell7的实际启停测试；不使用模型密钥，不启动Docker或下载模型。
+
+本地可运行与CI相同的入口，报告目录必须是`data/`内的新目录，已有结果不会覆盖：
+
+```powershell
+.venv\Scripts\python.exe scripts/run_regression.py --output-dir ("data/ci-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+```
+
+入口执行依赖一致性、全量pytest、自动发现的全部`tests/web/*.mjs`、文档一致性、既有RAG检索基线与防退步关卡、事实引用和范围回放，以及`git diff --check`。独立检查失败后继续收集其他结果，最终返回非零；不自动重试。GitHub运行摘要及保留14天的报告包含JUnit、逐检查日志和JSON，上传范围不含运行数据库、原件或`.env`。跳过项明确保留，不代表在线语义或真实浏览器验收通过。分项排查仍可使用：
+
+```powershell
+.venv\Scripts\python.exe scripts/check_docs.py
+.venv\Scripts\python.exe -m app.runtime --data-dir data
+.venv\Scripts\python.exe -m pytest -q
+Get-ChildItem tests/web -Filter *.mjs | ForEach-Object { node $_.FullName; if ($LASTEXITCODE -ne 0) { throw '网页检查失败' } }
+```
+
+测试默认使用临时目录／模拟传输，不依赖真实密钥；仓库必备格式夹具缺失会失败，需要外部条件的跳过项会明确列出，不能算通过。`check_docs.py` 检查文档链接、冻结归档哈希、README版本及配置样例与源码的一致性，不证明每句业务描述或模型语义正确。在线评估、真实解析和故障演练按各自冻结范围在独立目录执行，不拿正式默认库做实验。
+
+2026-10-22使用上述CI共用入口的本地单次验证：1425项pytest通过（486.49秒、0跳过、2条既有依赖警告），9组网页及其余离线关卡通过，共17项检查通过。工作流actionlint校验通过。GitHub托管状态以[对应提交的实际运行](https://github.com/TongYule131/DocQA/actions/workflows/rag-quality.yml)为准，不能把本地结果当成远端运行结果。
+
+RAG 历史三题同一关键引文实际输入覆盖8/17→17/17，核心内容和 DOCX／XLSX 回归经过开发复核，仍有性质声明待复核；这是规定资料的历史开发成绩。本轮统一链路单次全量1417通过（428.43秒、2条既有依赖警告）；随后完善并发别名、临时资料清理和文件列表，追加29项定向及8组网页检查通过，pip依赖检查通过，不累加成一次全量。真实隔离TXT链路新增3次HTTP，索引／查询／生成各一次，流式和最终引用保存成功。不是全部资料或多轮语义重新验收。首次失败、修复和正式切换见[阶段05](docs/阶段05-代码审查与加固.md)及接力说明。
+
+原文精确匹配证明可追溯性，不能自动证明语义支持。OCR错字、阅读顺序、扫描表格、缺失公式／XLSX公式缓存仍需原件核对；空白不等于0，不重算公式。引用坐标为块区域，不承诺原始 PDF 逐字符高亮；结构推断、未装入范围及语义待复核状态保留在详情与导出。OCR实验尚未替换正式解析默认。独立新资料盲测、真实多轮收益、完整无缓存性能和容量验收继续按[提升路线](docs/整体能力提升方案.md)推进。
+
+## 隔离界面预览
+
+```powershell
+$env:DOCQA_DATA_DIR = Join-Path (Get-Location) "data/preview-local"
+.venv\Scripts\python.exe scripts/product_preview.py --data-dir $env:DOCQA_DATA_DIR --port 8997 --streaming-preview
+```
+
+仅允许本工作树下独立目录及回环地址。脚本运行实际解析worker（复杂格式仍需 Docling）和模拟索引／生成，页面有明确标识；`--streaming-preview` 演示分段输出，不证明真实模型质量。使用 `http://localhost:8997`；预览 Cookie 名为 `docqa_preview_8997`，正式实例保留 `docqa_session`，仅换端口不能隔离同主机Cookie。普通启动使用实际供应商配置。

@@ -255,6 +255,8 @@ def test_v6_migration_is_atomic_and_old_documents_remain_private(tmp_path):
         migrations.run_migrations(db)
         assert migrations.validate_schema(db) == migrations.SCHEMA_VERSION
         assert tuple(db.execute('SELECT * FROM documents').fetchone()) == before
-        for table in ['product_users', 'knowledge_bases', 'knowledge_base_members', 'knowledge_base_snapshots']:
+        for table in ['product_users', 'knowledge_base_members', 'knowledge_base_snapshots']:
             assert db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] == 0
+        # v14只添加私有历史资料投影，不向团队发布或授予客户权限。
+        assert tuple(db.execute('SELECT kind,active_snapshot_id FROM knowledge_bases').fetchone())==('legacy',None)
         assert migrations.run_migrations(db)['applied'] == []

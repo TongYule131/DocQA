@@ -79,8 +79,8 @@ class Conversations:
                 return self.memory(conversation, connection)
         questions = []
         if conversation['memory_enabled']:
-            questions = [r[0][:600] for r in db.execute("SELECT t.question FROM conversation_turns t JOIN question_jobs j ON j.id=t.job_id "
-                "WHERE t.conversation_id=? AND t.turn_no>? AND j.status='succeeded' ORDER BY t.turn_no DESC LIMIT 3",
+            questions = [r[0][:600] for r in db.execute("SELECT t.question FROM conversation_turns t JOIN question_jobs j ON j.id=t.job_id JOIN question_results r ON r.id=j.result_id "
+                "WHERE t.conversation_id=? AND t.turn_no>? AND j.status='succeeded' AND COALESCE(json_extract(r.answer_json,'$.response_kind'),'knowledge')!='system' ORDER BY t.turn_no DESC LIMIT 3",
                 (conversation['id'], conversation['memory_after_turn']))][::-1]
         return {'enabled': bool(conversation['memory_enabled']), 'epoch': conversation['memory_epoch'],
                 'context': {'version': MEMORY_VERSION, 'notes': conversation['memory_notes'] if conversation['memory_enabled'] else '',
@@ -133,7 +133,13 @@ class Conversations:
         published = self.access.require_document(conversation['document_id'])
         context = {'id': identifier, 'revision': conversation['revision'], 'memory_epoch': conversation['memory_epoch'],
                    'request_key': payload.idempotency_key, 'memory': memory['context'] if memory['enabled'] else None}
+        from app.intent_management import IntentManagement
+        with self.repository.connect() as db:
+            base_row=db.execute('SELECT knowledge_base_id FROM knowledge_base_snapshots WHERE id=?',(published['snapshot_id'],)).fetchone() if published else None
+        intent_base_id=base_row[0] if base_row else None
+        resolution=IntentManagement(self.repository).evaluate(payload.question.strip(),intent_base_id,scope='document')
         return self.questions.submit(conversation['document_id'],
             {'question': payload.question.strip(), 'idempotency_key': 'conv/' + identifier + '/' + payload.idempotency_key},
             request_id=request_id, owner_user_id=self.owner,
-            knowledge_snapshot_id=published['snapshot_id'] if published else None, conversation=context)
+            knowledge_snapshot_id=published['snapshot_id'] if published else None, conversation=context,
+            intent_resolution=resolution, intent_base_id=intent_base_id)

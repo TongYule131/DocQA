@@ -3,8 +3,8 @@ import json
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter,HTTPException,Query,UploadFile,File,Header
-from fastapi.responses import FileResponse,PlainTextResponse
+from fastapi import APIRouter,HTTPException,Query,UploadFile,File,Header,Request
+from fastapi.responses import FileResponse,PlainTextResponse,RedirectResponse
 from pydantic import Field
 
 from app.product_routes import StrictBody
@@ -45,7 +45,16 @@ class IntentBody(StrictBody):
     top_k:int|None=Field(default=None,ge=1,le=32)
     sort_order:int=Field(default=0,ge=0,le=10000)
     enabled:bool=True
+    match_mode:Literal['exact','interaction','keywords']='exact'
+    interaction_kind:Literal['welcome','about','thanks','correction']|None=None
+    keywords:list[str]=Field(default_factory=list,max_length=20)
     expected_revision:int|None=Field(default=None,ge=1)
+
+
+class IntentTestBody(StrictBody):
+    questions:list[str]=Field(min_length=1,max_length=100)
+    scope:Literal['document','knowledge']='document'
+    base_id:str|None=Field(default=None,max_length=100)
 
 
 class ConversationBody(StrictBody):
@@ -168,6 +177,19 @@ def install_knowledge_routes(app,access,rag):
     @router.get('/api/admin/intents')
     def list_intents():admin();return intents.list()
 
+    @router.post('/api/admin/intents/test')
+    def test_intents(body:IntentTestBody):
+        admin()
+        if any(not q.strip() or len(q)>500 for q in body.questions):raise HTTPException(422,'每个测试问题须为1～500字符')
+        if body.base_id:access.base(body.base_id)
+        rows=intents.list()
+        from app.intent_routing import decide
+        results=[]
+        for question in body.questions:
+            route,decision=decide(question,body.base_id,rows,body.scope)
+            results.append({'question':question,'decision':decision,'response_preview':route.get('response_text') if route['kind']=='SYSTEM' else None,'top_k':route.get('top_k')})
+        return {'results':results,'supplier_calls':0,'persisted':False,'note':'与会话使用同一规则；测试不创建问答任务，不执行检索、模型或工具'}
+
     @router.get('/api/admin/mcp-tools')
     def tools():
         admin();from app.knowledge_tools import ToolRegistry
@@ -199,8 +221,12 @@ def install_knowledge_routes(app,access,rag):
         return value
 
     def page_handler(path):
-        def page():
+        def page(request:Request):
             if path.startswith('/admin/'):admin()
+            if path=='/app/knowledge':
+                from urllib.parse import urlencode
+                base=request.query_params.get('base')
+                return RedirectResponse('/app'+('?' + urlencode({'base':base}) if base else ''),status_code=303)
             return FileResponse(Path(__file__).parent/'web'/('knowledge-chat.html' if path=='/app/knowledge' else 'knowledge-admin.html'))
         return page
     for path in ['/admin/intents','/admin/traces','/admin/chunks','/app/knowledge']:

@@ -73,6 +73,9 @@ def install_admin_routes(app, access):
             db.execute('UPDATE kb_conversations SET owner_user_id=? WHERE owner_user_id IS NULL',(identifier,))
             db.execute('UPDATE kb_tasks SET owner_user_id=? WHERE owner_user_id IS NULL',(identifier,))
             db.execute('UPDATE conversation_attachments SET owner_user_id=? WHERE owner_user_id IS NULL', (identifier,))
+            db.execute("UPDATE knowledge_bases SET created_by=? WHERE created_by IS NULL AND kind='temporary'",(identifier,))
+            db.execute('UPDATE ingestion_jobs SET owner_user_id=? WHERE owner_user_id IS NULL',(identifier,))
+            db.execute('UPDATE chat_submissions SET owner_user_id=? WHERE owner_user_id IS NULL',(identifier,))
             db.execute('UPDATE question_jobs SET owner_user_id=? WHERE owner_user_id IS NULL AND '
                        'conversation_id IN (SELECT id FROM conversations WHERE owner_user_id=?)', (identifier, identifier))
             db.execute('UPDATE product_installation SET team_enabled=1,cookie_secure=?,initialized_at=? WHERE singleton=1',
@@ -95,6 +98,8 @@ def install_admin_routes(app, access):
                                    '(SELECT 1 FROM conversation_attachments a WHERE a.document_id=d.id)').fetchone()[0]
             creators = db.execute('SELECT COUNT(DISTINCT created_by) FROM knowledge_bases').fetchone()[0]
             users = db.execute('SELECT COUNT(*) FROM product_users').fetchone()[0]
+        allowed={b['id'] for b in access.list_bases()};bases=[b for b in bases if b['id'] in allowed]
+        documents=len(access.visible_documents(access.repository.list_documents()))
         return {'bases': bases, 'stats': {'knowledge_bases': len(bases), 'documents': documents,
                 'populated_bases': sum(b['document_count'] > 0 for b in bases), 'creators': creators, 'users': users},
                 'index_storage': 'SQLite · 每份文档独立索引', 'embedding_model': access.settings.embedding_model,

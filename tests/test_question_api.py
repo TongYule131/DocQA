@@ -1,5 +1,6 @@
 """任务式问答走真实SDK／索引／RAG，只在供应商HTTP边界使用MockTransport。"""
 import json
+import httpx
 
 import pytest
 
@@ -17,7 +18,19 @@ from tests.test_question_jobs import REPLY
 class Gateway(SyncGateway):
     def __init__(self):
         super().__init__()
-        self.generation_handler=lambda payload:self.completion(REPLY)
+        self.generation_handler=self.reply
+
+    def reply(self, payload):
+        # 保留真实 SDK；新任务按实际请求返回 SSE，旧同步路径仍返回 JSON。
+        if not payload.get('stream'):
+            return self.completion(REPLY)
+        chunks=[{'id':'mock-stream','object':'chat.completion.chunk','created':0,'model':'synthetic',
+                 'choices':[{'index':0,'delta':{'content':REPLY[i:i+23]},'finish_reason':None}]}
+                for i in range(0,len(REPLY),23)]
+        chunks.append({'id':'mock-stream','object':'chat.completion.chunk','created':0,'model':'synthetic',
+                       'choices':[{'index':0,'delta':{},'finish_reason':'stop'}]})
+        body=''.join('data: '+json.dumps(c,ensure_ascii=False)+'\n\n' for c in chunks)+'data: [DONE]\n\n'
+        return httpx.Response(200,content=body.encode(),headers={'Content-Type':'text/event-stream'})
 
 
 def test_question_job_http_worker_history_and_export_are_durable(tmp_path, monkeypatch):
@@ -47,6 +60,8 @@ def test_question_job_http_worker_history_and_export_are_durable(tmp_path, monke
             assert client.get(f"/api/question-results/{job['result_id']}/export?format=markdown").status_code == 200
         assert len(gateway.embedding_requests) == before + 1
         assert len(gateway.generation_requests) == 1
+        assert gateway.generation_requests[0]['stream'] is True
+        assert job['streaming'] is True
         assert client.post(f"/api/documents/{DOC}/question-jobs", json={**payload, "question": "不同问题"}).status_code == 409
 
 
@@ -80,7 +95,9 @@ def test_restored_retrieval_skips_embedding_and_detects_changed_locator(tmp_path
         outcome = rag.answer(DOC, "全书多少部分？", snapshot=snapshot,
                              retrieval_checkpoint=checkpoint, observer=lambda event, _: events.append(event))
         assert outcome.diagnostics["retrieval_reused"] is True
-        assert events == ["evidence_fixed", "generation_started", "validation_started"]
+        assert [e for e in events if e != 'stream_check'] == [
+            "evidence_fixed", "generation_started", "stream_started", "stream_block", "validation_started"]
+        assert events.count('stream_check') >= 1
         assert len(gateway.embedding_requests) == before
         with repo.connect() as db:
             db.execute("UPDATE chunks SET page=99 WHERE id='c1'")

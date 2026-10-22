@@ -122,6 +122,11 @@ def test_intelligence_explicitly_unavailable(client, tmp_path):
     capabilities = client.get('/api/capabilities').json()
     # 问答、摘要与提取均已接入；抓取与插件仍未接入。
     assert capabilities['rag'] is True
+    assert capabilities['rag_mode'] == 'document-and-knowledge-conversations'
+    assert capabilities['legacy_sync']['persistent'] is False
+    assert capabilities['conversations']['memory_control'] is True
+    assert capabilities['streaming']['persistent_events'] is True
+    assert capabilities['streaming']['reconnect_generates'] is False
     assert capabilities['summary'] is True and capabilities['extraction'] is True
     # 分析能力不依赖 embedding 索引，但需要独立 worker 进程执行任务。
     assert capabilities['analysis']['enabled'] is True

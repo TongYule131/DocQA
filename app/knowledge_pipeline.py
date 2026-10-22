@@ -15,9 +15,16 @@ class KnowledgePipeline:
         self.access,self.repository,self.settings=access,access.repository,access.settings
         self.tasks=KnowledgeTasks(self.repository)
 
-    def submit_index(self, document_id, key, *, rebuild=False):
-        self.access.admin();self.access.require_document(document_id)
-        if self.access.attachment(document_id):raise HTTPException(409,'临时资料请在所属会话准备')
+    def submit_index(self, document_id, key, *, rebuild=False, ingestion_id=None):
+        if ingestion_id:
+            from app.ingestion import Ingestion, ingestion_configuration
+            ingestion=Ingestion(self.access).require(ingestion_id,write=True)
+            base=self.access.base(ingestion['base_id'])
+            if ingestion['document_id']!=document_id or ingestion['status'] not in ('queued','running') or ingestion['configuration']!=ingestion_configuration(self.settings,base):
+                raise HTTPException(409,'上传任务已停止或处理配置已变化')
+        else:
+            self.access.admin();self.access.require_document(document_id)
+            if self.access.attachment(document_id):raise HTTPException(409,'临时资料请在所属会话准备')
         document=self.repository.get(document_id)
         if not document or not document.active_parse_version_id:raise HTTPException(409,'请先完成文档解析')
         chunks=self.repository.chunks(document_id,document.active_parse_version_id)
@@ -30,8 +37,11 @@ class KnowledgePipeline:
                 db.execute('UPDATE knowledge_bases SET embedding_signature=?,embedding_model=? WHERE id=?',(self.access.index.embedding.signature,self.settings.embedding_model,base['id']))
         payload={'version_id':document.active_parse_version_id,'evidence_signature':evidence_signature(chunks),
                  'configuration':configuration(self.settings,self.access.index.embedding),'rebuild':rebuild}
+        if ingestion_id:payload['ingestion_id']=ingestion_id
         maximum=math.ceil(len(chunks)/self.settings.embedding_batch_size)
         if maximum>256:raise HTTPException(422,'单次索引超过256批，请拆分资料')
+        # 明确重试沿用同一账本及批次检查点；从不自动重发失败或不确定的调用。
+        if ingestion_id:maximum=min(256,maximum*2)
         return self.tasks.create('index',payload,key,base_id=base['id'] if base else None,document_id=document_id,
             owner=self.access.actor['id'] if self.access.actor else None,max_requests=maximum)
 

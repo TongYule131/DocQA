@@ -1,5 +1,6 @@
 import { createApiClient, encoded } from './api-client.js';
 import { node, locationText } from './answer-view.js';
+import { installIntentTest } from './intent-test.js';
 
 const $ = id => document.getElementById(id), api = createApiClient();
 const moduleName = location.pathname.endsWith('/intents') ? 'intents' : location.pathname.endsWith('/traces') ? 'traces' : 'chunks';
@@ -29,11 +30,14 @@ $('breadcrumb').textContent = { intents: '意图管理', traces: '链路追踪',
 $(`${moduleName}-page`).hidden = false;
 document.title = `${$('breadcrumb').textContent} · DocQA`;
 
+const testbench = moduleName === 'intents' ? installIntentTest() : null;
+
 async function loadIntents() {
   [intents, bases, tools] = await Promise.all([api('/api/admin/intents'), api('/api/knowledge-bases'), api('/api/admin/mcp-tools')]);
   const parent = $('intent-parent'), current = parent.value; parent.replaceChildren(); option(parent, '全部父节点', ''); option(parent, '根节点', 'root');
   intents.forEach(i => option(parent, i.name, i.id)); parent.value = current;
   if (!selected || !intents.some(i => i.id === selected)) selected = intents[0]?.id || null;
+  testbench?.setBases(bases);
   renderIntents();
 }
 function filteredIntents() {
@@ -58,9 +62,9 @@ function renderIntents() {
   if (i) {
     detail.append(node('h2', i.name), node('p', i.code, 'node-code'));
     const badges = node('div', '', 'row'); badges.append(pill(i.level ? `第 ${i.level + 1} 层` : '根节点'), pill(i.kind, i.kind), pill(i.enabled ? '启用' : '停用')); detail.append(badges);
-    const actions = node('div', '', 'node-actions'); actions.append(button('＋ 新建子节点', () => openIntent(null, i)), button('编辑节点', () => openIntent(i)), button('删除节点', async () => { if (!confirm(`删除“${i.name}”？有子节点时不能删除。`)) return; await api(`/api/admin/intents/${encoded(i.id)}?revision=${i.revision}`, { method: 'DELETE' }); selected = null; await loadIntents(); })); detail.append(actions);
+    const actions = node('div', '', 'node-actions'); actions.append(button('＋ 新建子节点', () => openIntent(null, i)), button('编辑节点', () => openIntent(i)), button('删除节点', async () => { if (!confirm(`删除“${i.name}”？有子节点时不能删除。`)) return; await api(`/api/admin/intents/${encoded(i.id)}?revision=${i.revision}`, { method: 'DELETE' }); selected = null; await loadIntents(); })); actions.append(button('测试此节点', () => { testbench.prefill(i.examples[0] || '', i.base_id); selectIntentView('test'); })); detail.append(actions);
     const dl = node('dl');
-    for (const [label, value] of [['父节点', intents.find(p => p.id === i.parent_id)?.name || 'ROOT'], ['关联知识库', bases.find(b => b.id === i.base_id)?.name || '未绑定'], ['工具', tools.find(t => t.id === i.tool_id)?.name || '—'], ['节点 TopK', i.top_k || '全局默认'], ['路径', i.path], ['描述', i.description || '—']]) dl.append(node('dt', label), node('dd', String(value)));
+    for (const [label, value] of [['父节点', intents.find(p => p.id === i.parent_id)?.name || 'ROOT'], ['关联知识库', bases.find(b => b.id === i.base_id)?.name || '未绑定'], ['工具', tools.find(t => t.id === i.tool_id)?.name || '—'], ['节点 TopK', i.top_k || '全局默认'], ['匹配策略', {exact:'完整示例',interaction:'限定纯交互',keywords:'业务关键词'}[i.match_mode] || '完整示例'], ['业务关键词', (i.keywords || []).join('、') || '—'], ['路径', i.path], ['描述', i.description || '—']]) dl.append(node('dt', label), node('dd', String(value)));
     detail.append(dl, node('h3', '示例问题'));
     const examples = node('div', '', 'example-list'); i.examples.forEach(text => examples.append(node('span', text, 'example-chip'))); if (!i.examples.length) examples.append(node('p', '暂无示例', 'muted')); detail.append(examples);
     if (i.response_text) detail.append(node('h3', '系统回复'), node('p', i.response_text));
@@ -72,19 +76,31 @@ function renderIntents() {
   $('intent-count').textContent = `共 ${filtered.length} 条`; $('intent-page').textContent = `${intentPage} / ${pages}`; $('intent-prev').disabled = intentPage === 1; $('intent-next').disabled = intentPage === pages;
 }
 function selectIntentView(view) {
-  const list = view === 'list'; $('intent-tree-view').hidden = list; $('intent-list-view').hidden = !list;
-  $('tree-tab').setAttribute('aria-selected', String(!list)); $('list-tab').setAttribute('aria-selected', String(list));
-  const url = new URL(location.href); url.searchParams.set('view', list ? 'list' : 'tree'); history.replaceState(null, '', url);
-  document.querySelector('#intents-page h1').textContent=list ? '意图列表' : '意图树配置'; document.title = `${list ? '意图列表' : '意图树配置'} · DocQA`; $('breadcrumb').textContent = list ? '意图列表' : '意图树配置';
-  window.dispatchEvent(new CustomEvent('docqa:intent-view', { detail: list ? 'list' : 'tree' }));
+  view = ['list','test'].includes(view) ? view : 'tree';
+  document.querySelector('#intents-page .filter-bar').hidden = view === 'test';
+  $('intent-tree-view').hidden = view !== 'tree'; $('intent-list-view').hidden = view !== 'list';
+  if (testbench) testbench.section.hidden = view !== 'test';
+  $('tree-tab').setAttribute('aria-selected', String(view === 'tree')); $('list-tab').setAttribute('aria-selected', String(view === 'list'));
+  const url = new URL(location.href); url.searchParams.set('view', view); history.replaceState(null, '', url);
+  const title = { tree:'意图树配置', list:'意图列表', test:'意图测试台' }[view];
+  document.querySelector('#intents-page h1').textContent=title; document.title=title+' · DocQA'; $('breadcrumb').textContent=title;
+  window.dispatchEvent(new CustomEvent('docqa:intent-view', { detail: view }));
 }
-function treeTab() { selectIntentView('tree'); $('intent-tree-view').hidden = false; $('intent-list-view').hidden = true; $('tree-tab').setAttribute('aria-selected', 'true'); $('list-tab').setAttribute('aria-selected', 'false'); }
+function treeTab() { selectIntentView('tree'); }
+// 同页切换保留测试输入和上次结果，便于编辑规则后直接比较；不把客户问题写入浏览器存储。
+if (moduleName === 'intents') document.addEventListener('click', event => {
+  const link = event.target.closest?.('#intent-navigation a');
+  if (!link || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+  event.preventDefault();
+  selectIntentView(new URL(link.href).searchParams.get('view'));
+});
 function openIntent(i = null, parent = null) {
   editing = i; parentNew = parent; $('intent-form').reset(); $('intent-error').textContent = ''; $('intent-form-title').textContent = i ? '编辑节点' : parent ? '新建子节点' : '新建根节点';
   const ps = $('node-parent'); ps.replaceChildren(); option(ps, 'ROOT · 无父节点', ''); intents.filter(p => p.id !== i?.id).forEach(p => option(ps, p.path, p.id)); ps.value = i?.parent_id || parent?.id || '';
   const bs = $('node-base'); bs.replaceChildren(); option(bs, '未绑定', ''); bases.forEach(b => option(bs, b.name, b.id)); bs.value = i?.base_id || parent?.base_id || '';
   const ts = $('node-tool'); ts.replaceChildren(); option(ts, '未关联工具', ''); tools.forEach(t => option(ts, `${t.name} · ${t.enabled ? '启用' : '停用'}`, t.id)); ts.value = i?.tool_id || '';
   $('node-name').value = i?.name || ''; $('node-code').value = i?.code || ''; $('node-kind').value = i?.kind || parent?.kind || 'SYSTEM'; $('node-description').value = i?.description || '';
+  $('node-mode').value=i?.match_mode || 'exact'; $('node-family').value=i?.interaction_kind || ''; $('node-keywords').value=(i?.keywords || []).join('\n');
   $('node-examples').value = i?.examples.join('\n') || ''; $('node-response').value = i?.response_text || ''; $('node-topk').value = i?.top_k || ''; $('node-order').value = i?.sort_order || 0; $('node-enabled').checked = i?.enabled ?? true; $('intent-dialog').showModal();
 }
 $('intent-create').onclick = () => openIntent(); $('intent-refresh').onclick = () => run(loadIntents);
@@ -93,7 +109,7 @@ for (const id of ['intent-search', 'intent-level', 'intent-kind', 'intent-enable
 $('intent-clear').onclick = () => { for (const id of ['intent-search', 'intent-level', 'intent-kind', 'intent-enabled', 'intent-parent']) $(id).value = ''; intentPage = 1; renderIntents(); };
 $('intent-prev').onclick = () => { intentPage--; renderIntents(); }; $('intent-next').onclick = () => { intentPage++; renderIntents(); };
 $('intent-form').onsubmit = event => { event.preventDefault(); run(async () => {
-  $('intent-error').textContent = ''; const body = { name: $('node-name').value.trim(), code: $('node-code').value.trim(), parent_id: $('node-parent').value || null, kind: $('node-kind').value, base_id: $('node-base').value || null, tool_id: $('node-tool').value || null, description: $('node-description').value, examples: $('node-examples').value.split('\n').map(s => s.trim()).filter(Boolean), response_text: $('node-response').value, top_k: $('node-topk').value ? Number($('node-topk').value) : null, sort_order: Number($('node-order').value), enabled: $('node-enabled').checked, expected_revision: editing?.revision || null };
+  $('intent-error').textContent = ''; const body = { name: $('node-name').value.trim(), code: $('node-code').value.trim(), parent_id: $('node-parent').value || null, kind: $('node-kind').value, base_id: $('node-base').value || null, tool_id: $('node-tool').value || null, description: $('node-description').value, examples: $('node-examples').value.split('\n').map(s => s.trim()).filter(Boolean), response_text: $('node-response').value, top_k: $('node-topk').value ? Number($('node-topk').value) : null, sort_order: Number($('node-order').value), enabled: $('node-enabled').checked, match_mode: $('node-mode').value, interaction_kind: $('node-family').value || null, keywords: $('node-keywords').value.split('\n').map(s=>s.trim()).filter(Boolean), expected_revision: editing?.revision || null };
   const value = await api(editing ? `/api/admin/intents/${encoded(editing.id)}` : '/api/admin/intents', json(editing ? 'PUT' : 'POST', body)); selected = value.id; $('intent-dialog').close(); await loadIntents(); tell('意图配置已保存，后续新任务立即使用。');
 }, 'intent-error'); };
 $('tool-create').onclick = () => { $('tool-form').reset(); $('tool-schema').value = '{"type":"object","properties":{},"required":[]}'; $('tool-error').textContent = ''; $('tool-dialog').showModal(); };
@@ -118,6 +134,7 @@ async function showTrace(id) {
   const data = await api(`/api/admin/traces/${encoded(id)}`); $('trace-list').hidden = true; $('trace-detail-view').hidden = false;
   const root = $('trace-detail'); root.replaceChildren(); const title = node('div', '', 'trace-detail-title'); title.append(node('h2', data.name), pill(statusNames[data.status] || data.status)); root.append(title);
   const meta = node('div', '', 'trace-meta'); meta.append(node('span', `# ${data.id}`), node('span', date(data.started_at)), node('span', data.owner), node('strong', `总耗时 ${duration(data.elapsed_ms)}`)); root.append(meta);
+  if (data.intent) { const info=node('section','','panel'); info.append(node('h2','意图决策'),node('p',`${data.intent.name} · ${data.intent.code}`),node('p',`${data.intent.reason} · ${data.intent.scope === 'document' ? '文档会话' : '知识库会话'}`),node('small',`规则版本 ${data.intent.version} · 配置 ${data.intent.configuration.slice(0,12)}`)); root.append(info); }
   const panel = node('section', '', 'panel'); panel.append(node('h2', '执行时序'));
   const scroll = node('div', '', 'table-scroll'), table = node('table', '', 'trace-grid'), head = node('thead'), header = node('tr'); ['节点', '类型', '时间线', '耗时 / 起点'].forEach(t => header.append(node('th', t))); head.append(header); table.append(head);
   const body = node('tbody'), byId = new Map(data.spans.map(s => [s.id, s]));

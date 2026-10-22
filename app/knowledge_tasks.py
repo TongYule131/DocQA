@@ -10,7 +10,7 @@ from fastapi import HTTPException
 from app.repository import now_iso, lease_expiry_iso
 from app.question_jobs import _usage_metadata
 
-KNOWLEDGE_PROMPT_VERSION = 'knowledge-task-v1'
+KNOWLEDGE_PROMPT_VERSION = 'knowledge-task-v2'
 KNOWLEDGE_RULE = '\n这是知识库多文档问答。不同资料的观点冲突时分别引用，不擅自调和。先用自然语言直答，再按问题需要解释；避免逐句重复“文档指出”。'
 
 
@@ -24,9 +24,10 @@ def fingerprint(value):
 
 def configuration(settings, embedding):
     from app.rag_prompts import TASK_PROMPT_VERSION
+    from app.conversation_memory import MEMORY_SIGNATURE
     return fingerprint([embedding.signature, settings.deepseek_base_url, settings.deepseek_model,
         settings.deepseek_thinking, TASK_PROMPT_VERSION, KNOWLEDGE_PROMPT_VERSION, KNOWLEDGE_RULE, settings.question_context_max_chars,
-        settings.question_input_max_chars, settings.question_context_k])
+        settings.question_input_max_chars, settings.question_context_k,MEMORY_SIGNATURE])
 
 
 class TaskStopped(Exception):
@@ -53,10 +54,13 @@ class KnowledgeTasks:
                 return dict(prior)
             if conversation_id:
                 conv=db.execute('SELECT * FROM kb_conversations WHERE id=? AND owner_user_id IS ?', (conversation_id,owner)).fetchone()
-                if not conv or conv['base_id']!=base_id or conv['memory_epoch']!=payload.get('memory_epoch'):
+                if not conv or conv['deleted_at'] or conv['archived'] or conv['base_id']!=base_id or conv['memory_epoch']!=payload.get('memory_epoch'):
                     raise HTTPException(409,'会话范围或记忆已变更，请刷新后提交')
                 if db.execute("SELECT 1 FROM kb_conversation_turns t JOIN kb_tasks j ON j.id=t.task_id WHERE t.conversation_id=? AND j.status IN ('queued','running')", (conversation_id,)).fetchone():
                     raise HTTPException(409,'本会话已有活动任务')
+                if payload.get('submission_id'):
+                    submission=db.execute('SELECT * FROM chat_submissions WHERE id=?',(payload['submission_id'],)).fetchone()
+                    if not submission or submission['status']!='waiting' or submission['conversation_id']!=conversation_id or submission['owner_user_id']!=owner:raise HTTPException(409,'等待请求已取消或会话已变化')
             if kind=='index' and db.execute("SELECT 1 FROM kb_tasks WHERE document_id=? AND kind='index' AND status IN ('queued','running')", (document_id,)).fetchone():
                 raise HTTPException(409,'文档已有索引任务，请刷新查看进度')
             db.execute('INSERT INTO kb_tasks(id,kind,base_id,document_id,owner_user_id,request_key,input_json,input_hash,max_requests,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
@@ -70,19 +74,37 @@ class KnowledgeTasks:
 
     @staticmethod
     def allowed(db, row):
+        from app.knowledge_scope import base_allowed,scope_documents
+        if row['base_id'] and not base_allowed(db,row['base_id'],row['owner_user_id'],write=row['kind']=='index'):return False
+        payload=json.loads(row['input_json'])
+        if row['kind']=='index' and payload.get('ingestion_id'):
+            ingestion=db.execute('SELECT * FROM ingestion_jobs WHERE id=?',(payload['ingestion_id'],)).fetchone()
+            if not ingestion or ingestion['base_id']!=row['base_id'] or ingestion['document_id']!=row['document_id'] or ingestion['owner_user_id']!=row['owner_user_id']:return False
+            if row['status'] in ('queued','running') and ingestion['status'] not in ('queued','running'):return False
         if row['owner_user_id']:
             actor=db.execute('SELECT role,active FROM product_users WHERE id=?',(row['owner_user_id'],)).fetchone()
             if not actor or not actor['active']:return False
-            if row['kind']=='index' and actor['role']!='admin':return False
-            if actor['role']!='admin' and not db.execute('SELECT 1 FROM knowledge_base_members WHERE knowledge_base_id=? AND user_id=?',(row['base_id'],row['owner_user_id'])).fetchone():return False
+            if row['kind']=='index' and actor['role']!='admin':
+                payload=json.loads(row['input_json'])
+                if not payload.get('ingestion_id'):return False
         if row['kind']=='question':
             payload=json.loads(row['input_json'])
+            if payload.get('submission_id') and row['status'] in ('queued','running'):
+                submission=db.execute('SELECT status FROM chat_submissions WHERE id=?',(payload['submission_id'],)).fetchone()
+                if not submission or submission[0] not in ('waiting','submitted'):return False
+            anchor=payload.get('legacy_anchor')
+            if anchor and anchor['source']=='document':
+                original=db.execute('SELECT archived,deleted_at,owner_user_id FROM conversations WHERE id=?',(anchor['id'],)).fetchone()
+                if not original or original['deleted_at'] or original['owner_user_id']!=row['owner_user_id'] or row['status'] in ('queued','running') and original['archived']:return False
+            if payload.get('conversation_id'):
+                conv=db.execute('SELECT * FROM kb_conversations WHERE id=?',(payload['conversation_id'],)).fetchone()
+                if not conv or conv['deleted_at'] or row['status'] in ('queued','running') and conv['archived']:return False
             if payload.get('conversation_id') and row['status'] in ('queued','running'):
                 conv=db.execute('SELECT memory_epoch FROM kb_conversations WHERE id=?',(payload['conversation_id'],)).fetchone()
                 if not conv or conv[0]!=payload.get('memory_epoch'):return False
             base=db.execute('SELECT active_snapshot_id FROM knowledge_bases WHERE id=?',(row['base_id'],)).fetchone()
-            if not base or not base[0]:return False
-            current={r[0] for r in db.execute('SELECT document_id FROM knowledge_base_snapshot_documents WHERE snapshot_id=?',(base[0],))}
+            if not base or not base[0]:return payload.get('route',{}).get('kind')=='SYSTEM'
+            current=scope_documents(db,row['base_id'])
             if not {d['document_id'] for d in payload.get('documents',[])}<=current:return False
             if payload.get('tool_revision') is not None and row['status'] in ('queued','running'):
                 tool=db.execute('SELECT enabled,revision FROM mcp_tools WHERE id=?',(payload['route'].get('tool_id'),)).fetchone()

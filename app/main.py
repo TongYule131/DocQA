@@ -21,6 +21,7 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from app import migrations
 from app.analysis_jobs import AnalysisJobService
 from app.analysis_prompts import EXTRACTION_PROMPT_VERSION, SUMMARY_PROMPT_VERSION
+from app.answer_stream import STREAM_VERSION
 from app.config import Settings
 from app.deepseek import DeepSeekModel, ModelError
 from app.docling_client import DoclingClient
@@ -29,7 +30,8 @@ from app.file_detect import FORMAT_MIME, UploadFormatError, detect_format, sanit
 from app.parsing import ParseError, chunk_pages, parse_document
 from app.rag import RagError, RagService
 from app.question_jobs import QuestionJobService
-from app.rag_prompts import PROMPT_VERSION
+from app.rag_prompts import PROMPT_VERSION, TASK_PROMPT_VERSION
+from app.rag_answer_contract import ANSWER_CONTRACT_VERSION
 from app.repository import Repository, TaskConflict, now_iso
 from app.runtime import RuntimeGuard, RuntimeMismatch
 from app.product_access import COOKIE, ProductAccess, actor_context
@@ -127,7 +129,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except RuntimeMismatch as exc:
                 return JSONResponse(status_code=503, content={
                     "status": "not_ready", "code": "runtime_mismatch", "detail": str(exc)})
-        actor = access.session(request.cookies.get(COOKIE)) if access.team_mode else None
+        actor = access.session(request.cookies.get(access.cookie_name)) if access.team_mode else None
         token = actor_context.set(actor)
         try:
             path = request.url.path
@@ -213,18 +215,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         html = (web_dir / filename).read_text(encoding="utf-8")
         html = html.replace('<body>', f'<body data-workspace-view="{view}">')
         html = html.replace('<body ', f'<body data-team-mode="{str(access.team_mode).lower()}" ', 1)
-        for asset in ("app.js", "style.css", "workspace.js", "workspace.css", "admin-workspace.js", "knowledge.js", "product.css", "login.js", "conversation.js", "conversation.css", "admin.css", "admin.js", "setup.js"):
+        for asset in ("app.js", "style.css", "workspace.js", "workspace.css", "admin-workspace.js", "knowledge.js", "product.css", "login.js", "conversation.js", "conversation.css", "admin.css", "admin.js", "setup.js", "unified-chat.js", "unified-chat.css"):
             html = html.replace(f'"/static/{asset}"', f'"/static/{asset}?v={runtime.fingerprint}"')
         return HTMLResponse(html)
 
     @app.get("/", include_in_schema=False)
     @app.get("/app", include_in_schema=False)
     def home():
-        return workspace_page('conversation.html', 'conversation')
+        return workspace_page('unified-chat.html', 'conversation')
 
     @app.get('/single', include_in_schema=False)
-    def independent_questions():
-        return workspace_page("workspace.html", "chat")
+    def independent_questions(request:Request):
+        from fastapi.responses import RedirectResponse
+        from urllib.parse import urlencode
+        job=request.query_params.get('job')
+        return RedirectResponse('/app'+('?' + urlencode({'chat':'q:'+job}) if job else ''),status_code=303)
 
     @app.get("/admin", include_in_schema=False)
     def admin_workspace():
@@ -264,6 +269,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     install_conversation_routes(app, conversations)
     from app.knowledge_routes import install_knowledge_routes
     install_knowledge_routes(app, access, rag)
+    from app.unified_routes import install_unified_routes
+    install_unified_routes(app,access,rag,conversations)
 
     @app.get("/api/health")
     def health():
@@ -316,9 +323,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "model_adapters": {"deepseek": True, "qwen": False, "chatglm": False, "llama": False},
             "model_configured": bool(settings.deepseek_api_key.strip()),
             "embedding_configured": bool(settings.embedding_api_key.strip()),
-            # 问答与会话边界：单文档、单轮、非流式，不保存会话历史。
-            "rag_mode": "single-document-single-turn-non-streaming",
+            # 当前产品能力与旧同步接口分别说明，不能用旧契约描述全部会话。
+            "rag_mode": "document-and-knowledge-conversations",
             "rag_prompt_version": PROMPT_VERSION,
+            "rag_prompt_scope": "legacy_sync_questions",
+            "legacy_sync": {"rag_mode": "single-document-single-turn-non-streaming",
+                            "endpoint": "/api/documents/{id}/questions", "persistent": False},
+            "conversations": {"document": True, "knowledge_base": True, "persistent": True,
+                              "memory_control": True, "structured_object_memory": False},
+            "knowledge_bases": {"publish_snapshots": True, "member_authorization": True,
+                                "multi_document_retrieval": True},
+            "task_question": {
+                "prompt_version": TASK_PROMPT_VERSION,
+                "answer_contract": ANSWER_CONTRACT_VERSION,
+            },
+            "streaming": {"enabled": True, "protocol": STREAM_VERSION,
+                          "delivery": "validated-fact-sse", "persistent_events": True,
+                          "reconnect_generates": False, "legacy_sync": False},
             "rag_configured": rag.ready()[0],
             # 分析能力：摘要／提取基于解析版本，不依赖 embedding 索引；
             # 任务由独立 worker 执行，能力查询本身不产生任何收费调用。
@@ -844,6 +865,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     from app.attachments import install_attachment_routes
     install_attachment_routes(app, conversations, parse, build_index)
+    from app.answer_stream_routes import install_answer_stream_routes
+    install_answer_stream_routes(app, access, questions)
     return app
 
 

@@ -15,6 +15,7 @@ def main():
     parser.add_argument('--data-dir', required=True, type=Path)
     parser.add_argument('--port', type=int, default=8997)
     parser.add_argument('--allow-database-upgrade', action='store_true')
+    parser.add_argument('--streaming-preview', action='store_true', help='合成流式验收，首组结论后暂停10秒；不连接真实模型')
     args = parser.parse_args()
     data = args.data_dir.resolve()
     if not data.is_relative_to(root / 'data') or data == root / 'data':
@@ -30,10 +31,23 @@ def main():
     from app.runtime import RuntimeMismatch
     from app.vector_index import DocumentIndex
     from tests.test_question_jobs import Embedding, Model
+    if args.streaming_preview:
+        class StreamPreviewModel(Model):
+            def generate_stream(self,system,user,on_text,check_active):
+                raw=self.generate(system,user);cut=raw.find('"explanation"')
+                cut=cut if cut>0 else len(raw)//2
+                for part in (raw[:cut],raw[cut:]):
+                    for offset in range(0,len(part),8):
+                        check_active();on_text(part[offset:offset+8]);time.sleep(.02)
+                    if part==raw[:cut]:
+                        for _ in range(100):check_active();time.sleep(.1)
+                return raw
+        Model=StreamPreviewModel
     import app.main as application
     import uvicorn
 
     settings = Settings(data_dir=data, allow_database_upgrade=args.allow_database_upgrade,
+                        session_cookie_name='docqa_preview_'+str(args.port),
                         embedding_api_key='synthetic-preview-only', deepseek_api_key='synthetic-preview-only', question_max_requests=2)
     repository = Repository(data / 'docqa.db')
     parse_worker = ParseWorker(settings, repository)
@@ -49,6 +63,10 @@ def main():
     application.DeepSeekModel = lambda config: Model()
     app = application.create_app(settings)
     app.state.demo_providers = True
+    from app.ingestion import IngestionCoordinator
+    from app.unified_chat import ChatSubmissionCoordinator
+    ingestion=IngestionCoordinator(settings,repository,embedding=rag.index.embedding)
+    submissions=ChatSubmissionCoordinator(settings,repository,knowledge=app.state.knowledge_questions)
 
     def parse_loop():
         try:
@@ -59,6 +77,8 @@ def main():
     def question_loop():
         try:
             while True:
+                ingestion.run_once()
+                submissions.run_once()
                 question_worker.run_once()
                 knowledge_worker.run_once()
                 time.sleep(.3)
@@ -67,7 +87,7 @@ def main():
 
     Thread(target=parse_loop, daemon=True).start()
     Thread(target=question_loop, daemon=True).start()
-    print(f'开发预览 {data} · http://127.0.0.1:{args.port} · 真实供应商请求0', flush=True)
+    print(f'开发预览 {data} · http://localhost:{args.port} · 真实供应商请求0', flush=True)
     uvicorn.run(app, host='127.0.0.1', port=args.port, log_level='warning')
 
 

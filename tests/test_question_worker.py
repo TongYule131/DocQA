@@ -206,11 +206,18 @@ def test_sdk_mocktransport_full_worker_chain_and_usage_persistence(tmp_path, mon
     gateway = Gateway()
     gateway.install(monkeypatch)
     def complete(_payload):
+        assert _payload['stream'] is True
         response = gateway.completion(REPLY)
         body = response.json()
         body["usage"] = {"prompt_tokens": 120, "completion_tokens": 20, "total_tokens": 140}
         import httpx
-        return httpx.Response(200, json=body, headers={"x-request-id": "provider-safe-id"})
+        chunks=[dict(id='synthetic-stream',object='chat.completion.chunk',created=0,model='synthetic',
+                     choices=[{'index':0,'delta':{'content':REPLY},'finish_reason':None}]),
+                dict(id='synthetic-stream',object='chat.completion.chunk',created=0,model='synthetic',
+                     choices=[{'index':0,'delta':{},'finish_reason':'stop'}]),
+                dict(id='synthetic-stream',object='chat.completion.chunk',created=0,model='synthetic',choices=[],usage=body['usage'])]
+        content=''.join('data: '+json.dumps(c,ensure_ascii=False)+'\n\n' for c in chunks)+'data: [DONE]\n\n'
+        return httpx.Response(200,content=content.encode(),headers={"x-request-id":"provider-safe-id","Content-Type":"text/event-stream"})
     gateway.generation_handler = complete
     env = question_fixture(tmp_path)
     # 外部边界使用真实SDK和适配器；初始合成索引重建到对应提供方签名。

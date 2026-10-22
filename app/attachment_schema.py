@@ -15,6 +15,10 @@ CREATE INDEX ix_attachments_expiry ON conversation_attachments(expires_at,purged
 def attachment_available(db, document_id, *, conversation_id=None):
     """供worker在短事务内复查；普通文档不受附件策略影响。"""
     from app.repository import now_iso
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='ingestion_jobs'").fetchone():
+        from app.knowledge_scope import base_allowed
+        private=db.execute("SELECT k.id,k.created_by FROM knowledge_bases k WHERE k.kind='temporary' AND (EXISTS(SELECT 1 FROM knowledge_base_documents d WHERE d.knowledge_base_id=k.id AND d.document_id=?) OR EXISTS(SELECT 1 FROM ingestion_jobs j WHERE j.base_id=k.id AND j.document_id=?))",(document_id,document_id)).fetchone()
+        if private and not base_allowed(db,private['id'],private['created_by']):return False
     row = db.execute('SELECT a.*,c.deleted_at FROM conversation_attachments a '
                      'JOIN conversations c ON c.id=a.conversation_id WHERE a.document_id=?', (document_id,)).fetchone()
     if not row:

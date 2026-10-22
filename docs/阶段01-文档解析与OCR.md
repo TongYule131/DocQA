@@ -1,10 +1,10 @@
 # 阶段01：文档解析与OCR
 
-更新：2026-10-20。当前状态见[接力说明](稳定试用版接力说明.md)，运行配置见[Docling部署](../deploy/docling/README.md)。本文件汇总正式能力、量化标准和实验；冻结版本在[历史归档](archive/README.md)。
+更新：2026-10-22。当前状态见[接力说明](稳定试用版接力说明.md)，运行配置见[Docling部署](../deploy/docling/README.md)。本文件汇总正式能力、量化标准和实验；冻结版本在[历史归档](archive/README.md)。
 
 ## 正式解析链路
 
-支持PDF、DOCX、XLSX、UTF-8 TXT。上传只保存原件；解析任务、版本、来源和告警独立持久化。TXT本地解析，其他格式使用既有Docling/RapidOCR服务；索引由用户另行建立，不因解析或预览自动收费。
+支持PDF、DOCX、XLSX、UTF-8 TXT和Markdown。上传只保存原件；解析任务、版本、来源和告警独立持久化。TXT和Markdown本地解析（Markdown保留标题结构），PDF／DOCX／XLSX使用既有Docling/RapidOCR服务；旧二进制DOC／XLS须先转换。索引由用户另行建立，不因解析或预览自动收费。知识库分块边界修订另建不可变草稿版本，必须保留完整原文及顺序；纠正文稿须上传新版原件，不直接改证据文字。当前schema13未更换正式OCR模型，以下实验成绩仍绑定原样本和当时版本。
 
 生产参数为rapidocr、ch、do_ocr=true、force_ocr=false、table_mode=accurate、JSON+Markdown；不自动开启远程VLM、图片描述或公式重算。图片节点存在不代表内部文字/关系已可靠解析。通用ocr_limitation表示能力边界，不能写成已定位到OCR失败。
 

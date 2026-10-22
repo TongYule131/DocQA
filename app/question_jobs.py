@@ -263,6 +263,7 @@ class QuestionJobStore:
             if not self._valid(db, job_id, token):
                 return None
             row = db.execute("SELECT * FROM question_jobs WHERE id=?", (job_id,)).fetchone()
+            if json.loads(row['snapshot_json']).get('intent_resolution',{}).get('route',{}).get('kind')=='SYSTEM':return None
             if row["cancel_requested"] or row["requests_used"] >= row["max_requests"]:
                 return None
             pending = db.execute("SELECT 1 FROM question_calls WHERE job_id=? AND status='intent'", (job_id,)).fetchone()
@@ -335,6 +336,30 @@ class QuestionJobStore:
             db.execute("UPDATE question_jobs SET status=?,error_code=?,error_message=?,finished_at=?,updated_at=?,"
                        "lease_token=NULL,lease_expires_at=NULL WHERE id=?", (status, code, message, stamp, stamp, job_id))
             self._close_attempt(db, job_id, token, status, stamp, code)
+        return True
+
+    def publish_interaction(self, job_id: str, token: str, answer: dict) -> bool:
+        # 此路径只发布当前规则可重建的纯交互；不能跳过知识回答的RAG发布校验。
+        from app.intent_replies import interaction_answer, InteractionAnswer
+        from app.intent_management import IntentManagement
+        checked = InteractionAnswer.model_validate(answer)
+        with self.repository.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not self._valid(db, job_id, token):return False
+            row=dict(db.execute('SELECT * FROM question_jobs WHERE id=?',(job_id,)).fetchone())
+            if row['cancel_requested'] or row['requests_used'] or not row['conversation_id']:return False
+            snapshot=json.loads(row['snapshot_json'])
+            current=IntentManagement(self.repository).evaluate(row['question'],snapshot.get('intent_base_id'),scope='document')
+            if current!=snapshot.get('intent_resolution'):raise ValueError('interaction_configuration_changed')
+            expected=interaction_answer(row,snapshot,checked.timings_ms.total)
+            if checked.model_dump()!=expected:raise ValueError('interaction_result_changed')
+            if db.execute('SELECT 1 FROM question_calls WHERE job_id=?',(job_id,)).fetchone():raise ValueError('interaction_has_provider_calls')
+            stamp=now_iso();identifier='qres-'+job_id
+            db.execute('INSERT INTO question_results(id,job_id,document_id,parse_version_id,index_id,question,answer_json,requests_used,created_at) VALUES (?,?,?,?,?,?,?,0,?)',
+                (identifier,job_id,row['document_id'],row['parse_version_id'],row['index_id'],row['question'],_dump(expected),stamp))
+            db.execute("UPDATE question_jobs SET status='succeeded',stage='done',stage_detail='已保存系统交互回复',result_id=?,error_code=NULL,error_message=NULL,finished_at=?,updated_at=?,lease_token=NULL,lease_expires_at=NULL WHERE id=?",(identifier,stamp,stamp,job_id))
+            db.execute("INSERT INTO question_stage_events(job_id,stage,created_at) VALUES (?,'done',?)",(job_id,stamp))
+            self._close_attempt(db,job_id,token,'succeeded',stamp)
         return True
 
     def publish(self, job_id: str, token: str, answer: dict) -> bool:
@@ -499,7 +524,7 @@ class QuestionJobService:
 
     def submit(self, document_id: str, payload, *, request_id: str | None = None,
                owner_user_id: str | None = None, knowledge_snapshot_id: str | None = None,
-               conversation: dict | None = None) -> tuple[dict, int]:
+               conversation: dict | None = None, intent_resolution: dict | None = None, intent_base_id: str | None = None) -> tuple[dict, int]:
         question = _request_value(payload, "question", "")
         if not isinstance(question, str) or not question.strip() or len(question) > 4000:
             raise RagError(422, "invalid_question", "问题不能为空且不能超过4000字符")
@@ -536,6 +561,9 @@ class QuestionJobService:
         if (snapshot.get("document_id") != document_id or not snapshot.get("index_id")
                 or not snapshot.get("parse_version_id")):
             raise RagError(409, "invalid_question_snapshot", "问答输入快照无效，请重新建立有效索引")
+        if intent_resolution is not None:
+            snapshot['intent_resolution']=intent_resolution
+            snapshot['intent_base_id']=intent_base_id
         maximum = getattr(self.settings, "question_max_requests", 2)
         if type(maximum) is not int or maximum < 2 or maximum > 20:
             raise RagError(503, "invalid_question_budget", "问答请求预算配置无效")
@@ -572,7 +600,15 @@ class QuestionJobService:
             job["calls"].append(entry)
         job["diagnostics"] = _public_diagnostics(self.store.checkpoint(job_id, "evidence"))
         job["stage_history"] = [dict(stage) for stage in stages]
-        job["steps_completed"], job["steps_total"] = completed, 2
+        resolution=json.loads(row['snapshot_json']).get('intent_resolution')
+        if resolution:
+            from app.intent_routing import public_decision
+            job['intent']=public_decision(resolution['decision'])
+        system_route=bool(resolution and resolution['route']['kind']=='SYSTEM')
+        if system_route and row['status']=='succeeded':completed=1
+        job['provider_requests_expected']=0 if system_route else 2
+        job['streaming']=bool(json.loads(row['snapshot_json']).get('stream_protocol')) and not system_route
+        job["steps_completed"], job["steps_total"] = completed, 1 if system_route else 2
         job["requests_remaining"] = row["max_requests"] - row["requests_used"]
         document = self.repository.get(row["document_id"])
         job["is_old_version"] = bool(document and document.active_parse_version_id != row["parse_version_id"])
@@ -655,7 +691,8 @@ class QuestionJobService:
         if row is None:
             raise RagError(404, "question_result_not_found", "问答结果不存在")
         result = {key: value for key, value in dict(row).items() if key != "answer_json"}
-        result["answer"] = RagAnswer.model_validate_json(row["answer_json"]).model_dump()
+        from app.intent_replies import saved_answer
+        result["answer"] = saved_answer(json.loads(row["answer_json"]))
         document = self.repository.get(row["document_id"])
         result["is_old_version"] = bool(document and document.active_parse_version_id != row["parse_version_id"])
         return result
@@ -669,6 +706,7 @@ class QuestionJobService:
             return json.dumps(result, ensure_ascii=False, indent=2), "application/json", f"{result_id}.json"
         answer = result["answer"]
         lines = ["# 问答结果", "", _markdown_text(result["question"]), ""]
+        if answer.get('response_kind')=='system':lines += ['## 回复','',_markdown_text(answer['answer']),'']
         for name, title in (("conclusion", "结论"), ("explanation", "依据与说明")):
             if answer[name]:
                 lines += [f"## {title}", ""]

@@ -449,6 +449,7 @@ class Repository:
                              upstream_task_id: str | None = None) -> bool:
         """更新执行阶段与上游 task_id；必须在持有有效令牌时调用。"""
         with self.connect() as db:
+            if not self.task_token_valid(db,task_id,token):return False
             result = db.execute(
                 "UPDATE parse_tasks SET stage=?, updated_at=?,"
                 " upstream_task_id=COALESCE(?, upstream_task_id)"
@@ -462,7 +463,12 @@ class Repository:
             return result.rowcount == 1
 
     def task_token_valid(self, db: sqlite3.Connection, task_id: str, token: str) -> bool:
-        row = db.execute("SELECT document_id, lease_token, status, lease_expires_at FROM parse_tasks WHERE id=?", (task_id,)).fetchone()
+        row = db.execute("SELECT document_id, lease_token, status, lease_expires_at,request_summary FROM parse_tasks WHERE id=?", (task_id,)).fetchone()
+        ingestion_id=json.loads(row['request_summary'] or '{}').get('ingestion_id') if row else None
+        if ingestion_id:
+            from app.knowledge_scope import base_allowed
+            ingestion=db.execute('SELECT * FROM ingestion_jobs WHERE id=?',(ingestion_id,)).fetchone()
+            if not ingestion or ingestion['document_id']!=row['document_id'] or ingestion['status'] not in ('queued','running') or not base_allowed(db,ingestion['base_id'],ingestion['owner_user_id'],write=True):return False
         return bool(row and row["status"] == "running" and row["lease_token"] == token
                     and row["lease_expires_at"] and row["lease_expires_at"] > now_iso()
                     and attachment_available(db, row['document_id']))

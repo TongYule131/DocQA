@@ -50,6 +50,7 @@ export function answerTextForDisplay(answer) {
 }
 export function renderAnswer(container, answer, openCitation) {
   container.replaceChildren();
+  if (answer.response_kind === 'system') { container.append(node('p', String(answer.answer))); return; }
   const citations = new Map((answer.citations || []).map(citation => [citation.reference_id, citation]));
   let list = null, kind = '';
   for (const line of answerTextForDisplay(answer).split('\n')) {

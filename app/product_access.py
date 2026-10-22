@@ -77,6 +77,13 @@ class ProductAccess:
             return bool(db.execute('SELECT team_enabled FROM product_installation WHERE singleton=1').fetchone()[0])
 
     @property
+    def cookie_name(self):
+        import re
+        value=self.settings.session_cookie_name
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}',value):raise ValueError('invalid_cookie_name')
+        return value
+
+    @property
     def cookie_secure(self):
         if self.settings.team_mode:
             return self.settings.session_cookie_secure
@@ -160,8 +167,18 @@ class ProductAccess:
         return dict(row) if row else None
 
     def require_document(self, document_id: str):
-        if self.attachment(document_id):
-            return None
+        attachment=self.attachment(document_id)
+        # 新临时库严格按所有人隔离；管理员也不能从旧文档接口绕过。
+        from app.knowledge_scope import base_allowed, scope_documents
+        owner=self.actor['id'] if self.team_mode else None
+        with self.repository.connect() as db:
+            private=db.execute("SELECT k.id FROM knowledge_bases k WHERE k.kind='temporary' AND (EXISTS(SELECT 1 FROM knowledge_base_documents d WHERE d.knowledge_base_id=k.id AND d.document_id=?) OR EXISTS(SELECT 1 FROM ingestion_jobs j WHERE j.base_id=k.id AND j.document_id=?))",(document_id,document_id)).fetchone()
+            if private:
+                if not base_allowed(db,private[0],owner):raise HTTPException(404,'资料不存在、已到期或未获授权')
+                if document_id not in scope_documents(db,private[0]) and not db.execute('SELECT 1 FROM knowledge_base_documents WHERE knowledge_base_id=? AND document_id=?',(private[0],document_id)).fetchone():raise HTTPException(404,'资料已移除')
+                published=db.execute('SELECT s.* FROM knowledge_base_snapshot_documents s JOIN knowledge_base_snapshots k ON k.id=s.snapshot_id WHERE k.knowledge_base_id=? AND s.document_id=? ORDER BY k.revision DESC LIMIT 1',(private[0],document_id)).fetchone()
+                return dict(published) if published else None
+        if attachment:return None
         if not self.team_mode or self.actor['role'] == 'admin':
             return None
         with self.repository.connect() as db:
@@ -169,6 +186,13 @@ class ProductAccess:
                 'JOIN knowledge_bases k ON k.active_snapshot_id=sd.snapshot_id '
                 'JOIN knowledge_base_members m ON m.knowledge_base_id=k.id '
                 'WHERE sd.document_id=? AND m.user_id=?', (document_id, self.actor['id'])).fetchone()
+        if row is None:
+            # 同一资料的新版本替换保留旧引用；移除当前版本仍立即撤销整条版本链。
+            with self.repository.connect() as db:
+                for (base_id,) in db.execute('SELECT knowledge_base_id FROM knowledge_base_members WHERE user_id=?',(owner,)):
+                    if base_allowed(db,base_id,owner) and document_id in scope_documents(db,base_id):
+                        row=db.execute('SELECT s.* FROM knowledge_base_snapshot_documents s JOIN knowledge_base_snapshots k ON k.id=s.snapshot_id WHERE k.knowledge_base_id=? AND s.document_id=? ORDER BY k.revision DESC LIMIT 1',(base_id,document_id)).fetchone()
+                        if row:break
         if row is None:
             raise HTTPException(404, '资料不存在或未获授权')
         return dict(row)
@@ -178,7 +202,11 @@ class ProductAccess:
             temporary = {r[0] for r in db.execute('SELECT document_id FROM conversation_attachments')}
         documents = [d for d in documents if d.id not in temporary]
         if not self.team_mode or self.actor['role'] == 'admin':
-            return documents
+            result=[]
+            for d in documents:
+                try:self.require_document(d.id);result.append(d)
+                except HTTPException:pass
+            return result
         with self.repository.connect() as db:
             ids = {r[0] for r in db.execute('SELECT sd.document_id FROM knowledge_base_snapshot_documents sd '
                 'JOIN knowledge_bases k ON k.active_snapshot_id=sd.snapshot_id '
@@ -228,13 +256,12 @@ class ProductAccess:
         self.require_document(row['document_id'])
 
     def list_bases(self):
+        from app.knowledge_scope import base_allowed
+        owner=self.actor['id'] if self.team_mode else None
         with self.repository.connect() as db:
-            if not self.team_mode or self.actor['role'] == 'admin':
-                rows = db.execute('SELECT * FROM knowledge_bases ORDER BY created_at DESC').fetchall()
-            else:
-                rows = db.execute('SELECT k.* FROM knowledge_bases k JOIN knowledge_base_members m ON m.knowledge_base_id=k.id '
-                    'WHERE m.user_id=? AND k.active_snapshot_id IS NOT NULL ORDER BY k.created_at DESC', (self.actor['id'],)).fetchall()
-        return [dict(r) for r in rows]
+            rows=db.execute('SELECT * FROM knowledge_bases ORDER BY created_at DESC').fetchall()
+            return [dict(r) for r in rows if base_allowed(db,r['id'],owner) and
+                    (owner is None or self.actor['role']=='admin' or r['kind']=='temporary' or r['active_snapshot_id'])]
 
     def base(self, identifier):
         for item in self.list_bases():
@@ -246,7 +273,7 @@ class ProductAccess:
         result = self.base(identifier)
         is_admin = not self.team_mode or self.actor['role'] == 'admin'
         with self.repository.connect() as db:
-            if is_admin:
+            if is_admin or result['kind']=='temporary':
                 documents = db.execute('SELECT document_id FROM knowledge_base_documents WHERE knowledge_base_id=?', (identifier,)).fetchall()
                 result['members'] = [r[0] for r in db.execute('SELECT user_id FROM knowledge_base_members WHERE knowledge_base_id=?', (identifier,))]
                 result['snapshots'] = [dict(r) for r in db.execute('SELECT * FROM knowledge_base_snapshots WHERE knowledge_base_id=? ORDER BY revision DESC', (identifier,))]
@@ -256,7 +283,7 @@ class ProductAccess:
         result['documents'] = [self.present_document(self.repository.get(r[0])).model_dump() for r in documents if self.repository.get(r[0])]
         return result
 
-    def create_base(self, name, description, *, collection_name=None, embedding_model=None, chunk_max_chars=800, chunk_overlap_chars=120):
+    def create_base(self, name, description, *, collection_name=None, embedding_model=None, chunk_max_chars=800, chunk_overlap_chars=120, activation_policy='auto'):
         self.admin()
         identifier = f'kb-{uuid4().hex}'
         if embedding_model and embedding_model!=self.settings.embedding_model:
@@ -268,8 +295,8 @@ class ProductAccess:
             stamp = now_iso()
             if db.execute('SELECT 1 FROM knowledge_bases WHERE collection_name=?',(collection_name,)).fetchone():
                 raise HTTPException(409,'存储标识已被使用')
-            db.execute('INSERT INTO knowledge_bases(id,name,description,created_by,created_at,updated_at,collection_name,embedding_signature,embedding_model,chunk_max_chars,chunk_overlap_chars) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-                       (identifier, name.strip(), description.strip(), self.actor['id'] if self.actor else None, stamp, stamp,collection_name,self.index.embedding.signature,self.settings.embedding_model,chunk_max_chars,chunk_overlap_chars))
+            db.execute('INSERT INTO knowledge_bases(id,name,description,created_by,created_at,updated_at,collection_name,embedding_signature,embedding_model,chunk_max_chars,chunk_overlap_chars,activation_policy) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                       (identifier, name.strip(), description.strip(), self.actor['id'] if self.actor else None, stamp, stamp,collection_name,self.index.embedding.signature,self.settings.embedding_model,chunk_max_chars,chunk_overlap_chars,activation_policy))
         return self.base(identifier)
 
     def bind_document(self, base_id, document_id, *, remove=False):
@@ -277,6 +304,7 @@ class ProductAccess:
         with self.repository.connect() as db:
             if db.execute('SELECT 1 FROM conversation_attachments WHERE document_id=?', (document_id,)).fetchone():
                 raise HTTPException(409, '临时资料不能加入知识库；如需长期保存，请由管理员重新导入')
+        self.require_document(document_id)
         if not self.repository.get(document_id):
             raise HTTPException(404, '文档不存在')
         with self.repository.connect() as db:

@@ -2,9 +2,11 @@ import { createApiClient, encoded } from './api-client.js';
 import { createConversationClient } from './conversation-client.js';
 import { node, renderAnswer, sourceLocationsText, answerTextForDisplay } from './answer-view.js';
 import { jobLabels, stageLabels } from './question-client.js';
+import { createAnswerStream } from './answer-stream.js';
 
 const $ = id => document.getElementById(id), api = createApiClient();
 const controller = createConversationClient({ api, storage: sessionStorage, changed: paint });
+const stream = createAnswerStream({changed:()=>{turnsSignature='';paint();},finished:()=>controller.refresh()});
 let turnsSignature = '', memorySignature = '', documentsSignature = '', listSignature = '', sourceSequence = 0, previousId = null, sourceFocus = null;
 function notice(text) { $('notice').textContent = text; $('notice').hidden = !text; }
 function closeMenu() { $('sidebar').classList.remove('mobile-open'); $('menu-toggle').setAttribute('aria-expanded', 'false'); }
@@ -73,7 +75,8 @@ function paint() {
     if (!items.length) $('history-list').append(node('p', '暂无匹配会话', 'small-text'));
     for (const item of items) { const b = node('button', '', 'history-item' + (item.id === c?.id ? ' active' : '')); b.type = 'button'; b.append(node('span', item.title), node('small', s.documents.find(d => d.id === item.document_id)?.filename || '资料会话')); b.onclick = () => { controller.open(item.id); closeMenu(); }; $('history-list').append(b); }
   }
-  const ts = JSON.stringify([id, c?.turns?.map(t => [t.job.id, t.job.status, t.job.stage, t.job.error_message, t.result?.id, t.job.cancel_requested])]);
+  stream.watch(c?.turns?.map(t=>t.job));
+  const ts = JSON.stringify([id,stream.revision, c?.turns?.map(t => [t.job.id, t.job.status, t.job.stage, t.job.error_message, t.result?.id, t.job.cancel_requested])]);
   if (ts !== turnsSignature) {
     const scroll = $('chat-scroll'), atEnd = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 140;
     turnsSignature = ts; $('turn-list').replaceChildren(); $('welcome').hidden = Boolean(c?.turns?.length);
@@ -87,6 +90,7 @@ function paint() {
         copy.onclick = async () => { try { await navigator.clipboard.writeText(answerTextForDisplay(turn.result.answer)); notice('已复制回答。'); } catch { notice('浏览器限制了剪贴板，请选择正文复制。'); } }; actions.append(copy);
         for (const [format, label] of [['markdown', '导出 Markdown'], ['json', '导出 JSON']]) { const a = node('a', label); a.href = `/api/question-results/${encoded(turn.result.id)}/export?format=${format}`; actions.append(a); } content.append(actions);
       } else {
+        stream.render(content,job,source);
         content.append(node('p', job.error_message || (job.cancel_requested ? '正在停止后续处理；在途请求可能仍计费。' : stageLabels[job.stage] || '正在处理'), 'stage-status'));
         if (['queued', 'running'].includes(job.status)) { const stop = node('button', '停止后续处理', 'secondary'); stop.type = 'button'; stop.disabled = s.mutating || job.cancel_requested; stop.onclick = () => controller.cancel(job.id); content.append(stop); }
       }
@@ -125,5 +129,6 @@ $('close-sources').onclick = () => closeSource();
 $('chat-scroll').addEventListener('scroll', () => { $('return-latest').hidden = $('chat-scroll').scrollHeight - $('chat-scroll').scrollTop - $('chat-scroll').clientHeight < 140; }, { passive: true });
 $('return-latest').onclick = () => $('chat-scroll').scrollTo({ top: $('chat-scroll').scrollHeight, behavior: 'smooth' });
 document.addEventListener('visibilitychange', controller.visibility); window.addEventListener('pagehide', controller.dispose);
+document.addEventListener('visibilitychange',()=>stream.pause(document.hidden));window.addEventListener('pagehide',()=>stream.dispose());
 document.addEventListener('keydown', e => { if (e.key === 'Escape') { if (!$('source-drawer').hidden) closeSource(); $('memory-panel').hidden = true; closeMenu(); } });
 controller.boot();

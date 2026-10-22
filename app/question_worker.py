@@ -113,7 +113,12 @@ class QuestionWorker:
 
         def observer(stage: str, details: dict):
             nonlocal current_sequence, call_started, current_role
-            if stage in {"query_started", "generation_started"}:
+            if stage in {'stream_started','stream_block','stream_check'}:
+                check_active()
+                if stage!='stream_check':
+                    from app.answer_stream_store import AnswerStreamStore
+                    AnswerStreamStore(self.repository).append('question',job,'reset' if stage=='stream_started' else 'block',details)
+            elif stage in {"query_started", "generation_started"}:
                 role = "embedding" if stage == "query_started" else "generation"
                 current_role = role
                 progress("retrieving" if role == "embedding" else "generating",
@@ -154,6 +159,18 @@ class QuestionWorker:
             if unresolved:
                 raise _Stopped("call_uncertain", "存在未确认的调用，系统不会自动重发；请核实后明确重试", "needs_attention")
             snapshot = json.loads(job["snapshot_json"])
+            resolution=snapshot.get('intent_resolution')
+            if resolution:
+                from app.intent_management import IntentManagement
+                routing_started=time.perf_counter()
+                current=IntentManagement(self.repository).evaluate(job['question'],snapshot.get('intent_base_id'),scope='document')
+                if current!=resolution:raise _Stopped('intent_changed','意图配置已变化，请重新提交本轮')
+                if resolution['route']['kind']=='SYSTEM':
+                    from app.intent_replies import interaction_answer
+                    answer=interaction_answer(job,snapshot,_elapsed(routing_started))
+                    if not self.store.publish_interaction(job_id,token,answer):
+                        check_active();raise _Stopped('interaction_publish_rejected','系统交互未保存，请刷新核对')
+                    return
             saved_answer = self.store.checkpoint(job_id, "answer")
             if saved_answer is not None:
                 answer = RagAnswer.model_validate(saved_answer).model_dump()

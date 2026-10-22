@@ -45,4 +45,9 @@ assert.match(locationText({ format: 'xlsx', sheet_name: '统计', cell_range: 'A
 renderAnswer(root, { answer: '另一份回答', citations: [] }, () => {});
 assert.equal(root.walk().some(item => item.tagName === 'button'), false);
 assert.doesNotMatch(root.textContent, /关键事实/);
-console.log('7 workspace rendering checks passed');
+renderAnswer(root,{response_kind:'system',answer:'你好 <img src=x onerror=alert(1)>',citations:[]},()=>{});
+assert.equal(root.children.length,1);
+assert.equal(root.children[0].tagName,'p');
+assert.equal(root.textContent,'你好 <img src=x onerror=alert(1)>');
+assert.equal(root.walk().some(item=>['details','img','a'].includes(item.tagName)),false);
+console.log('8 workspace rendering checks passed');

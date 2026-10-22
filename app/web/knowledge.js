@@ -3,7 +3,7 @@ import { node } from './answer-view.js';
 
 const $ = id => document.getElementById(id), api = createApiClient();
 let bases = [], documents = [], users = [], detail = null, baseId = null, busy = false, limit = 20, configured = false;
-let indexJobs = [];
+let indexJobs = [], ingestionJobs = [];
 let timer = null, revision = 0, uploadRecord = null, pollFailures = 0;
 const uploadStorageKey = 'docqa.pendingUpload';
 function readUpload() { try { return JSON.parse(sessionStorage.getItem(uploadStorageKey) || 'null'); } catch { return null; } }
@@ -26,7 +26,7 @@ async function action(work) {
 function stopPoll() { if (timer !== null) clearTimeout(timer); timer = null; }
 function schedulePoll() {
   stopPoll();
-  if (!document.hidden && pollFailures < 5 && (documents.some(active) || indexJobs.some(j => ['queued','running'].includes(j.status)))) timer = setTimeout(async () => {
+  if (!document.hidden && pollFailures < 5 && (documents.some(active) || indexJobs.some(j => ['queued','running'].includes(j.status)) || ingestionJobs.some(j=>['queued','running'].includes(j.status)))) timer = setTimeout(async () => {
     if (busy) { schedulePoll(); return; }
     try { await refresh(); pollFailures = 0; }
     catch { ++pollFailures; tell('暂时无法读取处理进度，请刷新核对。没有重新提交解析。', 'error'); schedulePoll(); }
@@ -39,6 +39,7 @@ async function refresh() {
   bases = nextBases; documents = nextDocuments; users = nextUsers; indexJobs = nextIndexJobs;
   if (baseId && !bases.some(base => base.id === baseId)) baseId = null;
   detail = baseId ? await api(`/api/knowledge-bases/${encoded(baseId)}`) : null;
+  ingestionJobs=baseId?await api('/api/ingestions?base_id='+encoded(baseId)):[];
   if (version !== revision) return;
   render(); schedulePoll();
 }
@@ -50,19 +51,22 @@ function render() {
     const button = node('button', base.name, base.id === baseId ? 'active' : ''); button.type = 'button'; button.onclick = () => action(() => choose(base.id)); list.append(button);
   }
   $('base-title').textContent = detail?.name || '资料收件箱';
-  $('base-description').textContent = detail ? '这里显示待发布资料。准备完成后，检查并发布给已授权客户。' : '上传后可直接准备文档，也可将已有资料加入知识库。';
+  $('base-description').textContent = detail ? `上传后自动解析、分块和索引；${detail.activation_policy==='review'?'完成后逐份审核生效。':'准备成功的文件自动生效。'}` : '请先选择或创建知识库。历史收件箱中的资料可加入知识库继续管理。';
   $('base-status').textContent = detail ? detail.active_snapshot_id ? `已发布 v${detail.revision}` : '尚未发布' : '本地资料';
   const selectedDocs = detail ? detail.documents : documents;
   $('documents').replaceChildren();
   if (!selectedDocs.length) $('documents').append(node('p', detail ? '这个知识库还没有资料，请上传或加入已有文档。' : '暂无资料。上传一份文档开始。', 'muted'));
   for (const document of selectedDocs) renderDocument(document);
   $('publish-panel').hidden = !detail; $('bind-form').hidden = !detail;
+  $('upload-form').hidden=!detail;
+  $('activation-policy').value=detail?.activation_policy||'auto';
+  const replacement=$('upload-replacement');replacement.replaceChildren(new Option('作为新资料加入',''));for(const d of detail?.documents||[])if(detail.published_documents.some(p=>p.document_id===d.id))replacement.append(new Option(d.filename,d.id));
   const select = $('unbound-document'); select.replaceChildren();
   const inside = new Set(detail?.documents.map(d => d.id) || []);
   for (const document of documents.filter(d => !inside.has(d.id))) select.append(new Option(document.filename, document.id));
   if (!select.options.length) select.append(new Option('暂无可加入的文档', ''));
   if (detail) {
-    $('published-summary').textContent = detail.active_snapshot_id ? `当前发布 v${detail.revision} · ${detail.published_documents.length} 份资料。变更后需要重新发布。` : '尚无发布版，已授权客户也无法检索草稿。';
+    $('published-summary').textContent = detail.active_snapshot_id ? `当前可用 v${detail.revision} · ${detail.published_documents.length} 份资料。失败或待审核文件不会影响已生效资料。` : '资料准备完成并生效后，获授权客户即可检索。';
     const members = $('members'); members.replaceChildren();
     if (!users.filter(u => u.role === 'customer' && u.active).length) members.append(node('p', '先到后台“用户管理”创建客户，再在此分配访问权限。', 'muted'));
     for (const user of users.filter(u => u.role === 'customer' && u.active)) {
@@ -78,6 +82,18 @@ function renderDocument(document) {
   const labels = { uploaded: '待解析', parsing: '解析中', parsed: '已解析', failed: '解析失败' };
   head.append(node('h3', document.filename), node('span', active(document) ? '正在解析' : labels[document.status] || '待准备', 'badge'));
   card.append(head, node('p', `${document.format?.toUpperCase() || '文档'} · ${(document.size / 1024).toFixed(1)} KB${document.active_parse_version_id ? ` · ${document.chunk_count} 个片段` : ''}`, 'muted'));
+  const ingestion=ingestionJobs.find(j=>j.document_id===document.id);
+  if(ingestion){
+    const states={uploaded:'已保存原件',parsing:'自动解析与分块',indexing:'建立问答索引',review:'等待审核生效',ready:'可以问答'};
+    head.lastChild.textContent=ingestion.error_message||states[ingestion.stage]||ingestion.status;
+    const actions=node('div','','row');
+    if(ingestion.status==='review'){const activate=node('button','审核并生效');activate.onclick=()=>action(async()=>{await api(`/api/ingestions/${encoded(ingestion.id)}/activate`,{method:'POST'});await refresh();tell('该文件已生效，其他文件保持原状态。');});actions.append(activate);}
+    if(['failed','needs_attention','cancelled'].includes(ingestion.status)){const retry=node('button','重试处理','secondary');retry.onclick=()=>action(async()=>{const ack=ingestion.status==='needs_attention';if(ack&&!confirm('存在未确认调用，可能已计费。核实后是否重试？'))return;await api(`/api/ingestions/${encoded(ingestion.id)}/retry`,json('POST',{acknowledge_uncertain:ack}));await refresh();});actions.append(retry);}
+    if(['queued','running'].includes(ingestion.status)){const cancel=node('button','停止处理','secondary');cancel.onclick=()=>action(async()=>{await api(`/api/ingestions/${encoded(ingestion.id)}/cancel`,{method:'POST'});await refresh();});actions.append(cancel);}
+    if(document.active_parse_version_id){const chunks=node('a','查看分块','button secondary');chunks.href='/admin/chunks?document='+encoded(document.id);actions.append(chunks);}
+    const trace=node('a','处理链路','button secondary');trace.href='/admin/traces?trace='+encoded(ingestion.id);actions.append(trace);
+    card.append(actions);$('documents').append(card);return;
+  }
   if (document.task_error_message) card.append(node('p', document.task_error_message, 'muted'));
   const controls = node('div', '', 'row');
   const parse = node('button', active(document) ? '解析已排队' : document.active_parse_version_id ? '解析已完成' : '执行分块', 'secondary');
@@ -128,6 +144,7 @@ function renderDocument(document) {
 $('base-form').onsubmit = event => { event.preventDefault(); action(async () => { const base = await api('/api/knowledge-bases', json('POST', { name: $('base-name').value.trim() })); $('base-name').value = ''; await choose(base.id); tell('知识库已创建，尚未向客户发布。'); }); };
 $('bind-form').onsubmit = event => { event.preventDefault(); if ($('unbound-document').value) action(async () => { await api(`/api/knowledge-bases/${encoded(baseId)}/documents`, json('POST', { document_id: $('unbound-document').value })); await refresh(); tell('资料已加入草稿。'); }); };
 $('publish').onclick = () => action(async () => { await api(`/api/knowledge-bases/${encoded(baseId)}/publish`, json('POST', { expected_revision: detail.revision })); await refresh(); tell('知识库已发布，获授权客户可使用当前版本。'); });
+$('activation-policy').onchange=()=>action(async()=>{await api(`/api/admin/knowledge/bases/${encoded(baseId)}/policy`,json('PATCH',{activation_policy:$('activation-policy').value,expected_revision:detail.revision}));await refresh();tell('生效策略已更新；已经进入待审核的文件仍需逐份审核。');});
 $('refresh').onclick = () => action(async () => { pollFailures = 0; await refresh(); tell('已读取最新状态，没有重新执行任务。'); });
 $('upload-file').onchange = () => {
   const file = $('upload-file').files[0], prior = readUpload();
@@ -139,17 +156,19 @@ $('upload-form').onsubmit = event => {
   event.preventDefault(); const file = $('upload-file').files[0]; if (!file) return;
   action(async () => {
     if (file.size > limit * 1024 * 1024) throw new Error(`文件超过 ${limit} MB 上限，请选择较小文件。`);
-    if (!uploadRecord) uploadRecord = { key: crypto.randomUUID(), baseId, name: file.name, size: file.size, modified: file.lastModified };
+    if (!baseId) throw new Error('请先选择知识库');
+    if (!uploadRecord) uploadRecord = { key: crypto.randomUUID(), baseId, replacement:$('upload-replacement').value||null, name: file.name, size: file.size, modified: file.lastModified };
     // 请求前保存恢复键。浏览器不能持久化 File；刷新后重新选择同一原件仍可安全确认。
     sessionStorage.setItem(uploadStorageKey, JSON.stringify(uploadRecord));
     const data = new FormData(); data.append('file', file);
+    data.append('base_id',uploadRecord.baseId);if(uploadRecord.replacement)data.append('replace_document_id',uploadRecord.replacement);
     $('upload-status').textContent = '正在上传，请勿重复操作…';
     try {
-      const uploadPath = uploadRecord.baseId ? `/api/admin/knowledge/bases/${encoded(uploadRecord.baseId)}/documents` : '/api/documents';
+      const uploadPath = '/api/ingestions';
       const result = await api(uploadPath, { method: 'POST', headers: { 'Idempotency-Key': uploadRecord.key }, body: data, timeoutMs: 120000 });
-      const identifier = result.document.id;
+      const identifier = result.document_id;
       sessionStorage.setItem('docqa.selectedDocument', identifier); $('upload-form').reset(); uploadRecord = null; sessionStorage.removeItem(uploadStorageKey);
-      $('upload-status').textContent = '上传成功'; $('upload').textContent = '上传文档'; await refresh(); tell('原件已保存。下一步请解析文档，核对原文后建立问答索引。');
+      $('upload-status').textContent = '已进入自动处理'; $('upload').textContent = '上传文档'; await refresh(); tell('原件已保存，后台自动处理，关闭页面也会继续。');
     } catch (error) { $('upload-status').textContent = '上传未确认；可刷新收件箱核对，或复用原请求键确认。'; $('upload').textContent = '确认原上传'; throw error; }
   });
 };
@@ -158,7 +177,7 @@ window.addEventListener('pagehide', stopPoll);
 try {
   await window.docqaAuthReady;
   const capability = await api('/api/capabilities'); limit = capability.max_upload_mb || 20; configured = capability.embedding_configured;
-  $('upload-help').textContent = `支持 PDF、DOCX、XLSX、UTF-8 TXT / Markdown，单文件最多 ${limit} MB。上传只保存原件，解析与建立索引分别操作。`;
+  $('upload-help').textContent = `支持 PDF、DOCX、XLSX、UTF-8 TXT / Markdown，单文件最多 ${limit} MB。提交后自动解析、分块和索引，向量服务可能计费。`;
   const params = new URLSearchParams(location.search);
   baseId = params.has('inbox') ? null : params.get('base') || sessionStorage.getItem('docqa.selectedBase') || null; await refresh();
   const pending = readUpload();

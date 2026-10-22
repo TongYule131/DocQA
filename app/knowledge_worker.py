@@ -51,6 +51,13 @@ class KnowledgeWorker:
     def check(self, job):
         if self.stop_requested:raise TaskStopped('worker_stopping','服务正在停止；已确认检查点保留','needs_attention')
         self.runtime.check();self.tasks.check(job['id'],job['lease_token'])
+        payload=json.loads(job['input_json'])
+        if payload.get('ingestion_id'):
+            from app.ingestion import ingestion_configuration
+            with self.repository.connect() as db:
+                ingest=db.execute('SELECT * FROM ingestion_jobs WHERE id=?',(payload['ingestion_id'],)).fetchone()
+                base=db.execute('SELECT * FROM knowledge_bases WHERE id=?',(job['base_id'],)).fetchone()
+            if not ingest or not base or ingest['configuration']!=ingestion_configuration(self.settings,base):raise TaskStopped('configuration_changed','上传处理配置已变化，未继续外部调用')
 
     def index(self,job,payload,parent):
         chunks=self.repository.chunks(job['document_id'],payload['version_id'])
@@ -88,24 +95,28 @@ class KnowledgeWorker:
             return index.index_info(job['document_id'])
 
     def answer(self,job,payload,parent):
+        from app.answer_stream import STREAM_VERSION
+        if payload.get('stream_protocol') not in (None,STREAM_VERSION):
+            raise TaskStopped('stream_protocol_changed','流式协议已变化，请新建任务')
         from app.intent_management import IntentManagement
         self.tasks.stage(job['id'],job['lease_token'],'routing')
         with self.tasks.span(job,'意图识别','INTENT',parent):
-            route=IntentManagement(self.repository).resolve(payload['question'],job['base_id'])
-            if route!=payload.get('route'):raise TaskStopped('intent_changed','意图配置已变化，请在当前会话重新提交')
+            resolution=IntentManagement(self.repository).evaluate(payload['question'],job['base_id']);route=resolution['route']
+            if route!=payload.get('route') or (payload.get('intent_decision') and resolution['decision']!=payload['intent_decision']):raise TaskStopped('intent_changed','意图配置已变化，请在当前会话重新提交')
         if route['kind']=='SYSTEM':
-            return {'answer':route['response_text'],'status':'answered','citations':[],'conclusion':[],
+            return {'response_kind':'system','answer':route['response_text'],'status':'answered','citations':[],'conclusion':[],
                 'explanation':[],'limitations':[],'route':route['code'],'prompt_version':'system-intent-v1'}
         if route['kind']=='MCP':
             from app.knowledge_tools import execute_tool
             return execute_tool(self,job,payload,route,parent)
         self.check(job)
         original_index=DocumentIndex(self.repository,self.embedding)
+        search_question=payload.get('retrieval_question',payload['question'])
         for doc in payload['documents']:original_index.verify_snapshot(doc['document_id'],doc['snapshot'])
         self.tasks.stage(job['id'],job['lease_token'],'retrieving')
         with self.tasks.span(job,'查询向量','EMBEDDING',parent):
             def query():
-                result=self.embedding.embed([payload['question']])
+                result=self.embedding.embed([search_question])
                 return result,getattr(self.embedding,'last_call_metadata',None)
             from app.embedding import normalize_vector
             def validate_query(value):
@@ -121,7 +132,7 @@ class KnowledgeWorker:
         system=build_task_system_prompt()+KNOWLEDGE_RULE
         context_k=min(self.settings.question_context_k,route.get('top_k') or self.settings.question_context_k)
         memory=payload.get('recent_questions',[])
-        if memory:
+        if memory or payload.get('memory_notes'):
             from app.conversation_memory import MEMORY_RULE
             system+=MEMORY_RULE
         budget=min(self.settings.question_context_max_chars,self.settings.question_input_max_chars-len(system)-len(payload['question'])-3500)
@@ -129,7 +140,7 @@ class KnowledgeWorker:
         with self.tasks.span(job,'库内多文档召回与证据装入','RETRIEVE',parent):
             for doc in payload['documents']:
                 self.check(job)
-                found=index.search_snapshot(doc['document_id'],payload['question'],min(20,self.settings.rag_retrieval_k),snapshot=doc['snapshot'],include_scores=True)
+                found=index.search_snapshot(doc['document_id'],search_question,min(20,self.settings.rag_retrieval_k),snapshot=doc['snapshot'],include_scores=True)
                 from app.retrieval_planning import plan_retrieval
                 found=plan_retrieval(payload['question'],found,self.repository.chunks(doc['document_id'],doc['snapshot']['parse_version_id']),max_candidates=32,fulltext_budget=budget,max_items=self.settings.question_context_k,payload_transform=task_segment_payload)
                 built=build_evidence(found,self.settings,expected_document_id=doc['document_id'],max_items=self.settings.question_context_k,
@@ -162,8 +173,9 @@ class KnowledgeWorker:
         names={d['document_id']:d['filename'] for d in payload['documents']}
         entries=[dict(i.payload(),document_name=names[i.document_id]) for i in items]
         user=build_task_user_prompt(question=payload['question'],document_name='知识库资料',evidence_payload=entries)
-        if memory:
-            value=json.loads(user);value['conversation_context']={'recent_questions':memory};user=dump(value)
+        if memory or payload.get('memory_notes'):
+            from app.conversation_memory import MEMORY_VERSION
+            value=json.loads(user);value['conversation_context']={'version':MEMORY_VERSION,'notes':payload.get('memory_notes',''),'recent_questions':memory};user=dump(value)
         if len(system)+len(user)>self.settings.question_input_max_chars:raise TaskStopped('input_budget_exceeded','证据与规则超出输入预算，未发起生成')
         rag=RagService(self.settings,self.repository,original_index,self.model)
         def validate(value):
@@ -171,7 +183,19 @@ class KnowledgeWorker:
             validate_user_condition_boundary(checked,pack,question=payload['question']);review_claims(checked,pack)
             return value
         def generate():
-            raw=self.model.generate(system,user)
+            from app.answer_stream import STREAM_VERSION,FactStreamParser,checked_block
+            if payload.get('stream_protocol')==STREAM_VERSION and hasattr(self.model,'generate_stream'):
+                from app.answer_stream_store import AnswerStreamStore
+                store=AnswerStreamStore(self.repository)
+                def completed(category,ordinal,fact):
+                    self.check(job)
+                    store.append('knowledge',job,'block',checked_block(category,ordinal,fact,pack,payload['question'],rag,names))
+                store.append('knowledge',job,'reset',{'version':STREAM_VERSION})
+                checked_at=[0.0]
+                def active():
+                    if time.perf_counter()-checked_at[0]>=.25:self.check(job);checked_at[0]=time.perf_counter()
+                raw=self.model.generate_stream(system,user,FactStreamParser(completed).feed,active)
+            else:raw=self.model.generate(system,user)
             return json.loads(raw),getattr(self.model,'last_call_metadata',None)
         with self.tasks.span(job,'生成与逐论断校验','GENERATION',parent):
             protocol=self.tasks.call(job,'generation',generate,checkpoint='validated_protocol',validate=validate)
