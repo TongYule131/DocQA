@@ -1,5 +1,6 @@
 """原文连续范围选择：模型选服务器编号，服务器回取未改写的连续原文。"""
 from __future__ import annotations
+import re
 
 
 QUOTE_SPAN_VERSION = "bounded-quotes-v1"
@@ -68,7 +69,7 @@ def context_segments(text: str) -> list[str]:
 def task_segment_payload(entries: list[dict]) -> list[dict]:
     # 原窗口只表示一次；不另复制所有限定语，避免为选择器成倍增加输入预算。
     from app.rag_extract_context import visible_segments,quote_units
-    return [{**{k:v for k,v in entry.items() if not k.startswith('_')},
+    result = [{**{k:v for k,v in entry.items() if not k.startswith('_')},
         **({'quote_units':({unit:[p[1:] if p[0]==entry['ref'] else p for p in parts]
             for unit,parts in entry['_unit_choices'].items()} if '_unit_choices' in entry else
             quote_units(entry['content'],entry.get('_read_ranges'),strict=entry.get('_strict_segments',False)))}
@@ -76,3 +77,16 @@ def task_segment_payload(entries: list[dict]) -> list[dict]:
         {'span': index, 'segments': segments} for index,segments,_ in visible_segments(
             entry['content'],entry.get('_read_ranges'),strict=entry.get('_strict_segments',False))]}
         for entry in entries]
+    from app.rag_numeric_roles import source_number_tokens
+    for entry in result:
+        choices=[]
+        for window in entry['content']:
+            for number,text in window['segments'].items():
+                if re.fullmatch(r'\s*\[\d+\]\s*',text):continue
+                if not re.search(r'\d\s*(?:[%％]|元|万|亿|个|人|件|天|年|月|日|小时|公斤|千克|米|℃)',text):continue
+                values=sorted(source_number_tokens(text))
+                if values:
+                    choices.append(dict(span=window['span'],segment=int(number),values=values))
+        # 这些只是原文小段的地址，不推断对象或条件；未列出不代表没有数值。
+        if choices:entry['numeric_context_choices']=choices[:12]
+    return result

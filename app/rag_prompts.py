@@ -137,7 +137,7 @@ def build_system_prompt() -> str:
     return SYSTEM_PROMPT
 
 
-TASK_PROMPT_VERSION = "rag-task-v29"
+TASK_PROMPT_VERSION = "rag-task-v30"
 
 TABLE_STRUCTURE_INSTRUCTIONS = """
 
@@ -188,6 +188,8 @@ conclusion直接回答，explanation只补充必要且尚未交代的依据或�
 不得用另一条事实的引用为本条补证；表格数值必须共同选择含主体、列头/单位、期间及注释的真实单位，空白不是零。结构性推断标inference。不能引用纯空白或不存在的unit；若原文单位不支持，保留缺项而非改用别的片段编号。
 context最多12项，每项恰有kind、ref、span、segment，例如{"kind":"condition","ref":2,"span":1,"segment":3}。该小段必须落在本条所选unit实际覆盖的范围内；kind只能为subject、period、unit、scope、condition、role。服务器回取原文并关联本条引述，不从其他事实或窗口借限定，不自写context文字。
 任何含阿拉伯统计数字的事实至少有一项真实context（单纯第3节等章节/页段定位编号除外）；正文数字必须来自本条选择的范围，不能仅在整块其他位置出现。非数值事实的context=[]，其条件和例外直接写在text。相同小段已覆盖多个限定时选择一次即可；标签不证明限定适用，仍须核实原文。
+references中的numeric_context_choices仅列出原文含数值的小段地址及其字面数值，不是新事实或已判断的适用条件。作答先选择支持本条的unit，再把包含数据、对象和条件的实际小段填入context；不能在写了百分比或年份后留context=[]。若数字与解释分属不同原句，必须共同选择支持两者关系的完整原文；不得只从题干取数字。最终逐条核对正文中的数值、单位、主体及其引述是否一致。
+题干的引号可能标注概括性术语，并不证明是论文逐字原话。解释时可自然转述，但仅对本条引用中确实出现的原句使用原文引号；不能把题干的缩略句包装成原文。概念列表按原文含义阐释，不因分隔符不同而虚构另一套结构。正文需要标页码、节号时，只采用本条实际locations中的PDF页和heading中的真实章节编号，页码与期刊印刷页号不能混用；无法确认节号时说明未识别，不把收稿日期、作者栏当作正文小节。不输出额外页码或坐标字段。
 answer_requirements是从原问题拆出的作答核对项，不含文档事实。逐项回答其中实际所问的名称、作用、操作或关系，再核对覆盖；事实仍只来自references，不从核对项补造信息。
 # 唯一输出格式与上限
 只输出一个JSON对象，恰含这些字段：

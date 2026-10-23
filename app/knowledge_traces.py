@@ -65,7 +65,19 @@ class KnowledgeTraces:
             if detail:
                 spans.extend({**s,'id':child+'/'+s['id'],'parent_id':child+'/'+s['parent_id'] if s.get('parent_id') else None} for s in detail['spans'])
                 calls.extend({**c,'task_id':child} for c in detail['calls'])
-        intent=None
+        intent=None;diagnostics=[]
+        if record['source']=='knowledge':
+            with self.repository.connect() as db:
+                rows=db.execute("SELECT name,payload_json FROM kb_task_checkpoints WHERE task_id=? AND name LIKE 'diagnostic_%' ORDER BY created_at",(identifier,)).fetchall()
+            for row in rows:
+                value=json.loads(row['payload_json']);attempt=row['name'].rsplit('_',1)[-1]
+                if row['name'].startswith('diagnostic_validation_'):
+                    location=value.get('location',{})
+                    diagnostics.append(dict(kind='validation',attempt=attempt,reason=value.get('reason'),
+                        location={k:location[k] for k in ('category','ordinal','fact_index','reference_count','numeric_count') if k in location}))
+                elif row['name'].startswith('diagnostic_retrieval_'):
+                    diagnostics.append(dict(kind='retrieval',attempt=attempt,
+                        **{k:value.get(k) for k in ('admitted_count','context_chars','truncated','drop_count')}))
         if record['source'] in ('knowledge','question'):
             with self.repository.connect() as db:
                 source=db.execute('SELECT '+('input_json FROM kb_tasks' if record['source']=='knowledge' else 'snapshot_json FROM question_jobs')+' WHERE id=?',(identifier,)).fetchone()
@@ -75,5 +87,5 @@ class KnowledgeTraces:
                 from app.intent_routing import public_decision
                 intent=public_decision(decision)
         for span in spans:span['offset_ms']=milliseconds(record['started_at'],span['started_at'])
-        return {**record,'spans':spans,'calls':calls,'children':children,'intent':intent,'content_policy':'仅含运行元数据；不展示用户问题、提示词、文档正文或原始响应。',
+        return {**record,'spans':spans,'calls':calls,'children':children,'intent':intent,'diagnostics':diagnostics,'content_policy':'仅含运行元数据；不展示用户问题、提示词、文档正文或原始响应。',
                 'timing_note':'旧任务只展示实际记录的外调节点；未记录的阶段不补造耗时。'}

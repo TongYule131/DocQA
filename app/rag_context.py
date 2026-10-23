@@ -352,7 +352,7 @@ def build_evidence(search_result: dict, settings: Settings, *,
 
     candidates, drop_reasons = build_candidates(raw_results, min_score=settings.rag_min_score)
     planned_order = search_result.get("evidence_order")
-    if isinstance(planned_order, list) and search_result.get("strategy") in {"hybrid-context-v1", "hybrid-context-v2", "hybrid-context-v3", "hybrid-context-v4", "hybrid-context-v5"}:
+    if isinstance(planned_order, list) and search_result.get("strategy") in {"hybrid-context-v1", "hybrid-context-v2", "hybrid-context-v3", "hybrid-context-v4", "hybrid-context-v5", "hybrid-context-v6"}:
         # 融合排名和分问题上下文顺序仅来自服务端规划；原余弦分值仍用于可选阈值。
         positions = {chunk_id: i for i, chunk_id in enumerate(planned_order) if isinstance(chunk_id, str)}
         candidates.sort(key=lambda item: positions.get(item.chunk_id, len(positions)))
@@ -388,7 +388,7 @@ def build_evidence(search_result: dict, settings: Settings, *,
         return json.dumps(payload_transform(entries) if payload_transform else entries,
                           ensure_ascii=False, separators=(",", ":"))
 
-    slots = (search_result.get('planning') or {}).get('evidence_slots', []) if search_result.get('strategy') in {'hybrid-context-v4','hybrid-context-v5'} else []
+    slots = (search_result.get('planning') or {}).get('evidence_slots', []) if search_result.get('strategy') in {'hybrid-context-v4','hybrid-context-v5','hybrid-context-v6'} else []
     selected, truncated, context_chars, budget_reasons = pack_evidence(
         candidates, context_max_chars=max_chars, serialize=serialize,
         max_items=settings.rag_context_k if max_items is None else max_items, slots=slots, partners=partners)

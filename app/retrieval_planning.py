@@ -145,7 +145,7 @@ def _plan_retrieval_v1(question: str, vector_result: dict, chunks: list, *, max_
     return result
 
 
-RETRIEVAL_STRATEGY_VERSION = "hybrid-context-v5"
+RETRIEVAL_STRATEGY_VERSION = "hybrid-context-v6"
 
 
 def _search_text(text: str) -> str:
@@ -338,6 +338,15 @@ def plan_retrieval(question: str, vector_result: dict, chunks: list, *, max_cand
                 add(group[offset],"numbered_stage_context")
 
     # 先装入可核对的定义和明确章节代表段，避免摘要/背景先占满字符预算。
+    # 用户提供的数值仅是召回线索，绝不能作为事实证据；保护真实原文中的对应数据段。
+    from app.rag_numeric_roles import source_number_tokens
+    numeric_hints = source_number_tokens(question)
+    numeric_anchors = []
+    for number in sorted(numeric_hints):
+        matches = [i for i,t in enumerate(texts) if not labels[i] and number in source_number_tokens(t)]
+        if matches:
+            best=max(matches,key=lambda i:(global_lex.get(i,0),-i))
+            numeric_anchors.append(pool[best]['chunk_id']); add(best,'numeric_source_anchor')
     for i, reason in _definition_and_section_anchors(question, pool, texts, headings, labels, global_lex):
         add(i, reason)
 
@@ -415,7 +424,7 @@ def plan_retrieval(question: str, vector_result: dict, chunks: list, *, max_cand
     preferred = list(dict.fromkeys(i for slot in slots for i in slot['candidate_ids'][:2]))
     definitions = [pool[i]['chunk_id'] for i in selected if reasons.get(pool[i]['chunk_id']) == 'named_direct_definition']
     section_support = [i for slot in slots if slot['kind'] in {'explicit_subsection','explicit_section'} for i in slot['candidate_ids']]
-    protected = list(dict.fromkeys(definitions + mandatory + preferred + section_support))[:max_candidates]
+    protected = list(dict.fromkeys(definitions + numeric_anchors + mandatory + preferred + section_support))[:max_candidates]
     protected_indices = [indexes[i] for i in protected]
     selected = (protected_indices + [i for i in selected if i not in protected_indices])[:max_candidates]
     for identifier in protected:
@@ -444,7 +453,8 @@ def plan_retrieval(question: str, vector_result: dict, chunks: list, *, max_cand
             "selection_reasons":reasons,"numbered_stage_groups":len(stage_ranges),
             "derived_search_heading_count":derived_heading_count,
             "dynamic_candidates":True,"semantic_completeness_verified":False})
-    result['planning'].update(evidence_slots=slots, slot_plan_version=SLOT_PLAN_VERSION)
+    result['planning'].update(evidence_slots=slots, slot_plan_version=SLOT_PLAN_VERSION,
+        numeric_slot_count=len(set(numeric_anchors)))
     return result
 
 

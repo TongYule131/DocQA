@@ -23,7 +23,7 @@ from app.schemas import Block, QualityWarning, SourceLocation
 logger = logging.getLogger(__name__)
 
 # 结果结构版本：Docling 结构变化或规范化规则调整时递增，便于识别历史版本产物。
-RESULT_SCHEMA_VERSION = "docqa-normalized-6"
+RESULT_SCHEMA_VERSION = "docqa-normalized-8"
 
 # Docling 文本标签到业务块类型的映射；未识别的标签会显式告警。
 _LABEL_TO_TYPE = {
@@ -77,7 +77,7 @@ class NormalizedDocument:
 
     def indexable_blocks(self) -> list[Block]:
         """可索引块：排除页眉页脚与纯占位内容；页眉页脚仍保留在预览中。"""
-        skip = {"page_header", "page_footer"}
+        skip = {"page_header", "page_footer", "inline_fragment"}
         return [block for block in self.blocks
                 if block.block_type not in skip and (block.text.strip() or block.table)]
 
@@ -191,6 +191,10 @@ class _Heading:
 def _heading_spec(text: str, *, title: bool = False) -> tuple[str, int, tuple[int, ...]] | None:
     """保守识别标题形态，不清洗 OCR 空格，也不对原文进行字符串替换。"""
     value = text.strip()
+    if re.match(r'^(?:收稿日期|修回日期|投稿日期|基金项目|作者简介|通讯作者|中图分类号|文献标识码)\s*[:：]', value):
+        return None
+    if re.fullmatch(r'[\u4e00-\u9fff]{2,4}\s*\d+(?:\s*[，,、]\s*[\u4e00-\u9fff]{2,4}\s*\d+)+', value):
+        return None
     if not value or len(value) > (180 if title else 80) or "\n" in value or "\r" in value:
         return None
     if (_REFERENCE_MARKER.search(value) or _YEAR_OR_DATE.fullmatch(value)
@@ -453,7 +457,7 @@ def _table_plain_text(table: dict[str, Any]) -> str:
 
 def normalize_docling_result(document_id: str, payload: dict[str, Any], fmt: str,
                              *, parser_version: str | None = None,
-                             page_count_hint: int | None = None) -> NormalizedDocument:
+                             page_count_hint: int | None = None, pdf_path: Path | None = None) -> NormalizedDocument:
     """把 Docling 结构化结果规范化为业务结构。"""
     if not isinstance(payload, dict):
         raise ValueError("规范化输入必须是结构化结果对象")
@@ -692,6 +696,10 @@ def normalize_docling_result(document_id: str, payload: dict[str, Any], fmt: str
                     source.table_no = blocks[-1].table.get('table_no')
 
     document.blocks = blocks
+    inline = {}
+    if fmt == 'pdf' and pdf_path is not None:
+        from app.pdf_inline import apply_pdf_inline
+        inline = apply_pdf_inline(document, pdf_path)
     structure = _recover_structure(blocks, block_nodes) if fmt in {"pdf", "docx"} else {}
     if structure.get("recovered_heading_paths"):
         warnings.append(QualityWarning(
@@ -716,6 +724,7 @@ def normalize_docling_result(document_id: str, payload: dict[str, Any], fmt: str
         "table_cell_text_nodes_skipped": len(table_child_refs),
         "text_length": document.text_length(),
         "structure": structure,
+        "inline": inline,
     }
     return document
 
@@ -745,6 +754,15 @@ def _add_document_level_warnings(document: NormalizedDocument, fmt: str, pages: 
                 message=f"第 {page_no} 页没有可提取内容（可能是合法空白页），页码保持原编号不变",
             ))
     indexable = document.indexable_blocks()
+    if fmt == 'pdf':
+        from app.pdf_text_health import garbled_pages
+        for page_no, health in garbled_pages(document):
+            warnings.append(QualityWarning(
+                code='pdf_text_mapping_suspect', severity='error', scope='page', page=page_no,
+                message=f'第 {page_no} 页文本含大量控制字符、未映射字形或装饰符号，疑似PDF文字映射损坏；'
+                        '未将这些内容作为可靠正文发布，请通过OCR重新解析并核对原件',
+                detail=str(health),
+            ))
     if fmt == "pdf" and pages:
         text_pages = {s.page for block in indexable for s in block.sources if s.page is not None}
         for page_no in sorted(used_pages - text_pages):

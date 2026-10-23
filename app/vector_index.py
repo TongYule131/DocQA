@@ -219,7 +219,37 @@ class DocumentIndex:
         thread = Thread(target=heartbeat, daemon=True)
         thread.start()
         try:
-            vectors = self.embedding.embed([chunk.text for chunk in chunks])
+            # 同次构建中完全相同的输入复用向量（例如缺失公式占位），仍为每个块
+            # 保存自己的版本、位置和向量行；不合并不同文本或跨文档缓存。
+            unique_texts = list(dict.fromkeys(chunk.text for chunk in chunks))
+            by_text = {}
+            if not rebuild:
+                # 仅复用同文档、相同模型、其他成功版本中的完全相同输入；仍创建新版来源行。
+                # 显式rebuild不使用此缓存，允许用户修复历史向量而非一直复用错误结果。
+                with self.repository.connect() as db:
+                    rows=db.execute("""SELECT c.text,v.vector,v.dimension FROM embedding_indexes i
+                        JOIN embedding_vectors_v2 v ON v.index_id=i.id
+                        JOIN chunks c ON c.id=v.chunk_id AND c.parse_version_id=i.parse_version_id
+                        WHERE i.document_id=? AND c.document_id=? AND i.provider_signature=?
+                        AND i.status='indexed' AND i.parse_version_id<>? ORDER BY i.created_at DESC""",
+                        (document_id,document_id,self.embedding.signature,target_version)).fetchall()
+                wanted=set(unique_texts)
+                from app.embedding import normalize_vector
+                for row in rows:
+                    if row['text'] not in wanted or row['text'] in by_text:continue
+                    try:
+                        vector=json.loads(row['vector'])
+                        if len(vector)!=row['dimension']:continue
+                        by_text[row['text']]=normalize_vector(vector)
+                    except (ValueError,TypeError,EmbeddingError):continue
+            missing=[text for text in unique_texts if text not in by_text]
+            unique_vectors = self.embedding.embed(missing) if missing else []
+            if len(unique_vectors) != len(missing):
+                raise EmbeddingError(502, "Embedding 返回的向量数量与唯一文本数量不一致")
+            by_text.update(zip(missing, unique_vectors))
+            vectors = [by_text[chunk.text] for chunk in chunks]
+            if len({len(vector) for vector in vectors})!=1:
+                raise EmbeddingError(502,'新旧向量维度不一致，未发布索引')
             if len(vectors) != len(chunks):
                 raise EmbeddingError(502, "Embedding 返回的向量数量与分块数量不一致")
             dimension = len(vectors[0])
@@ -239,11 +269,12 @@ class DocumentIndex:
                     409, "构建期间该文档的活动解析版本已变化，本次索引构建已过期；"
                          "原有索引保持可用，请对新版本重新建立索引")
         except Exception as exc:
-            message = str(exc) if isinstance(exc, EmbeddingError) else "索引构建失败，请检查服务日志后重试"
-            code = "embedding_failed" if isinstance(exc, EmbeddingError) else "index_build_failed"
+            from app.knowledge_tasks import TaskStopped
+            message = exc.message if isinstance(exc,TaskStopped) else str(exc) if isinstance(exc, EmbeddingError) else "索引构建失败，请检查服务日志后重试"
+            code = exc.code if isinstance(exc,TaskStopped) else "embedding_failed" if isinstance(exc, EmbeddingError) else "index_build_failed"
             self.repository.fail_index_attempt(attempt_id, code=code, message=message,
                                               document_id=document_id)
-            if isinstance(exc, EmbeddingError):
+            if isinstance(exc, (EmbeddingError,TaskStopped)):
                 raise
             # 上游异常原文可能包含凭证或文档内容，不将异常链写入日志。
             logger.error("索引构建失败：文档 %s，异常类型 %s", document_id, type(exc).__name__)

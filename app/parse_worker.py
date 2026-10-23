@@ -52,6 +52,7 @@ from app.docling_client import (
 from app.repository import Repository, now_iso
 from app.runtime import RuntimeGuard
 from app.schemas import ParseTask, ParseVersion
+from app.pdf_raster import PdfRasterError, RASTER_VERSION, RASTER_DPI, rasterize_pdf
 
 logger = logging.getLogger("docqa.worker")
 
@@ -183,6 +184,19 @@ class ParseWorker:
                 self._process_local_text(task, token, document, content, origin_hash)
                 return
             upstream_id = task.upstream_task_id
+            if fmt == 'pdf' and not upstream_id:
+                from app.pdf_text_health import pdf_ocr_plan
+                summary = dict(task.request_summary or {})
+                if 'pdf_text_health' not in summary:
+                    summary['pdf_text_health'] = pdf_ocr_plan(content, max_pages=self.settings.max_pdf_pages)
+                    with self.repository.connect() as db:
+                        changed = db.execute(
+                            "UPDATE parse_tasks SET request_summary=? WHERE id=? AND lease_token=? "
+                            "AND status='running' AND lease_expires_at>? AND cancel_requested=0",
+                            (json.dumps(summary, ensure_ascii=False), task.id, token, now_iso())).rowcount
+                    if not changed:
+                        return
+                    task.request_summary = summary
             if upstream_id:
                 # 已有上游任务编号：直接恢复查询与领取，绝不重新上传。
                 self.repository.update_task_progress(task.id, token, stage="waiting_upstream")
@@ -200,6 +214,9 @@ class ParseWorker:
                           origin_hash=origin_hash, parser_version=None, source="docling")
         except DoclingError as exc:
             self._handle_docling_error(task, token, exc)
+        except PdfRasterError as exc:
+            self.repository.finish_task(task.id, token, status='failed', stage='done',
+                                        error_code='pdf_raster_limit', error_message=str(exc))
         except Exception as exc:  # noqa: BLE001 - worker 必须把任意异常转换为任务终态
             logger.error("任务 %s 处理失败，异常类型 %s", task.id, type(exc).__name__)
             self.repository.finish_task(
@@ -218,8 +235,25 @@ class ParseWorker:
             return None
         filename = sanitize_filename(document.filename)
         try:
+            options = {}
+            if (task.request_summary or {}).get('pdf_text_health', {}).get('force_ocr') is True:
+                # force_ocr本身仍可能让表格读取坏文本层。先渲染成同页同尺寸的图像PDF，
+                # 让正文和表格统一使用OCR；只在首次提交前执行，不自动追加转换。
+                content = rasterize_pdf(content, max_pages=self.settings.max_pdf_pages,
+                                        max_bytes=self.settings.max_upload_mb * 1024 * 1024)
+                summary = dict(task.request_summary)
+                summary['ocr_render'] = dict(version=RASTER_VERSION, dpi=RASTER_DPI,
+                    submitted_sha256=hashlib.sha256(content).hexdigest(), original_retained=True)
+                with self.repository.connect() as db:
+                    changed = db.execute("UPDATE parse_tasks SET request_summary=? WHERE id=? AND lease_token=? "
+                        "AND status='running' AND lease_expires_at>? AND cancel_requested=0",
+                        (json.dumps(summary,ensure_ascii=False),task.id,token,now_iso())).rowcount
+                if not changed:
+                    return None
+                task.request_summary = summary
+                options['force_ocr'] = True
             payload = self.client.submit(filename=filename, content=content,
-                                         mime=FORMAT_MIME.get(fmt, "application/octet-stream"))
+                                         mime=FORMAT_MIME.get(fmt, "application/octet-stream"), **options)
         except DoclingError as exc:
             if exc.uncertain:
                 # 不确定窗口：上游可能已创建任务。这里不自动重投，交由用户确认。
@@ -342,7 +376,7 @@ class ParseWorker:
         if normalized is None:
             try:
                 normalized = normalize_docling_result(document.id, json_content, fmt,
-                                                     parser_version=parser_version)
+                    parser_version=parser_version, pdf_path=self.upload_dir / document.id if fmt == 'pdf' else None)
             except ValueError as exc:
                 # 结构无效：不发布，保留失败证据（结果文件仍写盘供诊断）。
                 self._save_diagnostic(task, json_content, md_content, str(exc))
@@ -353,6 +387,12 @@ class ParseWorker:
         if fmt == "xlsx":
             formula_info = inspect_xlsx_formulas(self.upload_dir / document.id)
             apply_formula_warnings(normalized, formula_info)
+        render = (task.request_summary or {}).get('ocr_render')
+        if render:
+            from app.schemas import QualityWarning
+            normalized.warnings.append(QualityWarning(code='pdf_text_layer_replaced_by_ocr', severity='warning',
+                scope='document', message='检测到异常PDF文本映射，已保留原件并使用同页图像副本重新OCR；'
+                '公式、上下标、符号和表格内容仍须对照原件核实，不能据此宣称数学推导已识别正确'))
         normalized.warnings = merge_warnings(normalized.warnings)
         quality_status = overall_quality_status(normalized.warnings)
         if quality_status == "invalid":
@@ -411,10 +451,16 @@ class ParseWorker:
         json_path, md_path = self._write_result_files(version_id, json_content, md_content, normalized)
 
         self.repository.update_task_progress(task.id, token, stage="publishing")
+        config_summary = self.client.config_summary()
+        health = (task.request_summary or {}).get('pdf_text_health')
+        if health:
+            config_summary = dict(config_summary, force_ocr=health['force_ocr'], pdf_text_health=health)
+        if render:
+            config_summary['ocr_render'] = render
         version = ParseVersion(
             id=version_id, document_id=document.id, task_id=task.id, origin_hash=origin_hash,
             parser_name=source, parser_version=parser_version,
-            config_summary=json.dumps(self.client.config_summary(), ensure_ascii=False),
+            config_summary=json.dumps(config_summary, ensure_ascii=False),
             result_schema_version=RESULT_SCHEMA_VERSION, result_hash=result_hash, quality_status=quality_status,
             quality_summary=self._quality_summary(normalized.warnings, quality_status),
             block_count=len(normalized.blocks), page_count=normalized.page_count,

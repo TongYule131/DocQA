@@ -25,7 +25,9 @@ def fingerprint(value):
 def configuration(settings, embedding):
     from app.rag_prompts import TASK_PROMPT_VERSION
     from app.conversation_memory import MEMORY_SIGNATURE
-    return fingerprint([embedding.signature, settings.deepseek_base_url, settings.deepseek_model,
+    from app.rag_pipeline import PIPELINE_VERSION
+    from app.rag_phrase_match import PHRASE_POLICY_VERSION
+    return fingerprint([PIPELINE_VERSION,PHRASE_POLICY_VERSION,embedding.signature, settings.deepseek_base_url, settings.deepseek_model,
         settings.deepseek_thinking, TASK_PROMPT_VERSION, KNOWLEDGE_PROMPT_VERSION, KNOWLEDGE_RULE, settings.question_context_max_chars,
         settings.question_input_max_chars, settings.question_context_k,MEMORY_SIGNATURE])
 
@@ -170,6 +172,17 @@ class KnowledgeTasks:
         with self.repository.connect() as db:row=db.execute('SELECT payload_json FROM kb_task_checkpoints WHERE task_id=? AND name=?',(identifier,name)).fetchone()
         return json.loads(row[0]) if row else None
 
+    def diagnostic(self, job, kind, payload):
+        """诊断不是成功检查点；不能供恢复路径跳过校验或再次触发模型调用。"""
+        if kind not in {'retrieval','validation'}:raise ValueError('invalid_diagnostic_kind')
+        name=f"diagnostic_{kind}_attempt_{job['attempt_count']}"
+        with self.repository.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not self.valid(db,job['id'],job['lease_token']):return False
+            db.execute('INSERT OR IGNORE INTO kb_task_checkpoints VALUES (?,?,?,?)',
+                (job['id'],name,dump(payload),now_iso()))
+        return True
+
     def call(self, job, role, work, *, checkpoint=None, validate=lambda value:value):
         saved=self.checkpoint(job['id'],checkpoint) if checkpoint else None
         if saved is not None:return validate(saved)
@@ -182,7 +195,7 @@ class KnowledgeTasks:
             sequence=row['requests_used']+1
             db.execute('UPDATE kb_tasks SET requests_used=? WHERE id=?',(sequence,identifier))
             db.execute("INSERT INTO kb_task_calls(id,task_id,sequence_no,role,status,started_at) VALUES (?,?,?,?,'intent',?)",('kcall-'+uuid4().hex,identifier,sequence,role,now_iso()))
-        started=time.perf_counter()
+        started=time.perf_counter();raw=usage=None
         try:
             raw,usage=work()
             value=validate(raw)
@@ -198,12 +211,26 @@ class KnowledgeTasks:
             from app.rag_validation import ModelOutputError
             uncertain=(getattr(exc,'status_code',None)==504 or isinstance(exc,TaskStopped) and exc.status=='needs_attention'
                 or not hasattr(exc,'status_code') and not isinstance(exc,(TaskStopped,ValueError,ModelOutputError)))
-            with self.repository.connect() as db:
-                db.execute("UPDATE kb_task_calls SET status=?,error_code=?,finished_at=?,elapsed_ms=? WHERE task_id=? AND sequence_no=? AND status='intent'",
-                    ('uncertain' if uncertain else 'failed','call_uncertain' if uncertain else 'call_failed',now_iso(),round((time.perf_counter()-started)*1000),identifier,sequence))
-            if isinstance(exc,TaskStopped):raise
             code='output_'+exc.reason if isinstance(exc,ModelOutputError) else 'call_uncertain' if uncertain else 'call_failed'
-            raise TaskStopped(code,'调用结果不确定，请核实后明确重试' if uncertain else '调用或输出校验失败；未发布结果','needs_attention' if uncertain else 'failed') from None
+            if role=='generation' and isinstance(exc,ModelOutputError):
+                self.diagnostic(job,'validation',dict(reason=exc.reason,location=exc.location,
+                    sequence_no=sequence,output=raw if isinstance(raw,(str,dict)) else None))
+            with self.repository.connect() as db:
+                db.execute("UPDATE kb_task_calls SET status=?,error_code=?,usage_json=?,finished_at=?,elapsed_ms=? WHERE task_id=? AND sequence_no=? AND status='intent'",
+                    ('uncertain' if uncertain else 'failed',code,dump(_usage_metadata(usage)),now_iso(),round((time.perf_counter()-started)*1000),identifier,sequence))
+            if isinstance(exc,TaskStopped):raise
+            messages = {
+                'output_numeric_context_missing': '回答中的数值缺少适用限定，未发布完整结果；请查看链路详情',
+                'output_mixed_user_source': '回答将题干中的表述作为原文引用，但本条证据未支持；请查看链路中的失败论断位置',
+                'output_number_not_in_quote': '回答中的数值未在本条引用原文中找到，未发布完整结果；请核对数字及其适用对象',
+                'output_number_unit_mismatch': '回答中的数值单位与本条引用原文不一致，未发布完整结果',
+                'output_page_locator_not_supported': '回答标注的页码与本条引用来源不一致，未发布完整结果',
+                'output_statement_locator_not_supported': '回答标注的命题、推论或条目编号缺少本条原文支持，未发布完整结果',
+                'output_locator_not_supported': '回答中的文内定位编号缺少本条来源支持，未发布完整结果；请核对章节、图表或条目位置',
+            }
+            message = ('调用结果不确定，请核实后明确重试' if uncertain else
+                       messages.get(code, '调用或输出校验失败；未发布结果'))
+            raise TaskStopped(code,message,'needs_attention' if uncertain else 'failed') from None
 
     def finish(self, job, status, *, result=None, code=None, message=None):
         with self.repository.connect() as db:

@@ -22,11 +22,12 @@ def question_parts(question: str) -> list[dict]:
     return [{"part_id": f"p{i}", "text": text} for i, text in enumerate(parts or [question], 1)]
 
 
-def _fail(reason):
-    raise ModelOutputError(reason)
+def _fail(reason, *, location=None):
+    raise ModelOutputError(reason, location=location)
 
 
 def _tokens(value):
+    # 历史离线调用的兼容入口；生产答案使用rag_numeric_roles，不靠此处删除定位。
     # 定位编号不是统计值。仅统一明确的三位分组，不合并任意OCR数字间空格。
     value=re.sub(r'第\s*\d+(?:\.\d+)*\s*[章节页段]', '', value)
     value=re.sub(r'第\s*\d+(?:\.\d+)+(?:[、和及与,，]\s*\d+(?:\.\d+)+)*(?:节)?','',value)
@@ -36,18 +37,21 @@ def _tokens(value):
     return {re.sub(r"\s+(?=[%％])", "", v) for v in _NUMBERS.findall(value)}
 
 
-def _context_numbers(value):
+def _context_numbers(value, *, strict=False):
     # 概念列举的个数和带版本号的文字标识不是金额/测量；原文数值仍由_tokens核对。
     value=re.sub(r'\d+世纪(?:初|末|中叶)?','',value)
     value=re.sub(r'\d+\s*(?:个|种)?(?:层面|层级|机制|维度|类别|方面|要素)(?![\u3400-\u9fff]*(?:元|人|天|小时|件))','',value)
     # 只有明确称为编号/版本/许可等文字标识时才免测量context；USD10-20仍是金额。
     pattern=r'(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9]*(?:[-_.][A-Za-z0-9]+)+(?![A-Za-z0-9])'
     value=re.sub(pattern,lambda m:'' if re.search(r'(?:许可(?:证)?(?:标识)?|标识|编号|版本|合成|license|version)\s*(?:为|是|[:：])?\s*$',value[:m.start()],re.I) else m.group(),value)
+    if strict:
+        from app.rag_numeric_roles import number_tokens
+        return number_tokens(value)
     return _tokens(value)
 
 
 def _without_known_section_locators(value,evidence,section_headings=None):
-    """仅识别真实输入标题中的编号，且要求明确的标题/章节关系语法。
+    """旧离线回放兼容；生产入口已统一使用rag_numeric_roles.numeric_view。
 
     元数据可提供章节地址，不能拿其数字为金额或比例背书；不直接从所有小数中
     删除标题编号。范围判断不修改事实文字或原文引述。
@@ -71,6 +75,9 @@ def _without_known_section_locators(value,evidence,section_headings=None):
     # 只处理“推出3.2、3.3与另两个层面配对”这类明确章节关系，不处理数值列表。
     pattern=r'((?:推出|对应|配对|小节为|章节为)\s*)((?:\d+(?:\.\d+)+[、,，]\s*)*\d+(?:\.\d+)+)(?=(?:与|和|及)(?:另|其他)[^。；，]{0,16}(?:层面|机制|章节|小节))'
     value=re.sub(pattern,lambda m:m[1] if all(n in headings for n in re.findall(r'\d+(?:\.\d+)+',m[2])) else m.group(),value)
+    # “第8页3.4节”中小节号没有“第”；仍只认真实输入标题，不能豁免3.4元。
+    value=re.sub(r'(?<![\d.])(\d+(?:\.\d+)+)\s*(?:小节|节)',
+                 lambda m:'' if m[1] in headings else m.group(),value)
     return value
 
 
@@ -144,15 +151,26 @@ def validate_task_output(raw, evidence, *, question, contract_version="fact-cont
             seen.add(identity)
             accepted.append(dict(binding))
             total += len(text)
-        numeric_text=_without_known_section_locators(fact.text,evidence,_section_headings)
-        numbers = _tokens(numeric_text)
-        context_numbers=_context_numbers(numeric_text)
-        if context_numbers and not context:
-            _fail("numeric_context_missing")
         sources=_claim_sources[fact_index] if _claim_sources is not None else [output.quotes[ref] for ref in fact.refs]
-        available = set().union(*(_tokens(source) for source in sources))
+        from app.rag_numeric_roles import numeric_view,number_tokens,source_number_tokens
+        location=dict(fact_index=fact_index,reference_count=len(fact.refs))
+        try:
+            numeric_text=numeric_view(fact.text,[evidence.item_by_ref(ref) for ref in fact.refs],sources)
+        except ModelOutputError as exc:
+            exc.location.update(location)
+            raise
+        numbers = number_tokens(numeric_text)
+        context_numbers=_context_numbers(numeric_text,strict=True)
+        if context_numbers and not context:
+            _fail("numeric_context_missing",location=dict(location,numeric_count=len(context_numbers)))
+        available = set().union(*(source_number_tokens(source) for source in sources))
         if not numbers <= available:
-            _fail("number_not_in_quote")
+            _fail("number_not_in_quote",location=dict(location,numeric_count=len(numbers-available)))
+        from app.rag_numeric_roles import validate_numeric_units
+        try:validate_numeric_units(numeric_text,sources)
+        except ModelOutputError as exc:
+            exc.location.update(location)
+            raise
         fact.context = accepted
     if total > 4000:
         _fail("text_too_long")

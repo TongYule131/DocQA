@@ -102,18 +102,19 @@ class DoclingClient:
     # ------------------------------------------------------------------
     # 请求参数
     # ------------------------------------------------------------------
-    def conversion_form(self, ocr_lang: str | None = None) -> dict[str, Any]:
+    def conversion_form(self, ocr_lang: str | None = None, *, force_ocr: bool = False) -> dict[str, Any]:
         """构造转换参数：沿用验收条件，不启用远程 VLM、图片描述或公式增强。"""
         s = self.settings
-        return {
+        form = {
             "to_formats": ["json", "md"],
             "ocr_engine": s.docling_ocr_engine,
             "do_ocr": "true",
             "ocr_lang": [ocr_lang or s.docling_ocr_lang],
-            "force_ocr": "false",
+            "force_ocr": "true" if force_ocr else "false",
             "table_mode": s.docling_table_mode,
             "image_export_mode": s.docling_image_export_mode,
         }
+        return form
 
     def config_summary(self, ocr_lang: str | None = None) -> dict[str, Any]:
         """配置摘要：写入解析版本，便于判断结果由哪组参数产生。"""
@@ -131,7 +132,7 @@ class DoclingClient:
     # ------------------------------------------------------------------
     # 提交
     # ------------------------------------------------------------------
-    def submit(self, *, filename: str, content: bytes, mime: str) -> dict[str, Any]:
+    def submit(self, *, filename: str, content: bytes, mime: str, force_ocr: bool = False) -> dict[str, Any]:
         """提交转换任务；不自动重试。
 
         返回上游任务对象（含 task_id）。网络层异常分为两类：
@@ -141,7 +142,7 @@ class DoclingClient:
         try:
             response = self._client.post(
                 "/v1/convert/file/async",
-                data=self.conversion_form(),
+                data=self.conversion_form(force_ocr=force_ocr),
                 files={"files": (filename, content, mime)},
             )
         except httpx.ConnectError as exc:

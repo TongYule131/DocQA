@@ -6,7 +6,7 @@ import re
 from app.rag_extract_context import SELECTION_VERSION, admitted_ranges, merge_ranges, support_sentence_ranges
 from app.rag_validation import ModelOutputError
 
-REVIEW_VERSION='claim-support-rules-v4'
+REVIEW_VERSION='claim-support-rules-v5'
 _STRUCTURE=re.compile(r'不能(?:由|因为|仅凭)|数量相同.{0,18}(?:推出|说明|证明|不构成|不足以)|(?:划分依据|分类轴)(?:并)?不同|局部(?:交叠|交叉)|不能(?:直接|简单|机械)?(?:等同|对应|归入)|不是.{0,30}(?:直接同义|同义项)|不(?:是|能)(?:简单|机械)?一一对应|可(?:以)?推断|根据.{0,12}(?:结构|分类).{0,10}判断')
 
 
@@ -62,6 +62,9 @@ def review_claims(output,pack,*,enforce=True):
         normalized=re.sub(r'\s+','',joined).lower()
         if any(re.sub(r'\s+','',a or b).lower() not in normalized for a,b in anchors):
             risks.append('claim_anchor_not_in_own_quotes')
+        from app.rag_phrase_match import is_question_framing_term
+        if any(is_question_framing_term(a or b,fact) and re.sub(r'\s+','',a or b).lower() not in normalized for a,b in anchors):
+            risks.append('analysis_term_not_verbatim_source')
         # 明确的否定方向差异只是风险，不用通用词面规则代替复杂语义判断。
         for denied in re.findall(r'不应([^。；\n]{2,18})',joined):
             core=re.split(r'[，,]',denied)[0]

@@ -128,7 +128,7 @@ class KnowledgeWorker:
             signature=worker.embedding.signature
             settings=worker.embedding.settings
             def embed(self,_texts):return [vector]
-        index=DocumentIndex(self.repository,QueryEmbedding());packs=[]
+        index=DocumentIndex(self.repository,QueryEmbedding())
         system=build_task_system_prompt()+KNOWLEDGE_RULE
         context_k=min(self.settings.question_context_k,route.get('top_k') or self.settings.question_context_k)
         memory=payload.get('recent_questions',[])
@@ -138,36 +138,15 @@ class KnowledgeWorker:
         budget=min(self.settings.question_context_max_chars,self.settings.question_input_max_chars-len(system)-len(payload['question'])-3500)
         if budget<1000:raise TaskStopped('input_budget_exceeded','问题与系统规则超过输入预算')
         with self.tasks.span(job,'库内多文档召回与证据装入','RETRIEVE',parent):
-            for doc in payload['documents']:
-                self.check(job)
-                found=index.search_snapshot(doc['document_id'],search_question,min(20,self.settings.rag_retrieval_k),snapshot=doc['snapshot'],include_scores=True)
-                from app.retrieval_planning import plan_retrieval
-                found=plan_retrieval(payload['question'],found,self.repository.chunks(doc['document_id'],doc['snapshot']['parse_version_id']),max_candidates=32,fulltext_budget=budget,max_items=self.settings.question_context_k,payload_transform=task_segment_payload)
-                built=build_evidence(found,self.settings,expected_document_id=doc['document_id'],max_items=self.settings.question_context_k,
-                    context_max_chars=budget,payload_transform=task_segment_payload,table_blocks=self.repository.blocks(doc['snapshot']['parse_version_id']),
-                    extractive_question=payload['question'])
-                if built.fatal_reason:raise TaskStopped('source_scope_invalid','证据来源范围无效')
-                packs.append(built.pack)
-            candidates=[]
-            # 首轮按文档最佳命中评分交错，后续按层补入；不让单文档占满所有证据。
-            packs.sort(key=lambda p:max((i.score for i in p.items),default=0),reverse=True)
-            for n in range(max((len(p.items) for p in packs),default=0)):
-                candidates.extend(p.items[n] for p in packs if len(p.items)>n)
-            pairs=[p for pack in packs for p in pack.continuation_pairs]
-            groups={i.chunk_id:{i.chunk_id} for i in candidates}
-            for p in pairs:
-                a,b=p['left_chunk_id'],p['right_chunk_id']
-                if a in groups and b in groups:
-                    union=groups[a]|groups[b]
-                    for key in union:groups[key]=union
-            def serialize(items):
-                assign_unit_options(items,pairs)
-                return dump(task_segment_payload([i.payload() for i in items]))
-            order={i.chunk_id:n for n,i in enumerate(candidates)}
-            items,truncated,chars,drops=pack_evidence(candidates,context_max_chars=budget,serialize=serialize,max_items=context_k,partners={k:sorted(v,key=order.get) for k,v in groups.items()})
-            assign_unit_options(items,pairs)
-            pack=EvidencePack(items=items,candidates=candidates,index_id=None,parse_version_id=None,truncated=truncated,context_chars=chars,drop_reasons=drops,
-                review_policy=packs[0].review_policy if packs else None,continuation_pairs=pairs)
+            from app.rag_pipeline import knowledge_context, RetrievalBudget, PipelineError
+            try:
+                pack, diagnostics=knowledge_context(index,self.repository,payload['documents'],payload['question'],
+                    search_question,self.settings,RetrievalBudget(min(20,self.settings.rag_retrieval_k),32,context_k,budget),
+                    check=lambda:self.check(job),observe=lambda name,kind:self.tasks.span(job,name,kind,parent))
+            except PipelineError:
+                raise TaskStopped('source_scope_invalid','证据来源范围无效') from None
+            self.tasks.diagnostic(job,'retrieval',diagnostics)
+            items=pack.items
         if not items:return {'answer':INSUFFICIENT_EVIDENCE_TEXT,'status':'insufficient_evidence','citations':[],'conclusion':[],'explanation':[],'limitations':['本次检索未得到可用证据']}
         self.tasks.stage(job['id'],job['lease_token'],'generating')
         names={d['document_id']:d['filename'] for d in payload['documents']}
@@ -178,10 +157,14 @@ class KnowledgeWorker:
             value=json.loads(user);value['conversation_context']={'version':MEMORY_VERSION,'notes':payload.get('memory_notes',''),'recent_questions':memory};user=dump(value)
         if len(system)+len(user)>self.settings.question_input_max_chars:raise TaskStopped('input_budget_exceeded','证据与规则超出输入预算，未发起生成')
         rag=RagService(self.settings,self.repository,original_index,self.model)
+        stream_errors=[]
         def validate(value):
-            checked=validate_task_output(dump(value),pack,question=payload['question'],contract_version=ANSWER_CONTRACT_VERSION)
+            if stream_errors:raise stream_errors[0]
+            from app.rag_validation import parse_model_output
+            raw=value if isinstance(value,str) else dump(value)
+            checked=validate_task_output(raw,pack,question=payload['question'],contract_version=ANSWER_CONTRACT_VERSION)
             validate_user_condition_boundary(checked,pack,question=payload['question']);review_claims(checked,pack)
-            return value
+            return parse_model_output(raw)
         def generate():
             from app.answer_stream import STREAM_VERSION,FactStreamParser,checked_block
             if payload.get('stream_protocol')==STREAM_VERSION and hasattr(self.model,'generate_stream'):
@@ -189,14 +172,28 @@ class KnowledgeWorker:
                 store=AnswerStreamStore(self.repository)
                 def completed(category,ordinal,fact):
                     self.check(job)
-                    store.append('knowledge',job,'block',checked_block(category,ordinal,fact,pack,payload['question'],rag,names))
+                    from app.rag_validation import ModelOutputError
+                    if stream_errors:return
+                    try:
+                        block=checked_block(category,ordinal,fact,pack,payload['question'],rag,names)
+                    except ModelOutputError as exc:
+                        exc.location.update(category=category,ordinal=ordinal)
+                        stream_errors.append(exc)
+                    else:store.append('knowledge',job,'block',block)
                 store.append('knowledge',job,'reset',{'version':STREAM_VERSION})
                 checked_at=[0.0]
                 def active():
                     if time.perf_counter()-checked_at[0]>=.25:self.check(job);checked_at[0]=time.perf_counter()
-                raw=self.model.generate_stream(system,user,FactStreamParser(completed).feed,active)
+                parser=FactStreamParser(completed)
+                def feed(text):
+                    if stream_errors:return
+                    from app.rag_validation import ModelOutputError
+                    try:parser.feed(text)
+                    except ModelOutputError as exc:stream_errors.append(exc)
+                # 校验失败后停止展示，仍接收同一HTTP的正文及usage用于诊断；绝不重发。
+                raw=self.model.generate_stream(system,user,feed,active)
             else:raw=self.model.generate(system,user)
-            return json.loads(raw),getattr(self.model,'last_call_metadata',None)
+            return raw,getattr(self.model,'last_call_metadata',None)
         with self.tasks.span(job,'生成与逐论断校验','GENERATION',parent):
             protocol=self.tasks.call(job,'generation',generate,checkpoint='validated_protocol',validate=validate)
         self.tasks.stage(job['id'],job['lease_token'],'validating')
@@ -222,5 +219,5 @@ class KnowledgeWorker:
             return dict(answer_id='kanswer-'+job['id'],answer=answer,status=checked.status,conclusion=facts,explanation=explanation,
                 citations=[dict(c.model_dump(),filename=names[c.document_id]) for c in citations],clarification_questions=checked.clarification_questions,
                 missing_points=checked.missing_points,answer_parts=checked.answer_parts,prompt_version=KNOWLEDGE_PROMPT_VERSION,
-                limitations=['只依据本轮入选资料作答，来源匹配不等于全部语义已自动认证']+(['上下文预算限制了入选证据范围'] if truncated else []),
-                retrieval={'candidate_count':len(candidates),'selected_count':len(items),'context_chars':chars,'truncated':truncated},route=route['code'],snapshot_id=payload['snapshot_id'])
+                limitations=['只依据本轮入选资料作答，来源匹配不等于全部语义已自动认证']+(['上下文预算限制了入选证据范围'] if pack.truncated else []),
+                retrieval={'candidate_count':len(pack.candidates),'selected_count':len(items),'context_chars':pack.context_chars,'truncated':pack.truncated},route=route['code'],snapshot_id=payload['snapshot_id'])

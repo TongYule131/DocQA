@@ -22,7 +22,7 @@ from app.schemas import Block, Chunk, SourceLocation
 logger = logging.getLogger(__name__)
 
 # 分块算法标识：写入索引记录，便于判断旧索引由哪种规则生成。
-CHUNKING_ALGO = "structured-heading-table-v4"
+CHUNKING_ALGO = "structured-heading-table-v5"
 
 # 分块类型：正文 / 表格行组 / 目录 / 公式占位 / 单行超长续切。
 CHUNK_TYPE_TEXT = "text"
@@ -290,7 +290,7 @@ def chunk_document(document: NormalizedDocument, config: ChunkingConfig) -> list
             add(block, text, CHUNK_TYPE_FORMULA, _first_page(block.sources), block.sources,
                 block.heading_path, note="公式内容缺失告警对应的占位块")
             continue
-        if block.block_type in {"picture", "page_header", "page_footer"}:
+        if block.block_type in {"picture", "page_header", "page_footer", "inline_fragment"}:
             # 页眉页脚与图片不进入检索分块；它们仍保留在预览中。
             continue
         if (block.text or "").strip():

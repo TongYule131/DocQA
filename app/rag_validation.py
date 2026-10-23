@@ -56,6 +56,10 @@ REASON_CODE_NAMES = {
     "mixed_user_source",
     "coverage_missing", "fact_context_missing", "context_scope_mismatch", "context_not_in_quote",
     "numeric_context_missing", "number_not_in_quote", "coverage_mismatch",
+    "number_unit_mismatch",
+    "page_locator_not_supported",
+    "statement_locator_not_supported",
+    "locator_not_supported",
     "unsupported_requirement", "coverage_status_conflict",
     "claim_evidence_invalid", "claim_type_missing_or_invalid", "context_not_in_claim_evidence",
     'quote_not_in_admitted_input','incomplete_quote_sentence','continuation_not_bound_to_claim','inference_label_required',
@@ -75,10 +79,11 @@ _ALLOWED_STATUS = {"answered", "clarification_needed", "insufficient_evidence"}
 class ModelOutputError(Exception):
     """模型输出未通过校验：携带稳定原因码，不携带原文内容。"""
 
-    def __init__(self, reason: str, detail: str = ""):
+    def __init__(self, reason: str, detail: str = "", *, location: dict | None = None):
         super().__init__(f"reason={reason}")
         self.reason = reason if reason in REASON_CODE_NAMES else "invalid_json"
         self.detail = detail
+        self.location = location or {}
 
 
 @dataclass
@@ -384,15 +389,8 @@ def validate_user_condition_boundary(output: ValidatedOutput, evidence: Evidence
         r'“([^“”\r\n]{4,})”|‘([^‘’\r\n]{4,})’|'
         r'「([^「」\r\n]{4,})」|『([^『』\r\n]{4,})』|"([^"\r\n]{4,})"')
     normalized_question = question.replace("\r\n", "\n")
-    def same_source_phrase(phrase: str, source: str) -> bool:
-        if phrase in source:
-            return True
-        if not re.search(r"[\u3400-\u9fff]", phrase) or any(char.isnumeric() for char in phrase):
-            return False
-        def layout_spaces(value):
-            return re.sub(r"(?<=[\u3400-\u9fff])\s+(?=\S)|(?<=\S)\s+(?=[\u3400-\u9fff])", "", value)
-        return layout_spaces(phrase) in layout_spaces(source)
-    for fact in output.conclusion + output.explanation:
+    from app.rag_phrase_match import source_phrase_match,is_question_framing_term
+    for fact_index, fact in enumerate(output.conclusion + output.explanation):
         if output.citation_bindings:
             # v4的refs是本次引述编号，不能误当成输入片段编号；只读本条所选证据。
             from app.rag_extract_context import merge_ranges
@@ -408,9 +406,12 @@ def validate_user_condition_boundary(output: ValidatedOutput, evidence: Evidence
                            if (item := evidence.item_by_ref(ref)) is not None]
         for match in quoted_user_text.finditer(fact.text):
             quoted = next(value for value in match.groups() if value is not None)
-            if quoted in normalized_question and not any(same_source_phrase(quoted, text) for text in cited_texts):
+            if quoted in normalized_question and not any(source_phrase_match(quoted, text) for text in cited_texts):
+                if is_question_framing_term(quoted,fact):
+                    continue
                 raise ModelOutputError("mixed_user_source",
-                                       "文档事实条目混入仅由用户问题提供的原句")
+                    "文档事实条目混入仅由用户问题提供的原句",
+                    location=dict(fact_index=fact_index, reference_count=len(fact.refs)))
 
 
 def render_markdown(output: ValidatedOutput) -> str:
