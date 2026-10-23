@@ -176,21 +176,21 @@ HTTPS／内网部署显式设置 `DOCQA_TEAM_MODE=1`、`DOCQA_SESSION_COOKIE_SEC
 
 ## 验证与质量边界
 
-GitHub Actions 的 `Full regression` 在每次推送、PR更新及手动运行时执行全量离线回归，配置位于[现有工作流](.github/workflows/rag-quality.yml)。使用Windows、Python3.11、Node24和锁定依赖，在项目`.venv`运行，覆盖Windows PowerShell5.1与PowerShell7的实际启停测试；不使用模型密钥，不启动Docker或下载模型。
+GitHub Actions 的 `Regression checks` 按[回归检查策略](docs/回归检查策略.md)分级：开发分支push定向、已有PR时交由PR检查；PR／main根据实际改动选择定向或全量，手动运行可选范围。文档和普通页面不会默认触发全部Python测试；共享核心、迁移、权限、计费恢复及多模块集成才升级。使用Windows、Python3.11、Node24和锁定依赖，不使用模型密钥，不启动Docker或下载模型。
 
-本地可运行与CI相同的入口，报告目录必须是`data/`内的新目录，已有结果不会覆盖：
+**本地每次全量必须先取得用户明确同意，定向检查可直接执行。** 开发约束见[AGENTS.md](AGENTS.md)，不可用裸pytest或拆分运行全部测试绕过。默认入口为定向，可明确指定本次改动；报告目录必须是`data/`内的新目录：
 
 ```powershell
-.venv\Scripts\python.exe scripts/run_regression.py --output-dir ("data/ci-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+.venv\Scripts\python.exe scripts/run_regression.py --profile targeted --changed-file app/web/knowledge-admin.js --output-dir ("data/checks-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 ```
 
-入口执行依赖一致性、全量pytest、自动发现的全部`tests/web/*.mjs`、文档一致性、既有RAG检索基线与防退步关卡、事实引用和范围回放，以及`git diff --check`。独立检查失败后继续收集其他结果，最终返回非零；不自动重试。GitHub运行摘要及保留14天的报告包含JUnit、逐检查日志和JSON，上传范围不含运行数据库、原件或`.env`。跳过项明确保留，不代表在线语义或真实浏览器验收通过。分项排查仍可使用：
+定向入口只运行计划列出的模块／网页检查及文档、diff，不执行全量质量关卡。全量入口保留依赖一致性、全部pytest、全部网页、RAG离线基线、事实引用和范围回放；本地须经同意后加`--profile full --local-full-approved`。两类报告明确区分，失败保留、不自动重试；GitHub报告保留14天，不上传运行库、原件或`.env`。分项排查可使用：
 
 ```powershell
 .venv\Scripts\python.exe scripts/check_docs.py
 .venv\Scripts\python.exe -m app.runtime --data-dir data
-.venv\Scripts\python.exe -m pytest -q
-Get-ChildItem tests/web -Filter *.mjs | ForEach-Object { node $_.FullName; if ($LASTEXITCODE -ne 0) { throw '网页检查失败' } }
+.venv\Scripts\python.exe -m pytest tests/test_regression_policy.py tests/test_regression_runner.py -q
+node tests/web/trace_status.mjs
 ```
 
 测试默认使用临时目录／模拟传输，不依赖真实密钥；仓库必备格式夹具缺失会失败，需要外部条件的跳过项会明确列出，不能算通过。`check_docs.py` 检查文档链接、冻结归档哈希、README版本及配置样例与源码的一致性，不证明每句业务描述或模型语义正确。在线评估、真实解析和故障演练按各自冻结范围在独立目录执行，不拿正式默认库做实验。

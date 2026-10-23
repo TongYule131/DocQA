@@ -1,16 +1,23 @@
-name: Full regression
+name: Regression checks
 on:
   pull_request:
   push:
   workflow_dispatch:
+    inputs:
+      profile:
+        description: 检查范围（auto按风险；full用于阶段验收）
+        type: choice
+        options: [auto, targeted, full]
+        default: auto
 permissions:
   contents: read
+  pull-requests: read
 concurrency:
-  group: full-regression-${{ github.workflow }}-${{ github.ref }}
+  group: regression-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   offline-quality:
-    name: Full regression (Windows)
+    name: Risk-based checks (Windows)
     runs-on: windows-latest
     timeout-minutes: 30
     defaults:
@@ -26,16 +33,24 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
           cache: pip
           cache-dependency-path: requirements.lock.txt
+      - name: Select checks and avoid duplicate branch push and PR runs
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/regression_policy.py --ci-event $env:GITHUB_EVENT_PATH --output data/ci-plan.json --github-output $env:GITHUB_OUTPUT
       - uses: actions/setup-node@v7
+        if: steps.plan.outcome == 'success' && steps.plan.outputs.profile != 'skip'
         with:
           node-version: '24'
           package-manager-cache: false
-      - name: Install locked dependencies in the product virtual environment
+      - name: Install locked dependencies
+        if: steps.plan.outcome == 'success' && steps.plan.outputs.profile != 'skip'
         run: |
           python -m venv .venv
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -45,11 +60,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # 两种PowerShell均须存在，避免Windows入口回归被静默跳过。
           Get-Command powershell.exe, pwsh.exe -ErrorAction Stop | Select-Object Name
-      - name: Run every Python test, every web test and offline quality gates
-        run: ./.venv/Scripts/python.exe scripts/run_regression.py --output-dir data/ci-results
+      - name: Run selected offline checks
+        if: steps.plan.outcome == 'success' && steps.plan.outputs.profile != 'skip'
+        env:
+          CHECK_PROFILE: ${{ steps.plan.outputs.profile }}
+        run: ./.venv/Scripts/python.exe scripts/run_regression.py --profile $env:CHECK_PROFILE --plan-file data/ci-plan.json --output-dir data/ci-results
       - name: Publish regression summary
         if: always()
         run: |
+          if (Test-Path -LiteralPath data/ci-plan.json) {
+            Get-Content -LiteralPath data/ci-plan.json -Raw |
+              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
           if (Test-Path -LiteralPath data/ci-results/summary.md) {
             Get-Content -LiteralPath data/ci-results/summary.md -Raw |
               Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
@@ -58,11 +80,12 @@ jobs:
         uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: full-regression-windows-${{ github.run_attempt }}
+          name: regression-windows-${{ github.run_attempt }}
           retention-days: 14
           if-no-files-found: warn
           # 只上传报告和控制台输出，不上传运行库、原件、头像或本机.env。
           path: |
+            data/ci-plan.json
             data/ci-results/*.json
             data/ci-results/*.xml
             data/ci-results/*.log
