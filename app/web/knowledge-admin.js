@@ -145,9 +145,14 @@ async function showTrace(id) {
       const text = d.kind === 'retrieval' ? `第 ${d.attempt} 次：装入 ${d.admitted_count} 项证据，${d.context_chars} 字符，预算舍弃 ${d.drop_count} 项。` :
         `第 ${d.attempt} 次：${group}${index ? `第 ${index} 条` : ''}校验失败 · ${d.reason}${p.numeric_count ? ` · 涉及 ${p.numeric_count} 个数值` : ''}`;
       details.append(node('p', text));
+      if(d.slot_counts)details.append(node('p',`证据槽位 ${d.slot_counts.total} 个，未装入 ${d.slot_counts.unfilled} 个。槽位命中不代表语义正确率。`));
+      if(d.math_evidence?.total||d.math_evidence?.blocked_count)details.append(node('p',`数学证据组 ${d.math_evidence.total} 个，未完整装入 ${d.math_evidence.incomplete_count} 个；不可读数学片段 ${d.math_evidence.blocked_count} 个。公式与正文保留各自引用，公式语义尚未自动认证。`));
+      if(d.coverage)details.append(node('p',`阅读范围：${d.coverage.route==='complete_indexed_text'?'全部索引原文已装入':'仅本轮入选证据'} · ${d.coverage.admitted_chunk_count}/${d.coverage.indexed_chunk_count} 块`));
+      if(d.sources?.length)details.append(node('p',`源文诊断：${d.sources.length} 份解析版本；缺定位 ${d.sources.reduce((n,s)=>n+s.missing_location_count,0)} 块；异常替代字符 ${d.sources.reduce((n,s)=>n+s.replacement_chars,0)} 个。OCR 与公式语义仍须核对。`));
     }); root.append(details);
   }
   if (data.intent) { const info=node('section','','panel'); info.append(node('h2','意图决策'),node('p',`${data.intent.name} · ${data.intent.code}`),node('p',`${data.intent.reason} · ${data.intent.scope === 'document' ? '文档会话' : '知识库会话'}`),node('small',`规则版本 ${data.intent.version} · 配置 ${data.intent.configuration.slice(0,12)}`)); root.append(info); }
+  if(data.query_plan){const details=node('details','','panel');details.append(node('summary',`查询计划 · ${data.query_plan.name}`));data.query_plan.effects.forEach(effect=>details.append(node('p',effect)));if(data.query_plan.required_evidence.length)details.append(node('p',`所需证据：${data.query_plan.required_evidence.join('、')}`));details.append(node('small',`${data.query_plan.version} · 本地规则规划，新增模型调用 0 次；权限范围沿用当前资料选择。`));root.append(details);}
   const panel = node('section', '', 'panel'); panel.append(node('h2', '执行时序'));
   const scroll = node('div', '', 'table-scroll'), table = node('table', '', 'trace-grid'), head = node('thead'), header = node('tr'); ['节点', '类型', '时间线', '耗时 / 起点'].forEach(t => header.append(node('th', t))); head.append(header); table.append(head);
   const body = node('tbody'), byId = new Map(data.spans.map(s => [s.id, s]));

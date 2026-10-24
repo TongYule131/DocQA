@@ -30,6 +30,10 @@ from app.rag_context import EvidencePack, normalize_text
 
 # 校验失败原因码：进入日志与错误码，不含原文、完整输出与凭证。
 REASON_CODE_NAMES = {
+    'composition_plan_invalid','composition_reference_invalid','composition_coverage_invalid',
+    'composition_layout_mismatch','composition_comparison_unpaired','composition_source_missing',
+    'composition_checkpoint_changed','composition_binding_invalid','composition_process_coverage_invalid',
+    'presentation_missing','presentation_invalid','presentation_reference_invalid','presentation_coverage_mismatch',
     "unsupported_contract_version",
     "invalid_json",
     "duplicate_key",
@@ -109,6 +113,7 @@ class ValidatedOutput:
     context_selection_count: int = 0
     # v4的展示引用可以来自同一输入片段的不同范围；始终保留真实输入ref和偏移。
     citation_bindings: dict[int, dict] = field(default_factory=dict)
+    presentation: dict | None = None
 
     def used_refs(self) -> set[int]:
         refs: set[int] = set()
@@ -420,6 +425,9 @@ def render_markdown(output: ValidatedOutput) -> str:
     引用标记只能由后端按 refs 生成，例如“事实。[1][2]”：
     不把引用统一堆在末尾，也不展示未经校验的原始模型输出。
     """
+    if output.presentation is not None:
+        from app.rag_presentation import render_answer
+        return render_answer(output)
     def marker(refs: list[int]) -> str:
         return "".join(f"[{ref}]" for ref in sorted(refs))
 

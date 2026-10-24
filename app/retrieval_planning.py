@@ -45,7 +45,8 @@ def _bm25(query: str, texts: list[str]) -> list[tuple[int, float]]:
 
 
 def _plan_retrieval_v1(question: str, vector_result: dict, chunks: list, *, max_candidates: int = 40,
-                   fulltext_budget: int | None = None, max_items: int = 20, payload_transform=None) -> dict:
+                   fulltext_budget: int | None = None, max_items: int = 20, payload_transform=None,
+                   overview: bool = False) -> dict:
     version_id = vector_result.get("parse_version_id")
     document_ids = {hit.get("document_id") for hit in vector_result.get("results", [])}
     document_ids.update(chunk.document_id for chunk in chunks)
@@ -68,8 +69,8 @@ def _plan_retrieval_v1(question: str, vector_result: dict, chunks: list, *, max_
     if not pool:
         return {**vector_result, "strategy": "hybrid-context-v1", "evidence_order": [], "results": []}
     # 只有完整原文及其真实元数据实际可装入预算，才标明完整阅读路由；绝不取前N块冒充全文。
-    if fulltext_budget is not None and len(pool) <= max_items and any(
-            marker in question for marker in ("全文", "概述", "整体", "主要内容", "总结")):
+    if fulltext_budget is not None and len(pool) <= max_items and (overview or any(
+            marker in question for marker in ("全文", "概述", "整体", "主要内容", "总结"))):
         from app.rag_context import _candidate_from_hit
         entries = []
         for position, hit in enumerate(pool, 1):
@@ -145,7 +146,7 @@ def _plan_retrieval_v1(question: str, vector_result: dict, chunks: list, *, max_
     return result
 
 
-RETRIEVAL_STRATEGY_VERSION = "hybrid-context-v6"
+RETRIEVAL_STRATEGY_VERSION = "hybrid-context-v9"
 
 
 def _search_text(text: str) -> str:
@@ -247,7 +248,8 @@ def _definition_and_section_anchors(question: str, pool: list[dict], texts: list
 
 
 def plan_retrieval(question: str, vector_result: dict, chunks: list, *, max_candidates: int = 40,
-                   fulltext_budget: int | None = None, max_items: int = 20, payload_transform=None) -> dict:
+                   fulltext_budget: int | None = None, max_items: int = 20, payload_transform=None,
+                   query_plan: dict | None = None) -> dict:
     """本地覆盖重排：先保留各子问和结构解释，再有限扩展并动态停止。
 
     保留真实余弦分值供阈值检查；融合和规则分数只决定顺序，不是置信度。
@@ -257,6 +259,8 @@ def plan_retrieval(question: str, vector_result: dict, chunks: list, *, max_cand
         raise ValueError("invalid_candidate_limit")
     if type(max_items) is not int or not 1 <= max_items <= 100:
         raise ValueError("invalid_context_limit")
+    from app.query_planning import plan_query, public_plan
+    query_plan = query_plan or plan_query(question)
     ids = {c.document_id for c in chunks}
     ids.update(h.get("document_id") for h in vector_result.get("results",[]))
     version = vector_result.get("parse_version_id")
@@ -264,10 +268,19 @@ def plan_retrieval(question: str, vector_result: dict, chunks: list, *, max_cand
             any(h.get("parse_version_id") != version for h in vector_result.get("results",[]))):
         raise ValueError("retrieval_scope_mismatch")
     # 小文档才尝试完整阅读，不为大文档重复执行上一版的全量融合规划。
-    if len(chunks) <= max_items:
+    if len(chunks) <= min(max_items, max_candidates):
         old = _plan_retrieval_v1(question,vector_result,chunks,max_candidates=max_candidates,
-            fulltext_budget=fulltext_budget,max_items=max_items,payload_transform=payload_transform)
+            fulltext_budget=fulltext_budget,max_items=max_items,payload_transform=payload_transform,
+            overview=query_plan['task_type']=='document_overview')
         if not chunks or (old.get("planning") or {}).get("route") == "complete_indexed_text":
+            old.setdefault('planning', {})['query_plan'] = public_plan(query_plan)
+            if chunks:
+                from app.rag_evidence_slots import evidence_slots, SLOT_PLAN_VERSION
+                old['planning'].update(evidence_slots=evidence_slots(question,old['results'],query_plan=query_plan),
+                    slot_plan_version=SLOT_PLAN_VERSION)
+                if 'formula_check' in query_plan['facets']:
+                    from app.rag_math_evidence import math_evidence
+                    old['planning']['math_evidence']=math_evidence(old['results'],question)
             return {**old,"strategy":RETRIEVAL_STRATEGY_VERSION}
     hits = {h["chunk_id"]: h for h in vector_result.get("results", [])}
     cosines = vector_result.get("candidate_scores", {})
@@ -418,13 +431,17 @@ def plan_retrieval(question: str, vector_result: dict, chunks: list, *, max_cand
     for i in vector_floor:
         add(i,"vector_candidate_floor")
     from app.rag_evidence_slots import evidence_slots, SLOT_PLAN_VERSION
-    slots = evidence_slots(question, pool)
+    slots = evidence_slots(question, pool, query_plan=query_plan)
+    from app.rag_math_evidence import math_evidence
+    math_plan=math_evidence(pool,question) if 'formula_check' in query_plan['facets'] else {}
     # 为每个实际槽位留出候选空间，不能只保留先前宽泛排名中的候选。
-    mandatory = list(dict.fromkeys(slot['candidate_ids'][0] for slot in slots))
+    mandatory = list(dict.fromkeys(slot['candidate_ids'][0] for slot in slots if slot['candidate_ids']))
     preferred = list(dict.fromkeys(i for slot in slots for i in slot['candidate_ids'][:2]))
     definitions = [pool[i]['chunk_id'] for i in selected if reasons.get(pool[i]['chunk_id']) == 'named_direct_definition']
     section_support = [i for slot in slots if slot['kind'] in {'explicit_subsection','explicit_section'} for i in slot['candidate_ids']]
-    protected = list(dict.fromkeys(definitions + numeric_anchors + mandatory + preferred + section_support))[:max_candidates]
+    page_support = [slot['candidate_ids'][0] for slot in slots if slot['kind']=='source_page' and slot['candidate_ids']]
+    math_ids=[identifier for group in math_plan.get('groups',[]) for identifier in group['chunk_ids']]
+    protected = list(dict.fromkeys(math_ids + page_support + definitions + numeric_anchors + mandatory + preferred + section_support))[:max_candidates]
     protected_indices = [indexes[i] for i in protected]
     selected = (protected_indices + [i for i in selected if i not in protected_indices])[:max_candidates]
     for identifier in protected:
@@ -454,7 +471,8 @@ def plan_retrieval(question: str, vector_result: dict, chunks: list, *, max_cand
             "derived_search_heading_count":derived_heading_count,
             "dynamic_candidates":True,"semantic_completeness_verified":False})
     result['planning'].update(evidence_slots=slots, slot_plan_version=SLOT_PLAN_VERSION,
-        numeric_slot_count=len(set(numeric_anchors)))
+        numeric_slot_count=len(set(numeric_anchors)), query_plan=public_plan(query_plan))
+    if math_plan:result['planning']['math_evidence']=math_plan
     return result
 
 

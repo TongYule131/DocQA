@@ -23,7 +23,7 @@ from app.schemas import Block, QualityWarning, SourceLocation
 logger = logging.getLogger(__name__)
 
 # 结果结构版本：Docling 结构变化或规范化规则调整时递增，便于识别历史版本产物。
-RESULT_SCHEMA_VERSION = "docqa-normalized-8"
+RESULT_SCHEMA_VERSION = "docqa-normalized-9"
 
 # Docling 文本标签到业务块类型的映射；未识别的标签会显式告警。
 _LABEL_TO_TYPE = {
@@ -697,9 +697,12 @@ def normalize_docling_result(document_id: str, payload: dict[str, Any], fmt: str
 
     document.blocks = blocks
     inline = {}
+    page_labels = {}
     if fmt == 'pdf' and pdf_path is not None:
         from app.pdf_inline import apply_pdf_inline
         inline = apply_pdf_inline(document, pdf_path)
+        from app.pdf_page_labels import apply_pdf_page_labels
+        page_labels = apply_pdf_page_labels(document, pdf_path)
     structure = _recover_structure(blocks, block_nodes) if fmt in {"pdf", "docx"} else {}
     if structure.get("recovered_heading_paths"):
         warnings.append(QualityWarning(
@@ -725,6 +728,7 @@ def normalize_docling_result(document_id: str, payload: dict[str, Any], fmt: str
         "text_length": document.text_length(),
         "structure": structure,
         "inline": inline,
+        "page_labels": page_labels,
     }
     return document
 

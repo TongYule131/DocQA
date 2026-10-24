@@ -4,7 +4,7 @@ import re
 
 from app.rag_validation import ModelOutputError
 
-NUMERIC_ROLE_VERSION = 'grounded-number-roles-v2'
+NUMERIC_ROLE_VERSION = 'grounded-number-roles-v4'
 _TRANSLATE = str.maketrans('０１２３４５６７８９．，：（）－', '0123456789.,:()-')
 _CN = '零〇一二三四五六七八九十百千万两'
 _ID = rf'(?:[0-9]{{1,4}}(?:\.[0-9]{{1,3}}){{0,4}}|[{_CN}]{{1,8}})'
@@ -66,6 +66,13 @@ class Locator:
 
 # 共用一套语法供答案和原文使用；优先吃完整范围，防止只删除区间尾部数字。
 _PATTERNS=[
+    ('physical_page',rf'(?:PDF\s*(?:物理)?\s*第|物理\s*第)\s*(?P<ids>{_PAGE_LIST})\s*[页頁]'),
+    ('printed_page',rf'印刷\s*(?:第|页码\s*[:：]?)\s*(?P<ids>{_PAGE_LIST})(?:\s*[页頁])?'+_END),
+    ('printed_label',r'印刷\s*(?:第|页码\s*[:：]?)\s*(?P<ids>(?:[A-Za-z]{1,8}[-.]?)?[1-9][0-9]{0,5}|[ivxlcdmIVXLCDM]{1,15})(?:\s*[页頁])?'+_END),
+    ('pdf_label',r'PDF\s*标签\s*[:：]?\s*(?P<ids>(?:[A-Za-z]{1,8}[-.]?)?[1-9][0-9]{0,5}|[ivxlcdmIVXLCDM]{1,15})'+_END),
+    # 符号的数字上下标是符号身份的一部分，不能为金额/人数提供字面数字背书。
+    ('formula_symbol',r'(?<![A-Za-z0-9])(?P<symbol>\\[A-Za-z]+|[A-Za-z\u0370-\u03ff])(?P<mark>[_^])\s*(?P<ids>\{\s*[+\-−]?\d+\s*\}|[+\-−]?\d+)(?!\d|\.\d)'),
+    ('reference',rf'(?:参考文献|文献|参考资料)\s*[\[【（(]\s*(?P<ids>{_LIST})\s*[\]】）)]'+_END),
     # 答案自身的列举次序不是文档条目地址；明确“原文第N项”不会命中此首句语法。
     ('answer_order',rf'^\s*第\s*(?P<ids>{_ID})\s*[项点](?=\s*(?:说明|[,，、:：]))'),
     ('answer_order',r'^\s*[（(]?\s*(?P<ids>[1-9][0-9]?)\s*(?:[)）、]|\.(?!\d))'),
@@ -97,7 +104,14 @@ def locate(text):
     for kind,pattern in _COMPILED:
         for match in pattern.finditer(normalized):
             if any(match.start()<p.end and match.end()>p.start for p in found):continue
-            if kind in {'section_nested','section_chained'}:
+            if kind in {'printed_label','pdf_label'}:
+                actual='printed_page' if kind=='printed_label' else 'pdf_label'
+                values=(match['ids'].casefold(),);nested=False
+            elif kind=='formula_symbol':
+                actual='formula_index' if match['mark']=='_' else 'formula_exponent'
+                index=re.search(r'[+\-−]?\d+',match['ids'])[0].replace('−','-')
+                values=(match['symbol']+match['mark']+str(int(index)),);nested=False
+            elif kind in {'section_nested','section_chained'}:
                 values=(_canonical(match['parent']),_canonical(match['child']))
                 if kind=='section_chained' and '.' not in values[1]:values=(values[0],values[0]+'.'+values[1])
                 actual='section';nested=True
@@ -150,18 +164,26 @@ def _source_addresses(sources):
 def _allowed(items,sources):
     addresses=_source_addresses(sources)
     addresses['section']=_heading_numbers(items)|addresses.get('section',set())
-    pages=set();lines=set();rows=set();columns=set();tables=set()
+    pages=set();printed=set();catalog=set();lines=set();rows=set();columns=set();tables=set()
     def add_span(target,start,end):
         if start is not None and end is not None and 1<=start<=end<=start+200:target.update(str(v) for v in range(start,end+1))
     for item in items:
         if item.page is not None:pages.add(str(item.page))
         for source in item.sources:
             add_span(pages,source.page,source.page_end or source.page)
+            mapping = source.pdf_page_label
+            if mapping and mapping.status != 'conflict':
+                if mapping.catalog_label:catalog.add(mapping.catalog_label.casefold())
+                if mapping.status in {'footer_observed','corroborated'}:
+                    printed.add(mapping.printed_label.casefold())
             add_span(lines,source.line_start,source.line_end or source.line_start)
             if source.table_no is not None:tables.add(str(source.table_no))
             if source.row_index is not None:add_span(rows,source.row_index,source.row_index+(source.row_span or 1)-1)
             if source.col_index is not None:add_span(columns,source.col_index,source.col_index+(source.col_span or 1)-1)
     addresses['page']=pages  # 不能用正文里提到的其他页码代替本条实际来源页。
+    addresses['physical_page']=pages
+    addresses['printed_page']=printed
+    addresses['pdf_label']=catalog
     for kind,values in [('行',lines|rows),('列',columns),('table',tables)]:addresses.setdefault(kind,set()).update(values)
     return addresses
 
@@ -179,7 +201,7 @@ def numeric_view(text,items,sources):
         supported=bool(locator.values) and (locator.kind=='answer_order' or set(locator.values)<=allowed.get(locator.kind,set()))
         if locator.nested:supported=supported and locator.values[1].startswith(locator.values[0]+'.')
         if not supported:
-            code=('page_locator_not_supported' if locator.kind=='page' else
+            code=('page_locator_not_supported' if locator.kind in {'page','physical_page','printed_page','pdf_label'} else
                   'statement_locator_not_supported' if locator.kind in {'命题','推论','定理','引理','项','条','款','点'} else 'locator_not_supported')
             raise ModelOutputError(code)
     return _remove(text,locators)
@@ -188,6 +210,17 @@ def numeric_view(text,items,sources):
 def source_number_tokens(text):
     # 来源中的地址不能为答案里的金额/人数提供数字背书；其余真实数字保持原规则。
     return number_tokens(_remove(text,locate(text)))
+
+
+def source_number_mentions(text):
+    """可作为数据线索的字面值和原始偏移；定位/上下标已隔离，不改变引用。"""
+    view=_remove(text.translate(_TRANSLATE),locate(text))
+    spaced=re.compile(r'(?<![\d.])\d{1,3}(?:[ \u00a0]\d{3})+(?:\.\d+)?(?!\d|[ \u00a0]\d)')
+    matches=list(spaced.finditer(view))
+    matches += [m for m in _NUMBER_TOKENS.finditer(view) if not any(m.start()<p.end() and m.end()>p.start() for p in matches)]
+    return [dict(start=m.start(),end=m.end(),value=next(iter(number_tokens(m.group()))),
+        kind='time' if re.match(r'\s*(?:年|月|日|小时|分钟)',view[m.end():]) else 'value')
+        for m in sorted(matches,key=lambda m:m.start())]
 
 
 def numeric_units(text):

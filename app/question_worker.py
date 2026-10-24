@@ -118,11 +118,11 @@ class QuestionWorker:
                 if stage!='stream_check':
                     from app.answer_stream_store import AnswerStreamStore
                     AnswerStreamStore(self.repository).append('question',job,'reset' if stage=='stream_started' else 'block',details)
-            elif stage in {"query_started", "generation_started"}:
+            elif stage in {"query_started", "generation_started", "composition_started"}:
                 role = "embedding" if stage == "query_started" else "generation"
                 current_role = role
-                progress("retrieving" if role == "embedding" else "generating",
-                         "正在查询并固定证据" if role == "embedding" else "正在生成回答")
+                progress("retrieving" if role == "embedding" else "planning" if stage == "composition_started" else "generating",
+                         "正在查询并固定证据" if role == "embedding" else "正在选择证据和规划段落" if stage == "composition_started" else "正在生成回答")
                 current_sequence = self.store.reserve(job_id, token, role)
                 if current_sequence is None:
                     check_active()
@@ -131,6 +131,13 @@ class QuestionWorker:
                 if isinstance(details.get("diagnostics"), dict):
                     if not self.store.save_checkpoint(job_id, token, role="evidence", payload=details["diagnostics"], sequence_no=None):
                         raise _Stopped("lease_lost", "执行租约已失效，本次执行不再继续")
+            elif stage == "composition_completed":
+                checkpoint=details['checkpoint']
+                if not self.store.save_checkpoint(job_id,token,role='evidence',payload={'composition_checkpoint':checkpoint},
+                        diagnostics={'composition_checkpoint':checkpoint},sequence_no=current_sequence,
+                        elapsed_ms=_elapsed(call_started),provider_usage=details.get('provider_usage')):
+                    raise _Stopped('lease_lost','规划检查点未保存，已停止正文生成')
+                current_sequence,call_started,current_role=None,None,None
             elif stage == "query_completed":
                 # 检索来源固定后原子写检查点；重启恢复用同一版本、同一组候选证据。
                 payload = details.get("search_result")
@@ -179,7 +186,8 @@ class QuestionWorker:
                 if retrieval is not None:
                     progress("evidence_ready", "复用已保存检索检查点，不重复查询向量")
                 outcome = self.rag.answer(job["document_id"], job["question"], snapshot=snapshot,
-                                          observer=observer, retrieval_checkpoint=retrieval)
+                                          observer=observer, retrieval_checkpoint=retrieval,
+                                          composition_checkpoint=(self.store.checkpoint(job_id,'evidence') or {}).get('composition_checkpoint'))
                 answer = RagAnswer.model_validate(outcome.answer).model_dump()
                 # 正常返回的内容均已走 RAG 严格校验，不保存上游原始模型响应。
                 if not self.store.save_checkpoint(job_id, token, role="answer", payload=answer,

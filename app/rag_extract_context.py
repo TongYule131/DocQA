@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 
-SELECTION_VERSION = 'extractive-passages-v5'
+SELECTION_VERSION = 'extractive-passages-v7'
 _TERMINAL = re.compile(r'[。！？!?;；.][\s”’\"\'）)\]】]*$')
 
 
@@ -68,15 +68,11 @@ def validate_ranges(text, ranges):
 
 
 def budget_profile(question, *, max_items, context_chars):
-    parts = [p for p in re.split(r'[？?；;\n]', question) if p.strip()]
-    if re.search(r'全文|概述|总结|主要内容',question):
-        kind,count,excerpt='document_overview',max_items,900
-    elif re.search(r'一一对应|辨析|两组|概念结构|如何定位', question):
-        kind, count, excerpt = 'conceptual', 8, 650
-    elif len(parts) > 1 or len(set(re.findall(r'《([^》]+)》', question))) > 1 or re.search(r'多跳|分别|对比|比较|综合', question):
-        kind, count, excerpt = 'multi_hop', 12, 700
-    else:
-        kind, count, excerpt = 'focused', 5, 900
+    from app.query_planning import plan_query, TASKS
+    plan = plan_query(question)
+    kind = plan['task_type']
+    count = max(TASKS[f][1] for f in plan['facets'])
+    excerpt = min(TASKS[f][2] for f in plan['facets'])
     return {'kind': kind, 'max_items': max_items, 'target_items': min(max_items, count), 'context_chars': context_chars,
             'excerpt_chars': excerpt, 'semantic_completeness_verified': False}
 
@@ -255,10 +251,14 @@ def passage_units(text,ranges):
     return result
 
 
-def plan_admission(items, question, profile):
+def plan_admission(items, question, profile, *, required_ranges=None):
     for item in items:
         item.read_ranges=([[0,len(item.text)]] if profile['kind']=='document_overview' else
             extract_ranges(item.text,question,item.chunk_type,max_chars=profile['excerpt_chars']))
+        if required_ranges and item.chunk_id in required_ranges:
+            for start,end in required_ranges[item.chunk_id]:
+                if not 0<=start<end<=len(item.text):raise ValueError('required_range_out_of_source')
+            item.read_ranges=merge_ranges(item.read_ranges+required_ranges[item.chunk_id])
         item.segment_policy='sentence-segments-v2' if item.chunk_type in {None,'text','paragraph','long_line'} else None
     possible=continuation_pairs(items)
     by_id={item.chunk_id:item for item in items}

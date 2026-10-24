@@ -142,6 +142,7 @@ class QuestionJobStore:
                            (conversation['id'], number, conversation['request_key'], question, job_id, conversation['memory_epoch'], stamp))
                 db.execute('UPDATE conversations SET revision=revision+1,updated_at=?,title=CASE WHEN title=? THEN ? ELSE title END WHERE id=?',
                            (stamp, '新会话', question[:50], conversation['id']))
+            db.execute('UPDATE question_jobs SET request_upper_bound=? WHERE id=?',(snapshot.get('provider_requests_expected',2),job_id))
             if key:
                 db.execute("INSERT INTO question_request_keys VALUES (?,?,?,?,?,?)",
                            (document_id, key, job_id, "submit", fingerprint, stamp))
@@ -426,7 +427,7 @@ class QuestionJobStore:
                 if any(a.support_review!=b.support_review for a,b in zip(
                         rechecked.conclusion+rechecked.explanation,validated.conclusion+validated.explanation)):
                     raise ValueError('claim_review_checkpoint_changed')
-            if snapshot.get("answer_contract_version") in {"fact-context-parts-v4","fact-context-parts-v5","fact-context-parts-v6","fact-context-parts-v7"}:
+            if snapshot.get("answer_contract_version") in {"fact-context-parts-v4","fact-context-parts-v5","fact-context-parts-v6","fact-context-parts-v7","fact-context-parts-v8"}:
                 if any(not citation.evidence_id or citation.source_reference_id is None for citation in validated.citations):
                     raise ValueError("result_citation_identity_missing")
                 if len({c.evidence_id for c in validated.citations}) != len(validated.citations):
@@ -449,7 +450,7 @@ class QuestionJobStore:
                 from app.rag_context import EvidenceItem, EvidencePack
                 from app.rag_validation import render_markdown, validate_user_condition_boundary
                 from app.rag_prompts import INSUFFICIENT_EVIDENCE_TEXT
-                is_v4 = snapshot["answer_contract_version"] in {"fact-context-parts-v4","fact-context-parts-v5","fact-context-parts-v6","fact-context-parts-v7"}
+                is_v4 = snapshot["answer_contract_version"] in {"fact-context-parts-v4","fact-context-parts-v5","fact-context-parts-v6","fact-context-parts-v7","fact-context-parts-v8"}
                 # v4发布时已逐条重算稳定ID和原文范围；用这些已核对范围重验数值、限定和覆盖。
                 # 不能把展示引述号再当输入片段号，也不能降级后直接相信落库的答案正文。
                 scoped_items = ([EvidenceItem(reference_id=c.reference_id, chunk_id=c.chunk_id,
@@ -488,6 +489,9 @@ class QuestionJobStore:
                                                for c in validated.citations}
                     validate_user_condition_boundary(checked,admission,question=row['question'])
                 else:validate_user_condition_boundary(checked, pack, question=row["question"])
+                if snapshot['answer_contract_version']=='fact-context-parts-v8':
+                    from app.rag_presentation import validate_presentation
+                    checked.presentation=validate_presentation(validated.presentation,checked.conclusion+checked.explanation)
                 expected_text = (INSUFFICIENT_EVIDENCE_TEXT if validated.status == "insufficient_evidence"
                                  else render_markdown(checked))
                 if ([p.model_dump() for p in validated.answer_parts] != checked.answer_parts
@@ -565,6 +569,8 @@ class QuestionJobService:
             snapshot['intent_resolution']=intent_resolution
             snapshot['intent_base_id']=intent_base_id
         maximum = getattr(self.settings, "question_max_requests", 2)
+        if type(maximum) is int and maximum < snapshot.get('provider_requests_expected',2):
+            raise RagError(422,'question_budget_too_small','此类问题需要查询、证据规划和正文生成，请将单题请求上限设为至少3')
         if type(maximum) is not int or maximum < 2 or maximum > 20:
             raise RagError(503, "invalid_question_budget", "问答请求预算配置无效")
         job_id, reused = self.store.create(document_id=document_id, question=question, key=key,
@@ -606,9 +612,10 @@ class QuestionJobService:
             job['intent']=public_decision(resolution['decision'])
         system_route=bool(resolution and resolution['route']['kind']=='SYSTEM')
         if system_route and row['status']=='succeeded':completed=1
-        job['provider_requests_expected']=0 if system_route else 2
+        job['provider_requests_expected']=0 if system_route else json.loads(row['snapshot_json']).get('provider_requests_expected',2)
         job['streaming']=bool(json.loads(row['snapshot_json']).get('stream_protocol')) and not system_route
-        job["steps_completed"], job["steps_total"] = completed, 1 if system_route else 2
+        if not system_route and (self.store.checkpoint(job_id,'evidence') or {}).get('composition_checkpoint'):completed+=1
+        job["steps_completed"], job["steps_total"] = completed, 1 if system_route else job['provider_requests_expected']
         job["requests_remaining"] = row["max_requests"] - row["requests_used"]
         document = self.repository.get(row["document_id"])
         job["is_old_version"] = bool(document and document.active_parse_version_id != row["parse_version_id"])
@@ -707,8 +714,25 @@ class QuestionJobService:
         answer = result["answer"]
         lines = ["# 问答结果", "", _markdown_text(result["question"]), ""]
         if answer.get('response_kind')=='system':lines += ['## 回复','',_markdown_text(answer['answer']),'']
+        if answer.get("presentation"):
+            from app.rag_presentation import fact_text
+            facts=answer['conclusion']+answer['explanation']
+            lines += ["## 回答", ""]
+            for block in answer['presentation']['blocks']:
+                texts=[fact_text(facts[i],text_filter=_markdown_text) for i in block['fact_indices']]
+                lines += [(' '.join(texts) if block['kind']=='paragraph' else '\n'.join('- '+s for s in texts)), '']
+            if not facts:lines += [_markdown_text(answer['answer']), '']
+            if answer['missing_points']:
+                lines += ['本次尚缺少的依据：'+_markdown_text('；'.join(answer['missing_points'])), '']
+            if answer['clarification_questions']:
+                lines += [_markdown_text(t) for t in answer['clarification_questions']]+['']
+            if facts:
+                labels={'direct':'原文直述','synthesis':'综合归纳','inference':'结构推断','unclassified':'未分类'}
+                lines += ['## 论断性质', '']+[
+                    f"- 论断 {i+1}：{labels[fact['claim_type']]}；引用 "+'、'.join(str(r) for r in fact['refs'])
+                    for i,fact in enumerate(facts)]+['']
         for name, title in (("conclusion", "结论"), ("explanation", "依据与说明")):
-            if answer[name]:
+            if answer[name] and not answer.get("presentation"):
                 lines += [f"## {title}", ""]
                 lines += ["- " + _markdown_text(fact_display_text(fact)) + "".join(f"[{ref}]" for ref in fact["refs"])
                           for fact in answer[name]] + [""]
@@ -717,12 +741,12 @@ class QuestionJobService:
             lines += ["## 问题覆盖", ""] + ["- " + _markdown_text(part["text"]) + "：" + labels[part["state"]]
                 + ("；" + _markdown_text(part["missing_detail"]) if part["missing_detail"] else "")
                 for part in answer["answer_parts"]] + [""]
-        if not answer["conclusion"] and not answer["explanation"]:
+        if not answer["conclusion"] and not answer["explanation"] and not answer.get("presentation"):
             lines += [_markdown_text(answer["answer"]), ""]
-        if answer["missing_points"]:
+        if answer["missing_points"] and not answer.get("presentation"):
             lines += ["## 本次尚缺少的依据", ""] + ["- " + _markdown_text(text)
                 for text in answer["missing_points"]] + [""]
-        if answer["clarification_questions"]:
+        if answer["clarification_questions"] and not answer.get("presentation"):
             lines += ["## 需要补充的信息", ""] + ["- " + _markdown_text(text)
                 for text in answer["clarification_questions"]] + [""]
         lines += ["## 引用与来源", ""]

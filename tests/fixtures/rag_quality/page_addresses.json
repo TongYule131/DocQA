@@ -1,0 +1,12 @@
+{
+  "schema": "page-address-fixture-v1",
+  "provenance": {"kind": "synthetic", "license": "CC0-1.0", "warning": "源码可见的工程分组，非真实论文或封存盲测；只验证地址候选，不评估生成语义或OCR。"},
+  "documents": [
+    {"id": "decimal-offset", "split": "dev", "pages": [{"physical": 1, "catalog": "18", "printed": "18", "status": "corroborated"}, {"physical": 2, "catalog": "19", "printed": "19", "status": "corroborated"}], "cases": [{"id": "printed-offset", "question": "印刷第19页说明什么", "expected_pages": [2]}, {"id": "physical-stays-physical", "question": "PDF第1页说明什么", "expected_pages": [1]}]},
+    {"id": "missing-label", "split": "dev", "pages": [{"physical": 1}, {"physical": 2, "printed": "19", "status": "footer_observed"}, {"physical": 3}], "cases": [{"id": "missing-no-offset-guess", "question": "印刷第20页说明什么", "expected_pages": []}, {"id": "observed-label", "question": "印刷页码19的规则", "expected_pages": [2]}]},
+    {"id": "roman", "split": "calibration", "pages": [{"physical": 1, "catalog": "iv", "printed": "iv", "status": "corroborated"}, {"physical": 2, "catalog": "v", "printed": "v", "status": "corroborated"}], "cases": [{"id": "roman-printed", "question": "印刷第iv页说明什么", "expected_pages": [1]}, {"id": "roman-catalog", "question": "PDF标签v说明什么", "expected_pages": [2]}]},
+    {"id": "catalog-only", "split": "calibration", "pages": [{"physical": 1, "catalog": "31", "status": "catalog_only"}, {"physical": 2, "catalog": "32", "status": "catalog_only"}], "cases": [{"id": "catalog-is-not-print", "question": "印刷第31页说明什么", "expected_pages": []}, {"id": "catalog-is-address", "question": "PDF标签32说明什么", "expected_pages": [2]}]},
+    {"id": "prefixed-reset", "split": "engineering_holdout", "pages": [{"physical": 1, "catalog": "App-1", "printed": "App-1", "status": "corroborated"}, {"physical": 2, "catalog": "App-2", "printed": "App-2", "status": "corroborated"}], "cases": [{"id": "prefix-print", "question": "印刷页码App-2说明什么", "expected_pages": [2]}, {"id": "number-alone-not-prefix", "question": "印刷第2页说明什么", "expected_pages": []}]},
+    {"id": "conflicting-labels", "split": "engineering_holdout", "pages": [{"physical": 1, "catalog": "18", "printed": "99", "status": "conflict"}, {"physical": 2, "catalog": "19", "printed": "20", "status": "conflict"}], "cases": [{"id": "conflict-suppressed", "question": "印刷第99页说明什么", "expected_pages": []}, {"id": "conflict-physical-safe", "question": "PDF第1页说明什么", "expected_pages": [1]}]}
+  ]
+}

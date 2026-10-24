@@ -34,6 +34,9 @@ assert.equal(root.children.some(item=>['answer-note','review-note'].includes(ite
 const repeatedSources=[{format:'pdf',page:1,bbox:[0,0,1,1]},{format:'pdf',page:1,bbox:[1,1,2,2]},{format:'pdf',page:2}];
 assert.equal(sourceLocationsText(repeatedSources),'第 1 页 / 第 2 页');
 assert.equal(repeatedSources.length,3); // 展示去重不能删除实际坐标。
+assert.equal(locationText({format:'pdf',page:2,pdf_page_label:{status:'footer_observed',printed_label:'19'}}),'PDF 第 2 页 · 印刷页码 19（页脚提取）');
+assert.equal(locationText({format:'pdf',page:2,pdf_page_label:{status:'catalog_only',catalog_label:'iv'}}),'PDF 第 2 页 · PDF 标签 iv（印刷页码未核对）');
+assert.equal(locationText({format:'pdf',page:2,pdf_page_label:{status:'conflict',catalog_label:'19',printed_label:'20'}}),'PDF 第 2 页');
 const fact={text:'允许退款。',claim_type:'direct',context:[{kind:'condition',text:'签收后七天内'}],support_review:{status:'checks_passed'}};
 const original='【原文直述】允许退款。（限定：签收后七天内）（证据规则检查通过；语义待复核）[1]';
 assert.equal(answerTextForDisplay({answer:original,conclusion:[fact]}),'允许退款。（限定：签收后七天内）[1]');

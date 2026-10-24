@@ -1,10 +1,12 @@
 # 阶段01：文档解析与OCR
 
-更新：2026-10-22。当前状态见[接力说明](稳定试用版接力说明.md)，运行配置见[Docling部署](../deploy/docling/README.md)。本文件汇总正式能力、量化标准和实验；冻结版本在[历史归档](archive/README.md)。
+更新：2026-10-23。当前状态见[接力说明](稳定试用版接力说明.md)，运行配置见[Docling部署](../deploy/docling/README.md)。本文件汇总正式能力、量化标准和实验；冻结版本在[历史归档](archive/README.md)。
 
 ## 正式解析链路
 
-支持PDF、DOCX、XLSX、UTF-8 TXT和Markdown。工程上传接口只保存原件；统一知识库入口按已采纳流程自动解析、分块和索引，预览／刷新不额外发起生成。解析任务、版本、来源和告警独立持久化。TXT和Markdown本地解析（Markdown保留标题结构），PDF／DOCX／XLSX使用既有Docling/RapidOCR服务；旧二进制DOC／XLS须先转换。知识库分块边界修订另建不可变草稿版本，必须保留完整原文及顺序；纠正文稿须上传新版原件，不直接改证据文字。当前schema14、新解析规范化为docqa-normalized-7，未更换正式OCR模型，以下历史实验成绩仍绑定原样本和当时版本。
+支持PDF、DOCX、XLSX、UTF-8 TXT和Markdown。工程上传接口只保存原件；统一知识库入口按已采纳流程自动解析、分块和索引，预览／刷新不额外发起生成。解析任务、版本、来源和告警独立持久化。TXT和Markdown本地解析（Markdown保留标题结构），PDF／DOCX／XLSX使用既有Docling/RapidOCR服务；旧二进制DOC／XLS须先转换。知识库分块边界修订另建不可变草稿版本，必须保留完整原文及顺序；纠正文稿须上传新版原件，不直接改证据文字。当前正式schema14、新解析规范化为docqa-normalized-9，未更换正式OCR模型，以下历史实验成绩仍绑定原样本和当时版本。
+
+2026-10-23正式发布增加pdf-page-labels-v1：物理页不改；目录Number Tree标签与真实页脚节点分开记录，无目录时还需底部坐标及邻页独立连续观察。目录标签不是印刷页码证明，冲突只使用物理页，缺页不插值；提取页脚仍需核对OCR。附加来源保存在新版本既有JSON结构，数据库不新增迁移。旧版本不自动重解析、不补造标签，也不改变旧引用签名。发布备份与核验见接力说明；没有据此新增真实OCR准确率或公式语义成绩。
 
 正常PDF参数为rapidocr、ch、do_ocr=true、force_ocr=false、table_mode=accurate、JSON+Markdown；异常文本映射的定向分支见下节。不自动开启远程VLM、图片描述或公式重算。图片节点存在不代表内部文字/关系已可靠解析。通用ocr_limitation表示能力边界，不能写成已定位到OCR失败。
 

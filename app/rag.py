@@ -7,13 +7,13 @@
       → DocumentIndex.search（一次查询 embedding + 一次检索）
       → EvidenceBuilder（固定版本、去重、预算、服务器分配引用编号）
       → PromptBuilder（固定系统规则 + 不可信问题/参考资料）
-      → 一次生成请求（任务按冻结协议流式，旧同步请求保持非流式）
+      → 复杂任务先规划证据与段落，再生成（旧同步请求保持一次非流式）
       → 严格结构与引用校验
       → 由已校验结构渲染 Markdown 与引用列表
 
 硬性约束：
 
-- 一次提问最多一次查询 embedding、一次生成调用；任何前置条件失败都不调用生成；
+- 一次提问最多一次查询 embedding；复杂任务显式预留规划＋写作，其他任务一次生成；
 - 不自动重试模型、不自动改写答案、不退化为脱离资料的普通聊天；
 - 回答期间版本或索引变化仍使用固定快照，不二次生成、不二次计费；
 - 原解析与索引不因问答成败被修改（本模块只读 repository 与 index）。
@@ -157,9 +157,19 @@ class RagService:
         payload["task_prompt_version"] = TASK_PROMPT_VERSION
         payload["task_prompt_hash"] = hashlib.sha256(build_task_system_prompt().encode()).hexdigest()
         payload["answer_contract_version"] = ANSWER_CONTRACT_VERSION
+        from app.rag_answer_strategy import policy_signature
+        payload["answer_strategy_signature"] = policy_signature()
+        from app.rag_composition import COMPOSITION_VERSION
+        payload["composition_version"] = COMPOSITION_VERSION
         from app.rag_extract_context import SELECTION_VERSION
         from app.rag_support_review import REVIEW_VERSION
         payload['evidence_selection_version']=SELECTION_VERSION
+        from app.rag_math_evidence import MATH_EVIDENCE_VERSION
+        from app.rag_slot_ranges import SLOT_RANGE_VERSION
+        from app.rag_numeric_roles import NUMERIC_ROLE_VERSION
+        from app.pdf_page_labels import PAGE_LABEL_VERSION
+        payload.update(math_evidence_version=MATH_EVIDENCE_VERSION,slot_range_version=SLOT_RANGE_VERSION,numeric_role_version=NUMERIC_ROLE_VERSION)
+        payload['page_label_version']=PAGE_LABEL_VERSION
         payload['claim_review_version']=REVIEW_VERSION
         payload["table_projection_version"] = TABLE_PROJECTION_VERSION
         payload["qualifier_cue_version"] = QUALIFIER_CUE_VERSION
@@ -187,7 +197,7 @@ class RagService:
             info = {'parse_version_id': version.id, 'index_id': published['index_id'], 'is_legacy': version.is_legacy}
         if conversation_context is not None and not valid_memory(conversation_context):
             raise RagError(409, 'conversation_context_invalid', '会话上下文无效，请重新提问')
-        self._context_cap(build_task_system_prompt(include_table_structure=False) + (MEMORY_RULE if conversation_context else ''),
+        self._context_cap(build_task_system_prompt(include_table_structure=False, question=question) + (MEMORY_RULE if conversation_context else ''),
                           question, document.filename, memory=conversation_context)
         with self.repository.connect() as db:
             state = db.execute(
@@ -199,8 +209,14 @@ class RagService:
             raise RagError(409, 'published_version_changed', '知识库发布索引的原文签名已变更，已停止处理')
         from app.rag_extract_context import SELECTION_VERSION,budget_profile
         from app.rag_support_review import REVIEW_VERSION
+        from app.answer_stream import STREAM_VERSION
+        from app.rag_answer_strategy import strategy_for_question
+        from app.rag_composition import needs_plan
         frozen = {
-            'stream_protocol':'validated-fact-stream-v1',
+            "answer_strategy":strategy_for_question(question),
+            "composition_version":"evidence-composition-v1",
+            "provider_requests_expected":2+int(needs_plan(question)),
+            'stream_protocol':STREAM_VERSION,
             'evidence_selection_version':SELECTION_VERSION,
             'claim_review_version':REVIEW_VERSION,
             'evidence_profile':budget_profile(question,max_items=self.settings.question_context_k,
@@ -226,7 +242,7 @@ class RagService:
         return frozen
 
     def answer(self, document_id: str, question: str, *, snapshot: dict | None = None,
-               observer=None, retrieval_checkpoint: dict | None = None) -> RagOutcome:
+               observer=None, retrieval_checkpoint: dict | None = None, composition_checkpoint: dict | None = None) -> RagOutcome:
         started = time.perf_counter()
         # observer 的异常必须向上传递：失去租约、取消或预算不足时不能继续收费。
         emit = observer or (lambda _stage, _details: None)
@@ -266,7 +282,7 @@ class RagService:
         if memory is not None and not valid_memory(memory):
             raise RagError(409, 'conversation_context_invalid', '会话上下文无效，请重新提问')
         search_question = retrieval_question(question, memory)
-        system_prompt = (build_task_system_prompt(include_table_structure=False) if frozen is not None
+        system_prompt = (build_task_system_prompt(include_table_structure=False, question=question) if frozen is not None
                          else build_system_prompt())
         user_prompt_builder = build_task_user_prompt if frozen is not None else build_user_prompt
         if memory:
@@ -322,7 +338,7 @@ class RagService:
                                expected_document_id=document_id,
                                payload_transform=task_evidence_payload if frozen is not None else None,
                                table_blocks=table_blocks,
-                               table_prompt_overhead=len(build_task_system_prompt()) - len(system_prompt)
+                               table_prompt_overhead=len(build_task_system_prompt(question=question)) - len(system_prompt)
                                    if frozen is not None else 0,
                                include_qualifier_cues=frozen is not None,
                                preserve_document_order=frozen is not None,
@@ -333,7 +349,7 @@ class RagService:
             raise RagError(409, "evidence_scope_mismatch", build.fatal_reason)
         pack = build.pack
         if any(item.table_projection_included for item in pack.items):
-            system_prompt = build_task_system_prompt() + (MEMORY_RULE if memory else '')
+            system_prompt = build_task_system_prompt(question=question) + (MEMORY_RULE if memory else '')
         from app.retrieval_planning import input_coverage_hints
         coverage_hints = input_coverage_hints(search_result.get("planning") or {},
                                              {item.chunk_id for item in pack.items})
@@ -375,6 +391,8 @@ class RagService:
                 retrieval_ms=retrieval_ms, started=started, generated=False)
             if frozen is not None:
                 outcome.answer.prompt_version = TASK_PROMPT_VERSION
+                if frozen.get('answer_contract_version')=='fact-context-parts-v8':
+                    outcome.answer.presentation={'blocks':[]}
                 from app.rag_answer_contract import question_parts
                 outcome.answer.answer_parts = [RagAnswerPart(**part, state="missing_evidence", fact_indices=[],
                     missing_detail="本次没有可送入生成模型的合格证据片段。") for part in question_parts(question)]
@@ -384,8 +402,24 @@ class RagService:
             raise RagError(503, "provider_not_configured",
                            "尚未配置 DEEPSEEK_API_KEY，请填写本地 .env 后重启服务")
 
+        composition_plan=None
+        if frozen is not None:
+            from app.rag_composition import prepare_composition, writer_prompt, validate_writer_plan
+            def obtain_plan(system,user,validate):
+                if composition_checkpoint is not None:return validate(composition_checkpoint)
+                if len(system)+len(user)>self.settings.question_input_max_chars:
+                    raise RagError(422,'rag_input_too_large','证据规划输入超出预算，未发起调用')
+                emit('composition_started',{})
+                raw_plan=self.model.generate(system,user)
+                checkpoint=validate(raw_plan)
+                emit('composition_completed',{'checkpoint':checkpoint,'provider_usage':getattr(self.model,'last_call_metadata',None)})
+                return checkpoint
+            try:pack,composition_plan,_=prepare_composition(pack,question,obtain_plan)
+            except ModelOutputError as exc:
+                raise RagError(502,'composition_plan_invalid','证据规划未通过核验，未发起正文生成') from None
         user_prompt = user_prompt_builder(question=question, document_name=document.filename,
                                         evidence_payload=pack.payload())
+        if frozen is not None:user_prompt=writer_prompt(user_prompt,pack,composition_plan)
         input_limit = self.settings.question_input_max_chars if frozen is not None else self.settings.rag_input_max_chars
         if len(system_prompt) + len(user_prompt) > input_limit:
             raise RagError(422, "rag_input_too_large",
@@ -401,6 +435,7 @@ class RagService:
         if frozen and frozen.get('stream_protocol')==STREAM_VERSION and hasattr(self.model,'generate_stream') and observer:
             def completed(category,ordinal,fact):
                 block=checked_block(category,ordinal,fact,pack,question,self)
+                block['presentation_block']=parser.presentation_block(category,ordinal)
                 emit('stream_block',block)
             parser=FactStreamParser(completed)
             emit('stream_started',{'version':STREAM_VERSION})
@@ -421,6 +456,7 @@ class RagService:
         if frozen is not None:
             self._verify_table_snapshot(frozen)
         try:
+            if frozen is not None and composition_plan is not None:validate_writer_plan(raw,composition_plan,pack)
             validated = (validate_task_output(raw, pack, question=question,
                          contract_version=frozen.get("answer_contract_version", "fact-context-parts-v1")) if frozen is not None
                          else validate_model_output(raw, pack))
@@ -625,6 +661,7 @@ class RagService:
             citations=citations,
             conclusion=conclusion,
             explanation=explanation,
+            presentation=validated.presentation,
             document_id=snapshot.document_id,
             index_id=snapshot.index_id,
             parse_version_id=snapshot.parse_version_id,

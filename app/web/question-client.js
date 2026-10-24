@@ -4,7 +4,7 @@ export const activeStatuses = ['queued', 'running', 'cancel_requested'];
 export const jobLabels = { queued: '正在排队', running: '正在处理', succeeded: '已完成',
   cancelled: '已取消', failed: '处理失败', needs_attention: '需要确认', cancel_requested: '正在停止' };
 export const stageLabels = { queued: '等待处理', preparing: '准备资料', retrieving: '查找资料',
-  retrieval: '查找资料', evidence_ready: '资料已就绪', generating: '生成回答', validating: '核对引用',
+  retrieval: '查找资料', evidence_ready: '资料已就绪', planning: '选择证据与组织回答', generating: '生成回答', validating: '核对引用',
   saving: '保存回答', done: '已完成', failed: '已停止', cancelled: '已取消' };
 
 // 页面控制器不拥有生成任务，只提交明确操作并读取服务端任务。刷新与恢复只有 GET。

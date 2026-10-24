@@ -184,10 +184,25 @@ def install_knowledge_routes(app,access,rag):
         if body.base_id:access.base(body.base_id)
         rows=intents.list()
         from app.intent_routing import decide
+        from app.query_planning import plan_query, describe_plan, execution_budget
+        from app.knowledge_tools import ToolRegistry
+        tools={t['id']:t for t in ToolRegistry(access.repository).list()}
         results=[]
         for question in body.questions:
             route,decision=decide(question,body.base_id,rows,body.scope)
-            results.append({'question':question,'decision':decision,'response_preview':route.get('response_text') if route['kind']=='SYSTEM' else None,'top_k':route.get('top_k')})
+            plan=plan_query(question,route)
+            availability={'ready':True,'reason':'执行时仍核对授权、固定快照与来源；测试不执行问答'}
+            if route['kind']=='MCP':
+                tool=tools.get(route.get('tool_id'))
+                if not tool or not tool['enabled'] or not tool['read_only'] or not tool['auth_configured']:
+                    availability={'ready':False,'reason':'工具未登记、停用、非只读或缺少服务端凭据，不能执行'}
+            elif route['kind']=='KB' and body.scope=='knowledge':
+                if not body.base_id:availability={'ready':False,'reason':'请先选择获授权的知识库'}
+                elif not access.base(body.base_id)['active_snapshot_id']:
+                    availability={'ready':False,'reason':'当前知识库没有可用发布快照，尚不能检索'}
+            results.append({'question':question,'decision':decision,'query_plan':describe_plan(plan),
+                'retrieval_budget':execution_budget(plan,access.settings,route),'availability':availability,
+                'response_preview':route.get('response_text') if route['kind']=='SYSTEM' else None,'top_k':route.get('top_k')})
         return {'results':results,'supplier_calls':0,'persisted':False,'note':'与会话使用同一规则；测试不创建问答任务，不执行检索、模型或工具'}
 
     @router.get('/api/admin/mcp-tools')

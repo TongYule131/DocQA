@@ -72,6 +72,9 @@ class KnowledgeQuestions:
     def present(self, row):
         value={k:v for k,v in row.items() if k not in {'input_json','input_hash','lease_token','lease_expires_at','result_json'}}
         value['question']=json.loads(row['input_json']).get('question','')
+        payload=json.loads(row['input_json'])
+        kind=payload.get('route',{}).get('kind')
+        value['provider_requests_expected']=payload.get('provider_requests_expected',2) if kind=='KB' else 0 if kind=='SYSTEM' else None
         value['streaming']=bool(json.loads(row['input_json']).get('stream_protocol'))
         value['result']=json.loads(row['result_json']) if row['result_json'] else None
         with self.repository.connect() as db:
@@ -114,11 +117,19 @@ class KnowledgeQuestions:
                  'configuration':configuration(self.access.settings,self.access.index.embedding),
                  'conversation_id':identifier,'memory_epoch':conv['memory_epoch'],'recent_questions':history,
                  'memory_notes':conv['memory_notes'] if conv['memory_enabled'] else '',
-                 'document_filter':document_ids,'route':route,'intent_decision':resolution['decision']}
+                 'document_filter':document_ids,'route':route,'intent_decision':resolution['decision'],
+                 'query_plan':resolution['query_plan']}
+        from app.query_planning import execution_budget
+        payload['retrieval_budget']=execution_budget(resolution['query_plan'],self.access.settings,route)
         payload['retrieval_question']=retrieval_question(question,memory) if memory['notes'] or history else question
         if anchor:payload['legacy_anchor']={'source':anchor[0],'id':anchor[1]}
         if submission_id:payload['submission_id']=submission_id
-        if route['kind']=='KB':payload['stream_protocol']='validated-fact-stream-v1'
+        if route['kind']=='KB':
+            from app.answer_stream import STREAM_VERSION
+            from app.rag_composition import needs_plan
+            payload['stream_protocol']=STREAM_VERSION
+            # 随任务冻结；不能用新版分类器反算旧任务曾经需要的请求数。
+            payload['provider_requests_expected']=2+int(needs_plan(question))
         if route['kind']=='MCP':
             from app.knowledge_tools import ToolRegistry
             tool=ToolRegistry(self.repository).get(route.get('tool_id'))

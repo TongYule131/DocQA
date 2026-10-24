@@ -58,16 +58,24 @@ export function createAnswerStream({source='question',changed=()=>{},finished=()
       const incomplete=terminal(job.status)||terminal(entry.status)||entry.invalid;
       section.append(node('p',incomplete?'生成未完成，以下片段不作为最终回答。':entry.reconnecting?'连接中断，正在恢复已保存片段…':'生成中 · 片段已核对原文，完成后统一复验。','stream-label'));
       const labels={subject:'对象',period:'期间',unit:'单位',scope:'范围',condition:'限定',role:'用途'};
+      const paragraphs=new Map();
       for(const block of entry.blocks) {
-        const fact=block.fact,article=node('div','','stream-fact');
+        const plan=block.version==='validated-fact-stream-v2' ? block.presentation_block : null;
+        const grouped=plan && Number.isSafeInteger(plan.index) && plan.index>=0 && plan.index<12 && plan.kind==='paragraph';
+        let parent=section;
+        if(grouped) {
+          if(!paragraphs.has(plan.index)){const paragraph=node('div','','stream-paragraph');paragraphs.set(plan.index,paragraph);section.append(paragraph);}
+          parent=paragraphs.get(plan.index);
+        }
+        const fact=block.fact,article=node(grouped?'span':'div','','stream-fact');
         const extra=(fact.context||[]).filter(c=>typeof c.text==='string'&&!String(fact.text).includes(c.text)).map(c=>(labels[c.kind]||'条件')+'：'+c.text);
-        article.append(node('p',(fact.claim_type==='inference'?'据此可推断：':'')+String(fact.text)+(extra.length?'（'+extra.join('；')+'）':'')));
-        const sources=node('div','','stream-sources');
+        article.append(node(grouped?'span':'p',(fact.claim_type==='inference'?'【结构推断】':'')+String(fact.text)+(extra.length?'（'+extra.join('；')+'）':'')));
+        const sources=node(grouped?'span':'div','','stream-sources');
         for(const citation of block.citations||[]) {
           const b=node('button',sourceLocationsText(citation.sources)||'查看原文','source-chip');b.type='button';
           b.onclick=()=>openCitation(citation,b);sources.append(b);
         }
-        article.append(sources);section.append(article);
+        article.append(sources);parent.append(article);
       }
       container.append(section);
     },

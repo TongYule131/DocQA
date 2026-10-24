@@ -27,9 +27,24 @@ def configuration(settings, embedding):
     from app.conversation_memory import MEMORY_SIGNATURE
     from app.rag_pipeline import PIPELINE_VERSION
     from app.rag_phrase_match import PHRASE_POLICY_VERSION
-    return fingerprint([PIPELINE_VERSION,PHRASE_POLICY_VERSION,embedding.signature, settings.deepseek_base_url, settings.deepseek_model,
+    from app.query_planning import QUERY_PLAN_VERSION
+    from app.retrieval_planning import RETRIEVAL_STRATEGY_VERSION
+    from app.rag_evidence_slots import SLOT_PLAN_VERSION
+    from app.rag_source_diagnostics import SOURCE_DIAGNOSTIC_VERSION
+    from app.rag_extract_context import SELECTION_VERSION
+    from app.rag_numeric_roles import NUMERIC_ROLE_VERSION
+    from app.rag_math_evidence import MATH_EVIDENCE_VERSION
+    from app.rag_slot_ranges import SLOT_RANGE_VERSION
+    from app.pdf_page_labels import PAGE_LABEL_VERSION
+    from app.rag_presentation import PRESENTATION_VERSION
+    from app.rag_answer_contract import ANSWER_CONTRACT_VERSION
+    from app.rag_answer_strategy import policy_signature
+    from app.rag_composition import COMPOSITION_VERSION
+    return fingerprint([PIPELINE_VERSION,QUERY_PLAN_VERSION,RETRIEVAL_STRATEGY_VERSION,SLOT_PLAN_VERSION,SOURCE_DIAGNOSTIC_VERSION,
+        SELECTION_VERSION,NUMERIC_ROLE_VERSION,MATH_EVIDENCE_VERSION,SLOT_RANGE_VERSION,PAGE_LABEL_VERSION,PRESENTATION_VERSION,ANSWER_CONTRACT_VERSION,policy_signature(),COMPOSITION_VERSION,PHRASE_POLICY_VERSION,embedding.signature, settings.deepseek_base_url, settings.deepseek_model,
         settings.deepseek_thinking, TASK_PROMPT_VERSION, KNOWLEDGE_PROMPT_VERSION, KNOWLEDGE_RULE, settings.question_context_max_chars,
-        settings.question_input_max_chars, settings.question_context_k,MEMORY_SIGNATURE])
+        settings.question_input_max_chars, settings.question_context_k,settings.question_candidate_k,
+        settings.rag_retrieval_k,settings.rag_min_score,MEMORY_SIGNATURE])
 
 
 class TaskStopped(Exception):
@@ -220,6 +235,16 @@ class KnowledgeTasks:
                     ('uncertain' if uncertain else 'failed',code,dump(_usage_metadata(usage)),now_iso(),round((time.perf_counter()-started)*1000),identifier,sequence))
             if isinstance(exc,TaskStopped):raise
             messages = {
+                'output_composition_plan_invalid': '证据选材与段落计划无效，未发起正文生成',
+                'output_composition_reference_invalid': '段落计划或正文使用了范围外的证据单元，未发布结果',
+                'output_composition_coverage_invalid': '段落计划的子问覆盖无效，未发起正文生成',
+                'output_composition_layout_mismatch': '正文未按已确认的段落计划组织，未发布结果',
+                'output_composition_comparison_unpaired': '比较段缺少同时引用双方依据的论断，未发布结果',
+                'output_composition_checkpoint_changed': '计划与当前证据身份不一致，未继续调用',
+                'output_presentation_missing': '回答缺少正文组织信息，未发布完整结果；请查看链路详情',
+                'output_presentation_invalid': '回答的正文组织格式无效，未发布完整结果；请查看链路详情',
+                'output_presentation_reference_invalid': '正文组织引用了不存在的事实，未发布完整结果',
+                'output_presentation_coverage_mismatch': '正文组织存在事实遗漏或重复，未发布完整结果',
                 'output_numeric_context_missing': '回答中的数值缺少适用限定，未发布完整结果；请查看链路详情',
                 'output_mixed_user_source': '回答将题干中的表述作为原文引用，但本条证据未支持；请查看链路中的失败论断位置',
                 'output_number_not_in_quote': '回答中的数值未在本条引用原文中找到，未发布完整结果；请核对数字及其适用对象',

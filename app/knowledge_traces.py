@@ -65,7 +65,7 @@ class KnowledgeTraces:
             if detail:
                 spans.extend({**s,'id':child+'/'+s['id'],'parent_id':child+'/'+s['parent_id'] if s.get('parent_id') else None} for s in detail['spans'])
                 calls.extend({**c,'task_id':child} for c in detail['calls'])
-        intent=None;diagnostics=[]
+        intent=None;query_plan=None;diagnostics=[]
         if record['source']=='knowledge':
             with self.repository.connect() as db:
                 rows=db.execute("SELECT name,payload_json FROM kb_task_checkpoints WHERE task_id=? AND name LIKE 'diagnostic_%' ORDER BY created_at",(identifier,)).fetchall()
@@ -76,8 +76,14 @@ class KnowledgeTraces:
                     diagnostics.append(dict(kind='validation',attempt=attempt,reason=value.get('reason'),
                         location={k:location[k] for k in ('category','ordinal','fact_index','reference_count','numeric_count') if k in location}))
                 elif row['name'].startswith('diagnostic_retrieval_'):
+                    from app.rag_source_diagnostics import public_source_diagnostics
                     diagnostics.append(dict(kind='retrieval',attempt=attempt,
-                        **{k:value.get(k) for k in ('admitted_count','context_chars','truncated','drop_count')}))
+                        **{k:value.get(k) for k in ('admitted_count','context_chars','truncated','drop_count')},
+                        budget=value.get('budget'), coverage=value.get('coverage'),
+                        slot_counts=dict(total=len(value.get('slots',{}).get('slots',[])),unfilled=value.get('slots',{}).get('unfilled_count',0)),
+                        math_evidence=dict(total=len(value.get('math_evidence',{}).get('groups',[])),
+                            **{k:value.get('math_evidence',{}).get(k,0) for k in ('incomplete_count','blocked_count','unlinked_formula_count')}),
+                        sources=[public_source_diagnostics(d['source_diagnostics']) for d in value.get('documents',[]) if d.get('source_diagnostics')]))
         if record['source'] in ('knowledge','question'):
             with self.repository.connect() as db:
                 source=db.execute('SELECT '+('input_json FROM kb_tasks' if record['source']=='knowledge' else 'snapshot_json FROM question_jobs')+' WHERE id=?',(identifier,)).fetchone()
@@ -86,6 +92,9 @@ class KnowledgeTraces:
             if decision:
                 from app.intent_routing import public_decision
                 intent=public_decision(decision)
+            if payload.get('query_plan'):
+                from app.query_planning import describe_plan
+                query_plan=describe_plan(payload['query_plan'])
         for span in spans:span['offset_ms']=milliseconds(record['started_at'],span['started_at'])
-        return {**record,'spans':spans,'calls':calls,'children':children,'intent':intent,'diagnostics':diagnostics,'content_policy':'仅含运行元数据；不展示用户问题、提示词、文档正文或原始响应。',
+        return {**record,'spans':spans,'calls':calls,'children':children,'intent':intent,'query_plan':query_plan,'diagnostics':diagnostics,'content_policy':'仅含运行元数据；不展示用户问题、提示词、文档正文或原始响应。',
                 'timing_note':'旧任务只展示实际记录的外调节点；未记录的阶段不补造耗时。'}

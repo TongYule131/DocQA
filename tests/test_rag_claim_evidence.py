@@ -155,11 +155,13 @@ def test_real_job_publishes_two_ranges_from_one_input_reference(tmp_path):
         parse_version_id="two-window-v", order_index=0, chunk_type="text", sources=[SourceLocation(format="pdf", page=1)])])
     env.rag.index.build("qdoc", rebuild=True)
     env.embedding.calls.clear()
-    def unit_reply(*_):
+    def unit_reply(_system,user):
         from tests.fixtures.rag_quality.claim_protocol import declare_parts
         value=body([fact('开头说明。'),fact('末尾说明。')])
         value.pop('evidence_quotes')
-        for f in value['conclusion']:f['evidence']=[dict(ref=1,unit=1)]
+        # 选择当前公布的首、末句单元；旧大单元编号不应误选为两次相同引文。
+        units=sorted(map(int,json.loads(user)['references'][0]['quote_units']))
+        for f,unit in zip(value['conclusion'],[units[0],units[-1]]):f['evidence']=[dict(ref=1,unit=unit)]
         return json.dumps(declare_parts(value,derive_refs=True),ensure_ascii=False)
     env.model.handler=unit_reply
     job, _ = submit(env, question="请说明规则。")
@@ -169,7 +171,7 @@ def test_real_job_publishes_two_ranges_from_one_input_reference(tmp_path):
     answer = env.service.get_result(completed["result_id"])["answer"]
     assert [c["source_reference_id"] for c in answer["citations"]] == [1, 1]
     assert [c["char_start"] for c in answer["citations"]] == [0, 600]
-    assert [c["quote"] for c in answer["citations"]] == [text[:600], text[600:]]
+    assert [c["quote"] for c in answer["citations"]] == [text[:60], text[600:]]
     assert len(env.embedding.calls) == len(env.model.calls) == 1
 
 

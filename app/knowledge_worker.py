@@ -103,6 +103,12 @@ class KnowledgeWorker:
         with self.tasks.span(job,'意图识别','INTENT',parent):
             resolution=IntentManagement(self.repository).evaluate(payload['question'],job['base_id']);route=resolution['route']
             if route!=payload.get('route') or (payload.get('intent_decision') and resolution['decision']!=payload['intent_decision']):raise TaskStopped('intent_changed','意图配置已变化，请在当前会话重新提交')
+        from app.query_planning import execution_budget
+        with self.tasks.span(job,'查询任务与证据需求规划','QUERY_PLAN',parent):
+            plan=resolution['query_plan']
+            limits=execution_budget(plan,self.settings,route)
+            if (payload.get('query_plan',plan)!=plan or payload.get('retrieval_budget',limits)!=limits):
+                raise TaskStopped('query_plan_changed','查询计划或证据预算已变化，请重新提交')
         if route['kind']=='SYSTEM':
             return {'response_kind':'system','answer':route['response_text'],'status':'answered','citations':[],'conclusion':[],
                 'explanation':[],'limitations':[],'route':route['code'],'prompt_version':'system-intent-v1'}
@@ -110,6 +116,25 @@ class KnowledgeWorker:
             from app.knowledge_tools import execute_tool
             return execute_tool(self,job,payload,route,parent)
         self.check(job)
+        system=build_task_system_prompt(question=payload['question'])+KNOWLEDGE_RULE
+        memory=payload.get('recent_questions',[])
+        if memory or payload.get('memory_notes'):
+            from app.conversation_memory import MEMORY_RULE
+            system+=MEMORY_RULE
+        def user_prompt(entries,math_state=None):
+            value=json.loads(build_task_user_prompt(question=payload['question'],document_name='知识库资料',evidence_payload=entries))
+            if memory or payload.get('memory_notes'):
+                from app.conversation_memory import MEMORY_VERSION
+                value['conversation_context']={'version':MEMORY_VERSION,'notes':payload.get('memory_notes',''),'recent_questions':memory}
+            if 'formula_check' in plan['facets']:
+                # 预留最长状态文本的实际序列化长度，生成时只使用最终装入后的真实状态。
+                value['mathematical_evidence']={'representation_status':math_state or max(
+                    ('readable_text_unverified','unavailable_or_incomplete'),key=len),'semantic_verification':'not_automatically_verified'}
+            return dump(value)
+        # 用真实序列化开销反推预算，不能先花一次向量请求再发现系统规则装不下。
+        overhead=len(system)+len(user_prompt([]))-2  # references=[]的两字符由证据数组替换
+        budget=min(limits['context_chars'],self.settings.question_input_max_chars-overhead)
+        if budget<1000:raise TaskStopped('input_budget_exceeded','问题、记忆与系统规则超过输入预算，未发起外部请求')
         original_index=DocumentIndex(self.repository,self.embedding)
         search_question=payload.get('retrieval_question',payload['question'])
         for doc in payload['documents']:original_index.verify_snapshot(doc['document_id'],doc['snapshot'])
@@ -129,32 +154,38 @@ class KnowledgeWorker:
             settings=worker.embedding.settings
             def embed(self,_texts):return [vector]
         index=DocumentIndex(self.repository,QueryEmbedding())
-        system=build_task_system_prompt()+KNOWLEDGE_RULE
-        context_k=min(self.settings.question_context_k,route.get('top_k') or self.settings.question_context_k)
-        memory=payload.get('recent_questions',[])
-        if memory or payload.get('memory_notes'):
-            from app.conversation_memory import MEMORY_RULE
-            system+=MEMORY_RULE
-        budget=min(self.settings.question_context_max_chars,self.settings.question_input_max_chars-len(system)-len(payload['question'])-3500)
-        if budget<1000:raise TaskStopped('input_budget_exceeded','问题与系统规则超过输入预算')
         with self.tasks.span(job,'库内多文档召回与证据装入','RETRIEVE',parent):
             from app.rag_pipeline import knowledge_context, RetrievalBudget, PipelineError
             try:
                 pack, diagnostics=knowledge_context(index,self.repository,payload['documents'],payload['question'],
-                    search_question,self.settings,RetrievalBudget(min(20,self.settings.rag_retrieval_k),32,context_k,budget),
-                    check=lambda:self.check(job),observe=lambda name,kind:self.tasks.span(job,name,kind,parent))
-            except PipelineError:
+                    search_question,self.settings,RetrievalBudget(**{**limits,'context_chars':budget}),
+                    query_plan=plan,check=lambda:self.check(job),observe=lambda name,kind:self.tasks.span(job,name,kind,parent))
+            except PipelineError as exc:
+                if str(exc)=='source_quality_invalid':raise TaskStopped('source_quality_invalid','解析质量无效，请先修复来源') from None
                 raise TaskStopped('source_scope_invalid','证据来源范围无效') from None
             self.tasks.diagnostic(job,'retrieval',diagnostics)
             items=pack.items
-        if not items:return {'answer':INSUFFICIENT_EVIDENCE_TEXT,'status':'insufficient_evidence','citations':[],'conclusion':[],'explanation':[],'limitations':['本次检索未得到可用证据']}
+        if not items:return {'answer':INSUFFICIENT_EVIDENCE_TEXT,'status':'insufficient_evidence','citations':[],'conclusion':[],'explanation':[],
+            'limitations':['本次检索未得到预算内的完整可用证据，未进行生成或公式核对'],
+            'retrieval':{'slots':pack.slot_hints,'math_evidence':pack.math_hints,'coverage':diagnostics['coverage']}}
         self.tasks.stage(job['id'],job['lease_token'],'generating')
         names={d['document_id']:d['filename'] for d in payload['documents']}
+        from app.rag_composition import prepare_composition,writer_prompt,validate_writer_plan
+        def obtain_plan(plan_system,plan_user,validate):
+            if len(plan_system)+len(plan_user)>self.settings.question_input_max_chars:
+                raise TaskStopped('input_budget_exceeded','规划输入超出预算，未发起调用')
+            self.tasks.stage(job['id'],job['lease_token'],'planning')
+            def generate_plan():return self.model.generate(plan_system,plan_user),getattr(self.model,'last_call_metadata',None)
+            with self.tasks.span(job,'证据选材与段落规划','COMPOSITION',parent):
+                return self.tasks.call(job,'generation',generate_plan,checkpoint='composition_plan',validate=validate)
+        pack,composition_plan,_=prepare_composition(pack,payload['question'],obtain_plan)
+        items=pack.items
+        self.tasks.stage(job['id'],job['lease_token'],'generating')
         entries=[dict(i.payload(),document_name=names[i.document_id]) for i in items]
-        user=build_task_user_prompt(question=payload['question'],document_name='知识库资料',evidence_payload=entries)
-        if memory or payload.get('memory_notes'):
-            from app.conversation_memory import MEMORY_VERSION
-            value=json.loads(user);value['conversation_context']={'version':MEMORY_VERSION,'notes':payload.get('memory_notes',''),'recent_questions':memory};user=dump(value)
+        math_slots=[s for s in pack.slot_hints.get('slots',[]) if s['kind'] in {'formula_source','formula_explanation'}]
+        math_state=('readable_text_unverified' if len(math_slots)==2 and all(s['state']=='admitted' for s in math_slots)
+            and not pack.math_hints.get('incomplete_count') else 'unavailable_or_incomplete')
+        user=writer_prompt(user_prompt(entries,math_state),pack,composition_plan)
         if len(system)+len(user)>self.settings.question_input_max_chars:raise TaskStopped('input_budget_exceeded','证据与规则超出输入预算，未发起生成')
         rag=RagService(self.settings,self.repository,original_index,self.model)
         stream_errors=[]
@@ -162,6 +193,7 @@ class KnowledgeWorker:
             if stream_errors:raise stream_errors[0]
             from app.rag_validation import parse_model_output
             raw=value if isinstance(value,str) else dump(value)
+            if composition_plan is not None:validate_writer_plan(raw,composition_plan,pack)
             checked=validate_task_output(raw,pack,question=payload['question'],contract_version=ANSWER_CONTRACT_VERSION)
             validate_user_condition_boundary(checked,pack,question=payload['question']);review_claims(checked,pack)
             return parse_model_output(raw)
@@ -179,7 +211,9 @@ class KnowledgeWorker:
                     except ModelOutputError as exc:
                         exc.location.update(category=category,ordinal=ordinal)
                         stream_errors.append(exc)
-                    else:store.append('knowledge',job,'block',block)
+                    else:
+                        block['presentation_block']=parser.presentation_block(category,ordinal)
+                        store.append('knowledge',job,'block',block)
                 store.append('knowledge',job,'reset',{'version':STREAM_VERSION})
                 checked_at=[0.0]
                 def active():
@@ -206,18 +240,13 @@ class KnowledgeWorker:
             ids={c.reference_id:c.evidence_id for c in citations}
             def fact(f):return dict(text=f.text,refs=f.refs,context=[c.model_dump() if hasattr(c,'model_dump') else c for c in f.context],claim_type=f.claim_type,support_review=f.support_review,evidence_ids=[ids[r] for r in f.refs])
             facts=[fact(f) for f in checked.conclusion];explanation=[fact(f) for f in checked.explanation]
-            def paragraph(f):
-                text=f.text
-                if f.claim_type=='inference':text='据这些内容可推断：'+text
-                # 条件字段仍需展示，不能为自然表达而遗漏模型显式给出的限制。
-                from app.rag_answer_contract import CONTEXT_LABELS
-                details=[CONTEXT_LABELS[c['kind'] if isinstance(c,dict) else c.kind]+'：'+(c['text'] if isinstance(c,dict) else c.text) for c in f.context if (c['text'] if isinstance(c,dict) else c.text) not in text]
-                return text+('（'+'；'.join(details)+'）' if details else '')+''.join(f'[{r}]' for r in sorted(f.refs))
-            answer='\n\n'.join(paragraph(f) for f in checked.conclusion+checked.explanation)
+            from app.rag_presentation import render_answer
+            answer=render_answer(checked)
             if checked.status=='insufficient_evidence':answer=INSUFFICIENT_EVIDENCE_TEXT
-            if checked.status=='clarification_needed':answer='需要补充一点信息：\n\n'+'\n'.join(checked.clarification_questions)+'\n\n'+answer
-            return dict(answer_id='kanswer-'+job['id'],answer=answer,status=checked.status,conclusion=facts,explanation=explanation,
+            return dict(answer_id='kanswer-'+job['id'],answer=answer,status=checked.status,conclusion=facts,explanation=explanation,presentation=checked.presentation,
                 citations=[dict(c.model_dump(),filename=names[c.document_id]) for c in citations],clarification_questions=checked.clarification_questions,
                 missing_points=checked.missing_points,answer_parts=checked.answer_parts,prompt_version=KNOWLEDGE_PROMPT_VERSION,
-                limitations=['只依据本轮入选资料作答，来源匹配不等于全部语义已自动认证']+(['上下文预算限制了入选证据范围'] if pack.truncated else []),
-                retrieval={'candidate_count':len(pack.candidates),'selected_count':len(items),'context_chars':pack.context_chars,'truncated':pack.truncated},route=route['code'],snapshot_id=payload['snapshot_id'])
+                limitations=['只依据本轮入选资料作答，来源匹配不等于全部语义已自动认证']+(['上下文预算限制了入选证据范围'] if pack.truncated else [])+
+                    ([f"有{pack.slot_hints['unfilled_count']}个证据需求未装入支持片段，不能据此声称问题已完整覆盖"] if pack.slot_hints.get('unfilled_count') else []),
+                retrieval={'candidate_count':len(pack.candidates),'selected_count':len(items),'context_chars':pack.context_chars,
+                    'truncated':pack.truncated,'slots':pack.slot_hints,'math_evidence':pack.math_hints,'coverage':diagnostics['coverage']},route=route['code'],snapshot_id=payload['snapshot_id'])

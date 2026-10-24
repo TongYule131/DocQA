@@ -5,17 +5,17 @@ export function installIntentTest() {
   const section=node('div'); section.id='intent-test-view'; section.hidden=true;
   document.getElementById('intent-tree-view').before(section);
   const panel=node('section','','panel'),form=node('form');
-  panel.append(node('h2','测试实际分流规则'),node('p','此处与文档／知识库会话使用同一分流器。不需要发布知识库；不会执行检索、模型或工具。','muted'));
+  panel.append(node('h2','测试查询计划与业务分流'),node('p','自动任务策略决定证据需求与装入预算；业务节点限定当前库内的交互、检索或已接入工具。此处只预览同一规划器，不执行检索、模型或工具。','muted'));
   const controls=node('div','','form-grid'),scope=node('select'),base=node('select');
   scope.id='test-scope';base.id='test-base';
   const option=(select,label,value)=>{const o=node('option',label);o.value=value;select.append(o);};
-  option(scope,'文档会话','document');option(scope,'知识库会话','knowledge');
+  option(scope,'知识库会话','knowledge');option(scope,'兼容文档入口','document');
   for(const [title,id,input] of [['使用入口','test-scope',scope],['关联知识库（可不选）','test-base',base]]) {
     const label=node('label',title);label.htmlFor=id;label.append(input);controls.append(label);
   }
   const label=node('label','测试问题（每行一条，最多100条）');label.htmlFor='intent-test-questions';
   const questions=node('textarea');questions.id='intent-test-questions';questions.rows=5;questions.maxLength=50000;
-  questions.value='你好呀\n谢谢，退款多久到账\n这份文档讲了什么';label.append(questions);
+  questions.value='这份文档讲了什么\n比较两种机制的适用条件\n核对公式与正文是否一致\n两组概念是否一一对应\n你好';label.append(questions);
   const submit=node('button','测试分流');submit.type='submit';
   const status=node('p','','muted');status.setAttribute('role','status');status.setAttribute('aria-live','polite');
   form.append(controls,label,submit,status);panel.append(form);section.append(panel);
@@ -31,18 +31,27 @@ export function installIntentTest() {
       const result=await api('/api/admin/intents/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({questions:batch,scope:scope.value,base_id:base.value||null})});
       output.replaceChildren(node('h2','分流结果'));
       const table=node('table'),head=node('thead'),header=node('tr');
-      for(const title of ['问题','实际路径','命中依据','候选节点','上次结果'])header.append(node('th',title));head.append(header);table.append(head);
+      for(const title of ['问题','业务路径','任务策略与证据需求','命中依据','候选节点','上次结果'])header.append(node('th',title));head.append(header);table.append(head);
       const body=node('tbody');let changed=0;
       for(const row of result.results){
         const d=row.decision,key=JSON.stringify([scope.value,base.value,row.question]),prior=previous.get(key);
-        if(prior&&prior!==d.code)changed++;
+        const signature=`${d.code} / ${row.query_plan?.task_type||'legacy'}`;
+        if(prior&&prior!==signature)changed++;
         const tr=node('tr');tr.append(node('td',row.question));
         const route=node('td');route.append(node('strong',d.name),node('p',`${d.kind} · ${d.code}`,'node-code'));
         if(row.response_preview)route.append(node('p',row.response_preview));
         if(row.top_k)route.append(node('small',`TopK ${row.top_k}`));
+        if(row.availability&&!row.availability.ready)route.append(node('p',row.availability.reason,'form-error'));
+        const strategy=node('td'),plan=row.query_plan,budget=row.retrieval_budget;
+        if(plan){
+          strategy.append(node('strong',plan.name));
+          plan.effects.forEach(effect=>strategy.append(node('p',effect,'muted-detail')));
+          if(plan.required_evidence.length)strategy.append(node('p',`证据需求：${plan.required_evidence.join('、')}`));
+          if(budget?.candidate_limit)strategy.append(node('small',`召回 ${budget.recall_limit} / 候选 ${budget.candidate_limit} / 最终最多 ${budget.context_limit} 块 · ${budget.context_chars} 字符硬上限`));
+        }
         const reason=node('td');reason.append(node('p',methods[d.method]||d.method),node('p',d.reason,'muted-detail'));
-        tr.append(route,reason,node('td',d.candidates.map(c=>`${c.name} · ${Math.round(c.score*100)}%`).join('；')||'无命中'),node('td',prior||'首次测试'));
-        body.append(tr);previous.set(key,d.code);
+        tr.append(route,strategy,reason,node('td',d.candidates.map(c=>`${c.name} · ${methods[c.method]||c.method}`).join('；')||'自动任务策略'),node('td',prior||'首次测试'));
+        body.append(tr);previous.set(key,signature);
       }
       table.append(body);const scroll=node('div','','table-scroll intent-test-table');scroll.append(table);output.append(scroll);
       const d=result.results[0]?.decision;

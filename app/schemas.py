@@ -7,7 +7,7 @@
 # 任何一组状态都不再用 documents.status 一个枚举表达。
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, model_serializer
 
 # 支持的输入格式：TXT 在本地解析，其余交给 Docling。
 DocumentFormat = Literal["txt", "md", "pdf", "docx", "xlsx"]
@@ -33,6 +33,26 @@ class Page(BaseModel):
     # 兼容旧的本地解析逻辑页；PDF 为物理页码，TXT 为逻辑页。
     number: int
     text: str
+
+
+class PdfPageLabel(BaseModel):
+    """页标签是地址元数据，不是正文数值或 OCR 正确性证明。"""
+    catalog_label: str | None = Field(default=None, max_length=32)
+    printed_label: str | None = Field(default=None, max_length=32)
+    footer_node_ref: str | None = None
+    status: Literal["catalog_only", "footer_observed", "corroborated", "conflict"]
+
+    @model_validator(mode="after")
+    def consistent(self):
+        if self.status == "catalog_only" and (not self.catalog_label or self.printed_label):
+            raise ValueError("invalid_catalog_page_label")
+        if self.status != "catalog_only" and (not self.printed_label or not self.footer_node_ref):
+            raise ValueError("missing_footer_page_label")
+        if self.status == "corroborated" and self.catalog_label != self.printed_label:
+            raise ValueError("page_labels_do_not_agree")
+        if self.status == "conflict" and (not self.catalog_label or self.catalog_label == self.printed_label):
+            raise ValueError("missing_page_label_conflict")
+        return self
 
 
 class SourceLocation(BaseModel):
@@ -64,11 +84,33 @@ class SourceLocation(BaseModel):
     char_start: int | None = None
     char_end: int | None = None
     note: str | None = None
+    pdf_page_label: PdfPageLabel | None = None
+
+    @model_serializer(mode="wrap")
+    def compatible_dump(self, handler):
+        # 旧来源缺此字段时必须逐字保持旧签名；不能让一次类型扩展使全部旧索引失效。
+        value = handler(self)
+        if self.pdf_page_label is None:
+            value.pop("pdf_page_label", None)
+        return value
+
+    @model_validator(mode="after")
+    def page_label_requires_pdf(self):
+        if self.pdf_page_label is not None and (self.format != "pdf" or not self.page or self.page_end not in {None, self.page}):
+            raise ValueError("page_label_requires_single_pdf_page")
+        return self
 
     def label(self) -> str:
         """生成面向页面的中文来源标签，明确单位，不编造页码。"""
         if self.format == "pdf":
             parts = [f"第 {self.page} 页" if self.page else "页码未知"]
+            if self.pdf_page_label:
+                mapping = self.pdf_page_label
+                parts = [f"PDF 第 {self.page} 页"]
+                if mapping.status in {"footer_observed", "corroborated"}:
+                    parts.append(f"印刷页码 {mapping.printed_label}（页脚提取，未核验OCR）")
+                elif mapping.status == "catalog_only":
+                    parts.append(f"PDF 标签 {mapping.catalog_label}（印刷页码未核对）")
             if self.bbox:
                 parts.append(
                     f"框 l={self.bbox.get('l')}, t={self.bbox.get('t')}, "
@@ -423,6 +465,7 @@ class RagAnswer(BaseModel):
     citations: list[RagCitation] = Field(default_factory=list)
     conclusion: list[RagFact] = Field(default_factory=list)
     explanation: list[RagFact] = Field(default_factory=list)
+    presentation: dict | None = None
     document_id: str
     index_id: str | None = None
     parse_version_id: str | None = None

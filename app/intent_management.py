@@ -78,7 +78,8 @@ class IntentManagement:
 
     def evaluate(self,question,base_id=None,scope='knowledge'):
         route,decision=decide(question,base_id,self.list(),scope)
-        return {'route':route,'decision':decision}
+        from app.query_planning import plan_query
+        return {'route':route,'decision':decision,'query_plan':plan_query(question,route)}
 
     def resolve(self,question,base_id,scope='knowledge'):
         return self.evaluate(question,base_id,scope)['route']

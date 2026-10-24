@@ -24,7 +24,16 @@ LEGACY_BODY = {"status": "answered", "conclusion": [{"text": "全书内容分为
     "explanation": [], "clarification_questions": [],
     "evidence_quotes": [{"ref": 1, "quote": "全书内容分为21个部分"}],
     "answer_parts":[{"part_id":"p1","state":"answered","fact_indices":[0],"missing_detail":""}]}
-REPLY = json.dumps(upgrade(LEGACY_BODY, {1: TEXT}), ensure_ascii=False)
+def current_protocol(raw):
+    """供应商桩显式输出当前协议；不修改生产解析器或负例的证据内容。"""
+    body=json.loads(raw) if isinstance(raw,str) else raw
+    if isinstance(body,dict) and set(body)=={'status','conclusion','explanation','clarification_questions','missing_points','answer_parts'}:
+        n=len(body['conclusion'])+len(body['explanation'])
+        body['presentation']={'blocks':[dict(role='evidence',kind='paragraph',fact_indices=list(range(i,min(i+8,n)))) for i in range(0,n,8)]}
+    return json.dumps(body,ensure_ascii=False)
+
+
+REPLY = current_protocol(upgrade(LEGACY_BODY, {1: TEXT}))
 
 
 class Embedding:
@@ -50,7 +59,9 @@ class Model:
     def generate(self, system, user):
         self.calls.append((system, user))
         if self.handler:
-            return self.handler(system, user)
+            raw=self.handler(system,user)
+            try:return current_protocol(raw)
+            except (ValueError,TypeError,KeyError):return raw
         return REPLY
 
 

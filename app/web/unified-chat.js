@@ -4,7 +4,7 @@ import {createAnswerStream} from './answer-stream.js';
 import {createUnifiedClient} from './unified-client.js';
 
 const api=createApiClient(),$=id=>document.getElementById(id),json=(method,body)=>({method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-const active=t=>['queued','running'].includes(t.status),labels={queued:'等待处理',running:'正在准备',parsing:'解析文档',indexing:'建立问答索引',review:'等待管理员审核',ready:'资料可用',failed:'准备失败',needs_attention:'需要确认',cancelled:'已停止',uploaded:'已保存原件',retrieving:'查找原文',generating:'生成回答',validating:'核对引用'};
+const active=t=>['queued','running'].includes(t.status),labels={queued:'等待处理',running:'正在准备',parsing:'解析文档',indexing:'建立问答索引',review:'等待管理员审核',ready:'资料可用',failed:'准备失败',needs_attention:'需要确认',cancelled:'已停止',uploaded:'已保存原件',retrieving:'查找原文',planning:'选择证据与组织回答',generating:'生成回答',validating:'核对引用'};
 // null表示全部可用资料；[]表示用户取消了全部勾选，两者不能共用空数组。
 let bases=[],historyItems=[],current=null,baseId=null,documentIds=null,jobs=[],busy=false,failures=0,timer=null,storagePrefix='',client=null,draftMemory=true,uploadRecord=null,rendered='';
 const streams={knowledge:createAnswerStream({source:'knowledge',changed:()=>renderTurns(),finished:()=>run(refresh)}),question:createAnswerStream({source:'question',changed:()=>renderTurns(),finished:()=>run(refresh)})};

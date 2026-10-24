@@ -124,6 +124,8 @@ class EvidencePack:
     review_policy: str | None = None
     continuation_pairs: list[dict] = field(default_factory=list)
     budget_profile: dict = field(default_factory=dict)
+    admission_groups: list[dict] = field(default_factory=list)
+    math_hints: dict = field(default_factory=dict)
 
     def item_by_ref(self, reference_id: int) -> EvidenceItem | None:
         for item in self.items:
@@ -268,7 +270,11 @@ def pack_evidence(candidates: list[EvidenceItem], *, context_max_chars: int,
     for identifier in ordered:
         candidate = by_id[identifier]
         if candidate in selected: continue
-        unit = [by_id[i] for i in (partners or {}).get(identifier, [identifier]) if i in by_id and by_id[i] not in selected]
+        required=(partners or {}).get(identifier,[identifier])
+        if any(i not in by_id for i in required):
+            drop_reasons.append(f"候选 chunk_id={candidate.chunk_id} 的关联证据缺少成员，已整组舍弃")
+            continue
+        unit = [by_id[i] for i in required if by_id[i] not in selected]
         if not unit: unit = [candidate]
         if max_items is not None and len(selected) + len(unit) > max_items:
             drop_reasons.append(f"候选 chunk_id={candidate.chunk_id} 超出证据块数上限，已舍弃")
@@ -352,7 +358,8 @@ def build_evidence(search_result: dict, settings: Settings, *,
 
     candidates, drop_reasons = build_candidates(raw_results, min_score=settings.rag_min_score)
     planned_order = search_result.get("evidence_order")
-    if isinstance(planned_order, list) and search_result.get("strategy") in {"hybrid-context-v1", "hybrid-context-v2", "hybrid-context-v3", "hybrid-context-v4", "hybrid-context-v5", "hybrid-context-v6"}:
+    from app.retrieval_planning import RETRIEVAL_STRATEGY_VERSION
+    if isinstance(planned_order, list) and search_result.get("strategy") in {"hybrid-context-v1", "hybrid-context-v2", "hybrid-context-v3", "hybrid-context-v4", "hybrid-context-v5", "hybrid-context-v6", "hybrid-context-v7", "hybrid-context-v8", RETRIEVAL_STRATEGY_VERSION}:
         # 融合排名和分问题上下文顺序仅来自服务端规划；原余弦分值仍用于可选阈值。
         positions = {chunk_id: i for i, chunk_id in enumerate(planned_order) if isinstance(chunk_id, str)}
         candidates.sort(key=lambda item: positions.get(item.chunk_id, len(positions)))
@@ -370,15 +377,30 @@ def build_evidence(search_result: dict, settings: Settings, *,
         return EvidenceBuildResult(pack=pack, warnings=[], limitations=[],
                                    fatal_reason=fatal_reason)
 
+    math_plan=(search_result.get('planning') or {}).get('math_evidence',{}) if search_result.get('strategy') in {'hybrid-context-v8',RETRIEVAL_STRATEGY_VERSION} else {}
+    groups=math_plan.get('groups',[])
+    blocked=set(math_plan.get('blocked_chunk_ids',[]))
+    if blocked:
+        candidates=[i for i in candidates if i.chunk_id not in blocked]
+        drop_reasons.extend(f'候选 chunk_id={identifier} 的数学表示不可读，未用于本轮公式核对' for identifier in sorted(blocked))
+
     configured_cap = settings.rag_context_max_chars if context_max_chars is None else context_max_chars
     max_chars = configured_cap if context_cap is None else min(configured_cap, context_cap)
     max_chars = max(max_chars, 0)
     profile, pairs, partners = {}, [], {}
+    slots = (search_result.get('planning') or {}).get('evidence_slots', []) if search_result.get('strategy') in {'hybrid-context-v4','hybrid-context-v5','hybrid-context-v6','hybrid-context-v7','hybrid-context-v8',RETRIEVAL_STRATEGY_VERSION} else []
     if extractive_question is not None:
         from app.rag_extract_context import budget_profile, plan_admission
+        from app.rag_math_evidence import required_ranges
+        from app.rag_slot_ranges import required_slot_ranges
+        forced=required_slot_ranges(slots,candidates)
+        for identifier,ranges in required_ranges(math_plan).items():forced.setdefault(identifier,[]).extend(ranges)
         profile = budget_profile(extractive_question, max_items=max_items or settings.rag_context_k, context_chars=max_chars)
-        pairs, partners = plan_admission(candidates, extractive_question, profile)
+        pairs, partners = plan_admission(candidates, extractive_question, profile, required_ranges=forced)
         max_items = profile['max_items']
+    if groups:
+        from app.rag_math_evidence import admission_partners
+        partners=admission_partners([i.chunk_id for i in candidates],pairs,groups)
 
     def serialize(items: list[EvidenceItem]) -> str:
         if extractive_question is not None:
@@ -388,7 +410,6 @@ def build_evidence(search_result: dict, settings: Settings, *,
         return json.dumps(payload_transform(entries) if payload_transform else entries,
                           ensure_ascii=False, separators=(",", ":"))
 
-    slots = (search_result.get('planning') or {}).get('evidence_slots', []) if search_result.get('strategy') in {'hybrid-context-v4','hybrid-context-v5','hybrid-context-v6'} else []
     selected, truncated, context_chars, budget_reasons = pack_evidence(
         candidates, context_max_chars=max_chars, serialize=serialize,
         max_items=settings.rag_context_k if max_items is None else max_items, slots=slots, partners=partners)
@@ -460,7 +481,13 @@ def build_evidence(search_result: dict, settings: Settings, *,
         pack.budget_profile=profile
     if slots:
         from app.rag_evidence_slots import slot_hints
-        pack.slot_hints = slot_hints(slots, {item.chunk_id for item in selected})
+        from app.rag_slot_ranges import visible_ranges
+        pack.slot_hints = slot_hints(slots, {item.chunk_id for item in selected},visible_ranges(selected))
+    if math_plan:
+        from app.rag_math_evidence import group_hints
+        pack.admission_groups=groups
+        pack.math_hints=group_hints(groups,{i.chunk_id for i in candidates},{i.chunk_id for i in selected})
+        pack.math_hints.update(blocked_count=len(blocked),unlinked_formula_count=math_plan.get('unlinked_formula_count',0))
 
     warnings = _relevant_warnings(version_warnings or [], selected)
     limitations: list[str] = []

@@ -4,7 +4,7 @@ import json
 from app.rag_answer_contract import ANSWER_CONTRACT_VERSION, question_parts, validate_task_output
 from app.rag_validation import ModelOutputError, _reject_duplicate_keys, validate_user_condition_boundary
 
-STREAM_VERSION = 'validated-fact-stream-v1'
+STREAM_VERSION = 'validated-fact-stream-v2'
 MAX_STREAM_CHARS = 262144
 
 
@@ -13,6 +13,7 @@ class FactStreamParser:
     def __init__(self, completed):
         self.completed=completed;self.buffer='';self.position=0;self.state='start'
         self.key=None;self.keys=set();self.ordinal=0
+        self.presentation=None;self.counts={'conclusion':0,'explanation':0};self.finished_categories=set()
         self.decoder=json.JSONDecoder(object_pairs_hook=_reject_duplicate_keys)
 
     def feed(self, text):
@@ -45,27 +46,38 @@ class FactStreamParser:
                     if char!='[':return
                     self.position+=1;self.ordinal=0;self.state='item'
                 else:
-                    try:_,end=self.decoder.raw_decode(self.buffer,self.position)
+                    try:value,end=self.decoder.raw_decode(self.buffer,self.position)
                     except json.JSONDecodeError:return
+                    if self.key=='presentation':
+                        from app.rag_presentation import validate_presentation
+                        self.presentation=validate_presentation(value,[None]*20,complete=False)
                     self.position=end;self.state='separator'
             elif self.state=='item':
-                if char==']':self.position+=1;self.state='separator';continue
+                if char==']':self.finished_categories.add(self.key);self.position+=1;self.state='separator';continue
                 start=self.position
                 try:value,end=self.decoder.raw_decode(self.buffer,start)
                 except json.JSONDecodeError:return
                 if not isinstance(value,dict):raise ModelOutputError('invalid_stream_fact')
                 if self.ordinal>=20:raise ModelOutputError('too_many_facts')
                 self.completed(self.key,self.ordinal,value)
+                self.counts[self.key]+=1
                 self.ordinal+=1;self.position=end;self.state='item_separator'
             elif self.state=='item_separator':
                 if char==',':self.position+=1;self.state='item'
-                elif char==']':self.position+=1;self.state='separator'
+                elif char==']':self.finished_categories.add(self.key);self.position+=1;self.state='separator'
                 else:return
             elif self.state=='separator':
                 if char==',':self.position+=1;self.state='key'
                 elif char=='}':self.state='done';return
                 else:return
             else:return
+
+    def presentation_block(self,category,ordinal):
+        if self.presentation is None or (category=='explanation' and 'conclusion' not in self.finished_categories):return None
+        index=ordinal+(self.counts['conclusion'] if category=='explanation' else 0)
+        for n,block in enumerate(self.presentation['blocks']):
+            if index in block['fact_indices']:return dict(index=n,kind=block['kind'])
+        return None
 
 
 def checked_block(category,ordinal,fact,pack,question,rag,filenames=None):
@@ -79,6 +91,8 @@ def checked_block(category,ordinal,fact,pack,question,rag,filenames=None):
     payload=dict(status='answered' if complete else 'partial',conclusion=[],explanation=[],
                  clarification_questions=[],missing_points=[] if complete else gaps,answer_parts=coverage)
     payload[category]=[fact]
+    # 流式块只核验单句；最终presentation及其完整覆盖另行严格校验。
+    payload['presentation']={'blocks':[dict(role='evidence',kind='paragraph',fact_indices=[0])]}
     checked=validate_task_output(json.dumps(payload,ensure_ascii=False),pack,question=question,contract_version=ANSWER_CONTRACT_VERSION)
     validate_user_condition_boundary(checked,pack,question=question)
     from app.rag_support_review import review_claims

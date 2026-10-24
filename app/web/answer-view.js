@@ -6,7 +6,15 @@ export function node(tag, text = '', className = '') {
   return item;
 }
 export function locationText(source) {
-  if (source.format === 'pdf') return source.page ? `第 ${source.page} 页` : 'PDF 页码未提供';
+  if (source.format === 'pdf') {
+    if (!source.page) return 'PDF 页码未提供';
+    const mapping=source.pdf_page_label;
+    if (!mapping) return `第 ${source.page} 页`;
+    const physical=`PDF 第 ${source.page} 页`;
+    if (['footer_observed','corroborated'].includes(mapping.status) && mapping.printed_label) return `${physical} · 印刷页码 ${mapping.printed_label}（页脚提取）`;
+    if (mapping.status==='catalog_only' && mapping.catalog_label) return `${physical} · PDF 标签 ${mapping.catalog_label}（印刷页码未核对）`;
+    return physical;
+  }
   if (source.format === 'xlsx') return [source.sheet_name && `工作表 ${source.sheet_name}`, source.cell_range].filter(Boolean).join(' · ') || '工作表位置未提供';
   if (source.format === 'docx') return [source.section_path, source.table_no && `表格 ${source.table_no}`, 'DOCX 无真实页码'].filter(Boolean).join(' · ');
   return [source.page && `逻辑页 ${source.page}`, source.line_start && `第 ${source.line_start}–${source.line_end || source.line_start} 行`].filter(Boolean).join(' · ') || '位置有限';

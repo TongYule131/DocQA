@@ -5,7 +5,7 @@ import { createAnswerStream } from './answer-stream.js';
 const api = createApiClient(), $ = id => document.getElementById(id);
 const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 const active = job => ['queued', 'running'].includes(job.status);
-const labels = { queued: '等待处理', routing: '识别问题类型', retrieving: '查找知识库资料', generating: '生成回答', validating: '核对原文引用', done: '已完成' };
+const labels = { queued: '等待处理', routing: '识别问题类型', retrieving: '查找知识库资料', planning: '选择证据与组织回答', generating: '生成回答', validating: '核对原文引用', done: '已完成' };
 let bases = [], historyItems = [], current = null, selectedBase = null, busy = false, pending = null, timer = null, failures = 0, rev = 0, storageKey = '', selectedKey = '', rendered = '', draftMemoryEnabled = true;
 const stream=createAnswerStream({source:'knowledge',changed:()=>{rendered='';render();},finished:()=>perform(refresh)});
 function notice(text) { $('chat-notice').textContent = text; }
