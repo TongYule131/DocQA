@@ -23,6 +23,27 @@ def test_incremental_facts_never_expose_partial_strings_or_objects():
     with pytest.raises(ModelOutputError):FactStreamParser(lambda *a:None).feed('{"x":1,"x":2}')
 
 
+def test_causal_supporting_fact_streams_locally_but_cannot_impersonate_complete_opening():
+    from app.answer_stream import checked_block
+    from app.rag import RagService
+    from app.rag_answer_contract import validate_task_output
+    from app.rag_composition import refine_pack
+    from tests.test_rag_composition import pack
+    evidence=refine_pack(pack('参与者报告使用方便。研究没有对照组。'))
+    question='这些反馈是否已经证明能力提高？'
+    fact=dict(text='研究没有对照组。',context=[],claim_type='direct',
+              evidence=[dict(ref=1,unit=2)],part_ids=['p1'])
+    class LocalRag:
+        def _citations(self,*args):return RagService._citations(None,*args)
+    block=checked_block('explanation',0,fact,evidence,question,LocalRag())
+    assert block['draft'] and block['validation_scope']=='single_fact'
+    body=dict(status='answered',conclusion=[fact],explanation=[],clarification_questions=[],missing_points=[],
+        answer_parts=[dict(part_id='p1',state='answered',missing_detail='')],
+        presentation={'blocks':[dict(role='conclusion',kind='paragraph',fact_indices=[0])]})
+    with pytest.raises(ModelOutputError,match='composition_comparison_unpaired'):
+        validate_task_output(json.dumps(body),evidence,question=question,contract_version='fact-context-parts-v8')
+
+
 def test_document_stream_persists_a_valid_block_before_generation_finishes(tmp_path):
     env=question_fixture(tmp_path);store=AnswerStreamStore(env.repository);early=[]
     class StreamModel:

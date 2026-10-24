@@ -82,7 +82,7 @@ def _without_known_section_locators(value,evidence,section_headings=None):
 
 
 # 旧离线调用默认按原v3读取；生产必须显式传入任务冻结的协议版本，禁止失败后降级。
-def validate_task_output(raw, evidence, *, question, contract_version="fact-context-parts-v3", _claim_sources=None,_section_headings=None):
+def validate_task_output(raw, evidence, *, question, contract_version="fact-context-parts-v3", _claim_sources=None,_section_headings=None,_whole_answer=True):
     if not isinstance(contract_version, str) or contract_version not in SUPPORTED_CONTRACT_VERSIONS:
         _fail("unsupported_contract_version")
     if contract_version == ANSWER_CONTRACT_VERSION:
@@ -95,7 +95,7 @@ def validate_task_output(raw, evidence, *, question, contract_version="fact-cont
         from app.rag_answer_strategy import presentation_policy
         output.presentation=validate_presentation(presentation,output.conclusion+output.explanation,**presentation_policy(question))
         from app.rag_composition import validate_causal_opening
-        if presentation['blocks']:
+        if _whole_answer and presentation['blocks']:
             first=presentation['blocks'][0]['fact_indices'][0]
             validate_causal_opening((payload['conclusion']+payload['explanation'])[first],evidence,question)
         return output

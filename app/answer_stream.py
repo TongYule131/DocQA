@@ -90,10 +90,11 @@ def checked_block(category,ordinal,fact,pack,question,rag,filenames=None):
     gaps=[p['missing_detail'] for p in coverage if p['missing_detail']]
     payload=dict(status='answered' if complete else 'partial',conclusion=[],explanation=[],
                  clarification_questions=[],missing_points=[] if complete else gaps,answer_parts=coverage)
-    payload[category]=[fact]
+    # 局部校验只有这一条事实；占位结论满足复用校验器的结构，外部category仍保留原值。
+    payload['conclusion']=[fact]
     # 流式块只核验单句；最终presentation及其完整覆盖另行严格校验。
     payload['presentation']={'blocks':[dict(role='evidence',kind='paragraph',fact_indices=[0])]}
-    checked=validate_task_output(json.dumps(payload,ensure_ascii=False),pack,question=question,contract_version=ANSWER_CONTRACT_VERSION)
+    checked=validate_task_output(json.dumps(payload,ensure_ascii=False),pack,question=question,contract_version=ANSWER_CONTRACT_VERSION,_whole_answer=False)
     validate_user_condition_boundary(checked,pack,question=question)
     from app.rag_support_review import review_claims
     review_claims(checked,pack)
