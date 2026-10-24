@@ -49,4 +49,5 @@ def retrieval_question(question, memory):
     return question + '\n用户会话上下文（不是证据）：\n' + '\n'.join(
         [memory['notes'], *memory['recent_questions'],
          *[e['name'] for e in memory.get('entity_context',{}).get('entities',[])],
+         *memory.get('entity_context',{}).get('comparison_objects',[]),
          (memory.get('entity_context',{}).get('summary') or {}).get('text','')]) if memory else question

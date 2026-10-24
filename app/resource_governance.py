@@ -29,6 +29,10 @@ def task_owner(method):
     @wraps(method)
     def invoke(self, job, *args, **kwargs):
         owner = job.get('owner_user_id') if isinstance(job, dict) else None
+        if not isinstance(job,dict) and hasattr(job,'id'):
+            with self.repository.connect() as db:
+                row=db.execute('SELECT owner_user_id FROM analysis_jobs WHERE id=?',(job.id,)).fetchone()
+                owner=row[0] if row else None
         with owner_scope(owner):
             return method(self, job, *args, **kwargs)
     return invoke
@@ -48,7 +52,7 @@ def jobs(db):
         status,created_at,lease_expires_at,cancel_requested FROM kb_tasks WHERE status IN ('queued','running')
         UNION ALL SELECT 'question_jobs',id,COALESCE(owner_user_id,'local'),status,created_at,lease_expires_at,cancel_requested
         FROM question_jobs WHERE status IN ('queued','running')
-        UNION ALL SELECT 'analysis_jobs',id,'local',status,created_at,lease_expires_at,cancel_requested
+        UNION ALL SELECT 'analysis_jobs',id,COALESCE(owner_user_id,'local'),status,created_at,lease_expires_at,cancel_requested
         FROM analysis_jobs WHERE status IN ('queued','running')
         UNION ALL SELECT 'chat_submissions',id,COALESCE(owner_user_id,'local'),'queued',created_at,NULL,0
         FROM chat_submissions WHERE status='waiting'""")]

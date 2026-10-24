@@ -15,6 +15,7 @@
 5. **失败不丢旧结果**。发布只在全部必需步骤完成后进行；失败或取消时旧结果继续可读。
 """
 from __future__ import annotations
+from app.resource_governance import task_owner
 
 import argparse
 import logging
@@ -174,6 +175,7 @@ class AnalysisWorker:
     # ------------------------------------------------------------------
     # 单任务处理
     # ------------------------------------------------------------------
+    @task_owner
     def _process_job(self, job: AnalysisJob) -> None:
         token = job.lease_token or ""
         self._active_plan = None

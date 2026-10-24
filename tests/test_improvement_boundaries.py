@@ -22,6 +22,52 @@ from tests.test_product_access import team,publish
 from tests.test_question_jobs import QUESTION
 
 
+def test_full_conversation_retains_early_comparison_entities(tmp_path):
+    env,access,base=library(tmp_path);service=KnowledgeQuestions(access,env.rag);conv=service.create(base['id'],'long')
+    from app.entity_memory import context
+    from app.repository import now_iso
+    with env.repository.connect() as db:
+        for number in range(1,101):
+            question='比较“早期甲”与“早期乙”的条件' if number==1 else '继续解释它们的适用条件'
+            payload={'question':question,'memory_epoch':0,'route':{'kind':'KB'}};identifier='history-'+str(number)
+            db.execute("INSERT INTO kb_tasks(id,kind,base_id,owner_user_id,request_key,input_json,input_hash,max_requests,created_at,updated_at,status) VALUES (?,'question',?,?,?,?,?,8,?,?,'succeeded')",
+                (identifier,base['id'],None,'synthetic-'+str(number),json.dumps(payload),fingerprint(payload),now_iso(),now_iso()))
+            db.execute('INSERT INTO kb_conversation_turns VALUES (?,?,?)',(conv['id'],number,identifier))
+        result=context(db,conv,env.settings)
+    assert [e['name'] for e in result['entities']]==['早期甲','早期乙']
+    assert result['comparison_objects']==['早期甲','早期乙']
+    assert all(e['source_turn']==1 for e in result['entities'])
+
+
+def test_analysis_quota_and_provider_scope_follow_submitting_admin(tmp_path):
+    from app.analysis_jobs import AnalysisJobService
+    from app.repository import Repository
+    from app.product_access import ProductAccess,actor_context
+    from app.resource_governance import task_owner,CALL_OWNER
+    from app.schemas import AnalysisJobRequest
+    from tests.test_analysis import fixture_settings,seed_document
+    settings=fixture_settings(tmp_path,deepseek_api_key='synthetic-only',active_global_limit=2,queue_user_limit=1)
+    repository=Repository(tmp_path/'docqa.db');document,_=seed_document(repository)
+    access=ProductAccess(repository,settings,None)
+    users=[access.create_user('admin-'+str(i),'管理员','Synthetic-password-2026','admin') for i in range(2)]
+    service=AnalysisJobService(settings,repository);created=[]
+    for user,kind in zip(users,('extraction','summary')):
+        token=actor_context.set(user)
+        try:
+            response,_=service.submit(document,kind,AnalysisJobRequest(idempotency_key='analysis-'+kind))
+            created.append(response.job)
+        finally:actor_context.reset(token)
+    claimed=[repository.claim_next_analysis_job('worker-'+str(i),30,job_id=job.id) for i,job in enumerate(created)]
+    assert all(claimed),'两个管理员不能因共用local配额桶互相阻塞'
+    class Probe:
+        def __init__(self):self.repository=repository
+        @task_owner
+        def inspect(self,job):return CALL_OWNER.get()
+    assert [Probe().inspect(job) for job in claimed]==[user['id'] for user in users]
+    with repository.connect() as db:
+        assert {r[0] for r in db.execute('SELECT owner_user_id FROM analysis_jobs')}=={user['id'] for user in users}
+
+
 def test_customer_feedback_consent_admin_projection_and_revoke_after_scope_revocation(team):
     env,users,clients=team;base=publish(clients,users);alice=clients['alice'];admin=clients['admin'];bob=clients['bob']
     job=alice.post('/api/documents/qdoc/question-jobs',json={'question':QUESTION,'idempotency_key':'feedback-job'}).json()['job']

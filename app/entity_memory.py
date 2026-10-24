@@ -1,7 +1,7 @@
 """会话实体的当前 epoch 可编辑投影；清除／停用后不回读历史实体。"""
 import json
 from fastapi import HTTPException
-from app.query_understanding import build_memory, ENTITY_VERSION
+from app.query_understanding import build_memory, ENTITY_VERSION, MEMORY_TURN_LIMIT
 from app.repository import now_iso
 
 
@@ -20,8 +20,8 @@ def context(db, conv, settings):
     history = [{'turn': r['turn_no'], 'question': json.loads(r['input_json'])['question'][:600]}
                for r in db.execute("SELECT t.turn_no,j.input_json FROM kb_conversation_turns t JOIN kb_tasks j ON j.id=t.task_id "
                    "WHERE t.conversation_id=? AND j.status='succeeded' AND json_extract(j.input_json,'$.memory_epoch')=? "
-                   "AND json_extract(j.input_json,'$.route.kind')!='SYSTEM' ORDER BY t.turn_no DESC LIMIT 30",
-                   (conv['id'], conv['memory_epoch']))][::-1]
+                   "AND json_extract(j.input_json,'$.route.kind')!='SYSTEM' ORDER BY t.turn_no DESC LIMIT ?",
+                   (conv['id'], conv['memory_epoch'],MEMORY_TURN_LIMIT))][::-1]
     row = db.execute('SELECT * FROM conversation_entity_memory WHERE conversation_id=? AND epoch=?',
                      (conv['id'], conv['memory_epoch'])).fetchone()
     edited = validate_entities(json.loads(row['entities_json'])) if row else None

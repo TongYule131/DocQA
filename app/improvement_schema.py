@@ -1,5 +1,6 @@
 """S3～S5 的持久状态；不改写历史回答、引用或调用账本。"""
 TABLES = """
+ALTER TABLE analysis_jobs ADD COLUMN owner_user_id TEXT REFERENCES product_users(id);
 CREATE TABLE conversation_entity_memory (
  conversation_id TEXT NOT NULL, epoch INTEGER NOT NULL,
  version TEXT NOT NULL, entities_json TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,

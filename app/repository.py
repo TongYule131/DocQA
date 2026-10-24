@@ -1121,7 +1121,10 @@ class Repository:
                                (job.document_id, job.idempotency_key, active["id"], request_fingerprint))
                 return self._analysis_job_from_row(active), False
             from app.resource_governance import admit
-            admit(db,self,None)
+            from app.product_access import actor_context
+            actor=actor_context.get()
+            owner=actor['id'] if actor else None
+            admit(db,self,owner)
             db.execute(
                 f"""INSERT INTO analysis_jobs ({self._ANALYSIS_JOB_COLUMNS})
                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",                (job.id, job.document_id, job.parse_version_id, job.kind, job.status, job.stage,
@@ -1133,6 +1136,7 @@ class Repository:
                  json.dumps(job.limitations, ensure_ascii=False),
                  job.error_code, job.error_message, job.created_at, job.updated_at,
                  job.started_at, job.finished_at))
+            db.execute('UPDATE analysis_jobs SET owner_user_id=? WHERE id=?',(owner,job.id))
             if job.idempotency_key:
                 db.execute("INSERT INTO analysis_request_keys VALUES (?,?,?,?)",
                            (job.document_id, job.idempotency_key, job.id, request_fingerprint))

@@ -6,6 +6,7 @@ from hashlib import sha256
 UNDERSTANDING_VERSION = 'query-understanding-v1'
 ENTITY_VERSION = 'user-entity-memory-v1'
 SUMMARY_VERSION = 'user-clue-summary-v1'
+MEMORY_TURN_LIMIT = 100  # 与会话100轮上限一致；不把实体记忆退化为最近问题窗口。
 DEFAULT_TERMS = {'AI': '人工智能', '人工智能': 'AI', 'RAG': '检索增强生成', '检索增强生成': 'RAG'}
 
 
@@ -33,6 +34,7 @@ def policy(settings):
             'summary_version': SUMMARY_VERSION, 'terms': term_mapping(settings),
             'model_planner_enabled': getattr(settings, 'query_planner_enabled', False),
             'summary_enabled': getattr(settings, 'memory_summary_enabled', False),
+            'memory_turn_limit':MEMORY_TURN_LIMIT,
             'reranker_replay_path': replay,'reranker_replay_hash':replay_hash}
 
 
@@ -51,7 +53,7 @@ def build_memory(history, *, notes='', edited=None, summary_enabled=False):
     # 显式纠正／撤销形成摘要边界，不继续携带已失效的旧条件。
     corrections=[i for i,t in enumerate(history) if re.search(r'更正|纠正|撤销|作废|改为|不是.+而是',t['question'])]
     if corrections:history=history[corrections[-1]:]
-    for turn in history[-30:]:
+    for turn in history[-MEMORY_TURN_LIMIT:]:
         for name in entities(turn['question']):
             selected = [e for e in selected if e['name'] != name]
             selected.append({'name': name, 'source_turn': turn['turn'], 'source': 'user_question'})
