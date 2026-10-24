@@ -24,9 +24,21 @@ def context(db, conv, settings):
                    (conv['id'], conv['memory_epoch'],MEMORY_TURN_LIMIT))][::-1]
     row = db.execute('SELECT * FROM conversation_entity_memory WHERE conversation_id=? AND epoch=?',
                      (conv['id'], conv['memory_epoch'])).fetchone()
-    edited = validate_entities(json.loads(row['entities_json'])) if row else None
+    saved=json.loads(row['entities_json']) if row else None
+    seed=saved if isinstance(saved,dict) and saved.get('kind')=='bridge_seed' else None
+    edited = validate_entities(saved) if row and seed is None else None
     result = build_memory(history, notes=conv['memory_notes'], edited=edited,
                           summary_enabled=settings.memory_summary_enabled)
+    if seed:
+        import re
+        prior=validate_entities(seed['entities'])
+        # 旧会话只贡献有来源的用户线索；后续更正会使桥接线索失效。
+        if not any(re.search(r'更正|纠正|撤销|作废|改为|不是.+而是',t['question']) for t in history):
+            merged={e['name']:e for e in prior}
+            for entity in result['entities']:merged[entity['name']]=entity
+            result['entities']=list(merged.values())[-12:]
+            if not result['comparison_objects']:
+                result['comparison_objects']=seed.get('comparison_objects',[])[:2]
     result['revision'] = row['revision'] if row else 0
     result['epoch'] = conv['memory_epoch']
     return result

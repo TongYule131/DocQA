@@ -138,6 +138,8 @@ class KnowledgeWorker:
         if budget<1000:raise TaskStopped('input_budget_exceeded','问题、记忆与系统规则超过输入预算，未发起外部请求')
         original_index=DocumentIndex(self.repository,self.embedding)
         search_question=payload.get('retrieval_question',payload['question'])
+        # 可选规划也是收费调用，必须先确认所有冻结来源仍有效。
+        for doc in payload['documents']:original_index.verify_snapshot(doc['document_id'],doc['snapshot'])
         if self.settings.query_planner_enabled:
             from app.query_understanding import planner_messages,validate_plan
             context=payload.get('conversation_context',{}).get('entity_context',{})
@@ -157,7 +159,6 @@ class KnowledgeWorker:
                     db.execute('INSERT OR IGNORE INTO kb_task_checkpoints VALUES (?,?,?,?)',
                         (job['id'],'query_understanding',dump(extra),__import__('app.repository',fromlist=['now_iso']).now_iso()))
             search_question+='\n检索子问：'+'；'.join(extra['search_terms']+extra['subquestions'])
-        for doc in payload['documents']:original_index.verify_snapshot(doc['document_id'],doc['snapshot'])
         self.tasks.stage(job['id'],job['lease_token'],'retrieving')
         with self.tasks.span(job,'查询向量','EMBEDDING',parent):
             def query():

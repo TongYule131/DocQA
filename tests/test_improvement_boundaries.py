@@ -68,6 +68,39 @@ def test_analysis_quota_and_provider_scope_follow_submitting_admin(tmp_path):
         assert {r[0] for r in db.execute('SELECT owner_user_id FROM analysis_jobs')}=={user['id'] for user in users}
 
 
+def test_legacy_bridge_keeps_user_entities_with_original_conversation_provenance(tmp_path,monkeypatch):
+    from tests.test_unified_knowledge import context as fixture
+    from app.query_understanding import build_memory
+    from app.conversation_memory import MEMORY_VERSION
+    env,access,base,questions,chat=fixture(tmp_path)
+    access.bind_document(base['id'],'qdoc');access.publish(base['id'],0)
+    old=chat.legacy.create('qdoc','legacy')
+    memory={'version':MEMORY_VERSION,'notes':'用户条件','recent_questions':['最近一问'],
+            'entity_context':build_memory([{'turn':1,'question':'比较“历史甲”与“历史乙”的差异'}])}
+    monkeypatch.setattr(chat.legacy,'memory',lambda original:{'context':memory})
+    identifier=chat.bridge('d:'+old['id']);detail=questions.detail(identifier)
+    assert [e['name'] for e in detail['entity_memory']['entities']]==['历史甲','历史乙']
+    assert all(e['source_turn'].startswith('d:'+old['id']+':turn:') for e in detail['entity_memory']['entities'])
+    questions.memory(identifier,False,True)
+    assert questions.detail(identifier)['entity_memory']['entities']==[]
+    assert not env.model.calls
+
+
+def test_optional_paid_planner_does_not_run_when_frozen_source_is_invalid(tmp_path):
+    env,access,base=library(tmp_path);settings=replace(env.settings,query_planner_enabled=True)
+    access.settings=settings;env.rag.settings=settings
+    service=KnowledgeQuestions(access,env.rag);conv=service.create(base['id'],'preflight')
+    task=service.submit(conv['id'],'退货条件','q')
+    with env.repository.connect() as db:
+        db.execute("UPDATE embedding_indexes SET source_signature='changed' WHERE document_id='policy'")
+    from app.knowledge_worker import KnowledgeWorker
+    from tests.test_question_jobs import LocalRuntime
+    worker=KnowledgeWorker(settings,env.repository,LocalRuntime(),embedding=env.embedding,model=env.model)
+    assert worker.run_once(task['id'])
+    assert service.tasks.row(task['id'])['status']=='failed'
+    assert not env.model.calls and not env.embedding.calls
+
+
 def test_customer_feedback_consent_admin_projection_and_revoke_after_scope_revocation(team):
     env,users,clients=team;base=publish(clients,users);alice=clients['alice'];admin=clients['admin'];bob=clients['bob']
     job=alice.post('/api/documents/qdoc/question-jobs',json={'question':QUESTION,'idempotency_key':'feedback-job'}).json()['job']
@@ -114,6 +147,13 @@ def test_daily_quota_and_active_http_permits_cover_all_provider_roles(tmp_path):
             with owner_scope('user-b'):
                 with pytest.raises(Error,match='并发'):
                     with provider_guard(settings,'deepseek',Error):pytest.fail('HTTP forbidden')
+    # 全局仍有空位时，同一用户的生成与索引也不能绕过默认用户并发1。
+    settings=replace(env.settings,active_global_limit=2)
+    with owner_scope('same-owner'):
+        with provider_guard(settings,'deepseek',Error):
+            with pytest.raises(Error,match='并发') as refused:
+                with provider_guard(settings,'embedding',Error):pytest.fail('same-user HTTP forbidden')
+            assert refused.value.not_sent
 
 
 def test_user_fairness_uses_last_started_not_only_oldest_task(tmp_path):
@@ -143,6 +183,7 @@ def test_v15_failure_rolls_back_and_retry_preserves_v14_rows(tmp_path):
         finally:migrations.MigrationHook.clear()
         assert migrations.detect_version(db)==14
         assert {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}==tables
+        assert migrations.validate_schema(db,version=14)==14
         assert migrations.run_migrations(db)['applied']==[15]
         assert migrations.run_migrations(db)['applied']==[]
         assert db.execute('PRAGMA foreign_key_check').fetchone() is None

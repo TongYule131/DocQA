@@ -223,13 +223,20 @@ def test_v4_migration_backfills_keys_without_changing_jobs(tmp_path):
     from app import migrations
     _, repo, _, _, job = setup_job(tmp_path)
     with repo.connect() as db:
-        before = [tuple(row) for row in db.execute("SELECT * FROM analysis_jobs")]
+        legacy_columns=[row[1] for row in db.execute('PRAGMA table_info(analysis_jobs)') if row[1]!='owner_user_id']
+        projection=','.join('"'+column+'"' for column in legacy_columns)
+        before = [tuple(row) for row in db.execute('SELECT '+projection+' FROM analysis_jobs')]
         # 形成真实v3夹具：不能保留后续问答结构却只删除迁移登记来伪造旧库。
+        for table in ('feedback_events','answer_feedback','conversation_entity_memory',
+                      'provider_guard_calls','provider_circuits','dispatch_fairness'):
+            db.execute(f'DROP TABLE {table}')
+        db.execute('ALTER TABLE analysis_jobs DROP COLUMN owner_user_id')
         for table in ("question_results", "question_stage_events", "question_checkpoints",
                       "question_calls", "question_attempts", "question_request_keys", "question_jobs"):
             db.execute(f"DROP TABLE {table}")
         db.execute("DROP TABLE analysis_request_keys")
         db.execute("DELETE FROM schema_migrations WHERE version>=4")
+        migrations.validate_schema(db,version=3)
     def fail_migration():
         raise RuntimeError("合成 v4 迁移故障")
     migrations.MigrationHook.register(4, fail_migration)
@@ -240,11 +247,12 @@ def test_v4_migration_backfills_keys_without_changing_jobs(tmp_path):
         migrations.MigrationHook.clear()
     with repo.connect() as db:
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='analysis_request_keys'").fetchone() is None
-        assert before == [tuple(row) for row in db.execute("SELECT * FROM analysis_jobs")]
+        assert before == [tuple(row) for row in db.execute('SELECT '+projection+' FROM analysis_jobs')]
     migration = repo.initialize()
     assert migration["applied"] == list(range(4, migrations.SCHEMA_VERSION + 1)) and migration["backup"]
     with repo.connect() as db:
-        assert before == [tuple(row) for row in db.execute("SELECT * FROM analysis_jobs")]
+        assert before == [tuple(row) for row in db.execute('SELECT '+projection+' FROM analysis_jobs')]
+        assert all(row[0] is None for row in db.execute('SELECT owner_user_id FROM analysis_jobs'))
     assert repo.find_analysis_job_by_idempotency("doc-1", "review-fixed-key").id == job.id
 
 

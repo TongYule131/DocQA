@@ -560,7 +560,8 @@ def test_failed_new_index_keeps_old_index_answerable(tmp_path, gateway):
 
 def test_index_switch_during_generation_stays_on_snapshot(tmp_path, gateway):
     """生成期间活动索引切换：本次答案仍全为 A，提示索引变化，下一请求使用 B。"""
-    for client, _ in indexed_client(tmp_path, gateway):
+    # 本例明确容许同一用户的生成与索引HTTP重叠；默认限额1的拒绝行为另测。
+    for client, _ in indexed_client(tmp_path, gateway, active_user_limit=2):
         switched = {}
 
         def handler(payload):
@@ -575,7 +576,7 @@ def test_index_switch_during_generation_stays_on_snapshot(tmp_path, gateway):
                 from app.vector_index import DocumentIndex
                 from app.embedding import APIEmbedding
 
-                settings = build_settings(tmp_path)
+                settings = build_settings(tmp_path, active_user_limit=2)
                 DocumentIndex(repository, APIEmbedding(settings)).build(DOC, version_id="v-b")
             return gateway.completion(ANSWER_JSON)
 

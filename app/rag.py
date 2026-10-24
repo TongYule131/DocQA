@@ -95,7 +95,8 @@ class RagService:
                  index: vector_index.DocumentIndex, model):
         self.settings = settings
         self.repository = repository
-        self.repository.settings = settings
+        if repository is not None:
+            repository.settings = settings
         self.index = index
         self.model = model
 

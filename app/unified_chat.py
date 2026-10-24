@@ -147,6 +147,13 @@ class UnifiedChat:
             db.execute('INSERT INTO unified_chat_links VALUES (?,?,?)',('document' if source=='d' else 'single',raw,row['id']))
             db.execute('UPDATE kb_conversations SET title=?,memory_enabled=?,memory_notes=?,initial_context_json=?,archived=? WHERE id=?',
                 (original.get('title',original.get('question','历史问答'))[:80],original.get('memory_enabled',1),memory['notes'],dump(memory['recent_questions']),original.get('archived',0),row['id']))
+            entity_context=memory.get('entity_context',{})
+            if entity_context.get('entities') and original.get('memory_enabled',1):
+                from app.query_understanding import ENTITY_VERSION
+                seed={'kind':'bridge_seed','entities':[{**e,'source_turn':f"{source}:{raw}:turn:{e['source_turn']}"}
+                    for e in entity_context['entities']], 'comparison_objects':entity_context.get('comparison_objects',[])}
+                db.execute('INSERT INTO conversation_entity_memory VALUES (?,?,?,?,1,?)',
+                    (row['id'],0,ENTITY_VERSION,dump(seed),now_iso()))
         return row['id']
 
     def update(self,identifier,body):

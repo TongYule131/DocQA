@@ -306,7 +306,10 @@ def test_migration_v3_creates_analysis_tables_and_backs_up(tmp_path):
     connection = sqlite3.connect(db_path, isolation_level=None)
     connection.execute("PRAGMA foreign_keys=OFF")
     connection.execute("DELETE FROM schema_migrations WHERE version>=3")
-    for table in ("question_results", "question_stage_events", "question_checkpoints", "question_calls",
+    # 降版夹具同时移除v15新增状态；否则只是篡改登记，并非要验证的旧库场景。
+    for table in ("feedback_events", "answer_feedback", "conversation_entity_memory",
+                  "provider_guard_calls", "provider_circuits", "dispatch_fairness",
+                  "question_results", "question_stage_events", "question_checkpoints", "question_calls",
                   "question_attempts", "question_request_keys", "question_jobs",
                   "analysis_request_keys", "analysis_results", "analysis_calls", "analysis_steps",
                   "analysis_attempts", "analysis_jobs"):
