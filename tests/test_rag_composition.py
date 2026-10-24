@@ -249,3 +249,12 @@ def test_slot_third_alternative_cannot_displace_originally_ranked_mechanism():
         serialize=lambda values:json.dumps([i.text for i in values]),
         slots=[{'candidate_ids':['anchor','second','spare']}])
     assert [i.chunk_id for i in selected]==['anchor','second','mechanism']
+
+
+def test_explicit_stage_count_limits_duplicate_blocks_but_ordinals_do_not_count():
+    source=process_pack();value=bound_plan()
+    value['blocks']*=3
+    with pytest.raises(ModelOutputError,match='composition_plan_invalid'):
+        validate_plan(value,source,'比较三阶段的认知和实践任务变化。')
+    # 第二、第三等序号不表示总共只有二或三阶段。
+    validate_plan(value,source,'比较第一、第二、第三课时的认知和实践任务变化。')
