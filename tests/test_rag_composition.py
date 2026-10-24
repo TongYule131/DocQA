@@ -5,7 +5,7 @@ import pytest
 from app.rag_context import EvidenceItem,EvidencePack
 from app.rag_extract_context import assign_unit_options
 from app.rag_composition import (refine_pack,unit_catalog,validate_plan,select_pack,writer_prompt,
-                                 prepare_composition,validate_writer_plan,process_dependencies)
+                                 prepare_composition,validate_writer_plan,process_dependencies,composition_fact_limits)
 from app.rag_prompts import build_task_user_prompt
 from app.rag_presentation import context_covered
 from app.rag_validation import ModelOutputError
@@ -197,6 +197,14 @@ def test_shared_summary_cannot_impersonate_both_process_objects():
         validate_writer_plan(json.dumps(body),value)
 
 
+def test_plan_rejects_compared_object_with_only_shared_evidence_before_writer():
+    source=process_pack();value=bound_plan()
+    value['blocks'][0]['groups'][0]={'label':'伦理责任','label_source':{'ref':1,'unit':7},'units':[{'ref':1,'unit':7}]}
+    value['blocks'][0]['groups'][1]['units'].append({'ref':1,'unit':7})
+    with pytest.raises(ModelOutputError,match='composition_binding_invalid'):
+        validate_plan(value,source,'比较阶段实践任务。')
+
+
 def test_process_plan_uses_pairwise_comparisons_and_no_duplicate_final_summary():
     source=process_pack();value=bound_plan()
     value['blocks'][0]['groups'].append(copy.deepcopy(value['blocks'][0]['groups'][0]))
@@ -258,3 +266,36 @@ def test_explicit_stage_count_limits_duplicate_blocks_but_ordinals_do_not_count(
         validate_plan(value,source,'比较三阶段的认知和实践任务变化。')
     # 第二、第三等序号不表示总共只有二或三阶段。
     validate_plan(value,source,'比较第一、第二、第三课时的认知和实践任务变化。')
+
+
+def test_process_writer_declares_exact_selected_ids_and_still_rejects_unselected_unit():
+    source=process_pack();value=bound_plan();selected=select_pack(source,value)
+    user=build_task_user_prompt(question='比较阶段实践任务。',document_name='test',evidence_payload=selected.payload())
+    request=json.loads(writer_prompt(user,selected,value))
+    assert request['composition_allowed_units']==[{'ref':1,'unit':i} for i in range(1,7)]
+    assert request['composition_joint_facts'][0]['required_evidence']==[g['label_source'] for g in value['blocks'][0]['groups']]
+    assert '7' not in request['references'][0]['quote_units']
+    body={'conclusion':[{'evidence':[{'ref':1,'unit':7}],'part_ids':['p1']}],'explanation':[],
+          'presentation':{'blocks':[{'role':'comparison','kind':'paragraph','fact_indices':[0]}]}}
+    with pytest.raises(ModelOutputError,match='composition_reference_invalid'):
+        validate_writer_plan(json.dumps(body),value,selected)
+
+
+def test_three_stage_baseline_then_forward_comparisons_keep_complete_application():
+    source=refine_pack(pack('阶段甲手工调整参数。阶段乙比较网络结构。阶段丙完成三轮模型训练，控制样本数量。第一轮投入2张。第二轮投入7张。第三轮投入20张。记录每轮准确率变化。阶段丙设计分类器项目。阶段丙总结数据收集、训练与测试流程。'))
+    def group(label,anchor,units):
+        return {'label':label,'label_source':{'ref':1,'unit':anchor},'units':[{'ref':1,'unit':u} for u in units]}
+    def block(role,groups):return {'role':role,'focus':'认知与任务如何推进','part_ids':['p1'],'groups':groups}
+    a=group('阶段甲',1,[1]);b=group('阶段乙',2,[2]);c=group('阶段丙',3,range(3,10))
+    value={'blocks':[block('procedure',[a]),block('comparison',[a,b]),block('comparison',[b,c])],'missing_part_ids':[]}
+    question='比较三阶段的认知和实践任务。'
+    validate_plan(value,source,question)
+    assert [r['max_facts'] for r in composition_fact_limits(value,source,question=question)]==[1,1,2]
+    facts=[{'part_ids':['p1'],'evidence':[{'ref':1,'unit':u} for u in units]} for units in [[1],[1,2],[2,3,8,9],[3,4,5,6,7]]]
+    body={'conclusion':facts,'explanation':[],'presentation':{'blocks':[
+        {'role':role,'kind':'paragraph','fact_indices':indices} for role,indices in [('procedure',[0]),('comparison',[1]),('comparison',[2,3])]]}}
+    validate_writer_plan(json.dumps(body),value,source,question=question)
+    # 再讲一次首阶段会被段内事实预算拦截，实验段仍可保留独立参数事实。
+    body['conclusion'].append(copy.deepcopy(facts[0]));body['presentation']['blocks'][0]['fact_indices']=[0,4]
+    with pytest.raises(ModelOutputError,match='composition_layout_mismatch'):
+        validate_writer_plan(json.dumps(body),value,source,question=question)

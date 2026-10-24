@@ -15,14 +15,14 @@ def context_covered(context,text):
     return layout(context) in layout(text)
 
 
-def validate_presentation(value, facts, *, complete=True):
-    if not isinstance(value,dict) or set(value)!={'blocks'} or not isinstance(value['blocks'],list) or len(value['blocks'])>12:
+def validate_presentation(value, facts, *, complete=True,max_blocks=12,max_facts_per_block=8):
+    if not isinstance(value,dict) or set(value)!={'blocks'} or not isinstance(value['blocks'],list) or len(value['blocks'])>max_blocks:
         raise ModelOutputError('presentation_invalid')
     seen=[];blocks=[]
     for block in value['blocks']:
         if (not isinstance(block,dict) or set(block)!={'role','kind','fact_indices'} or block.get('role') not in ROLES
                 or block.get('kind') not in {'paragraph','list'} or not isinstance(block['fact_indices'],list)
-                or not 1<=len(block['fact_indices'])<=8):
+                or not 1<=len(block['fact_indices'])<=max_facts_per_block):
             raise ModelOutputError('presentation_invalid')
         indices=block['fact_indices']
         if any(type(i) is not int or not 0<=i<len(facts) for i in indices):

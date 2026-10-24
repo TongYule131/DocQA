@@ -12,8 +12,15 @@ RULES = {
     'conceptual': '概念关系辨析：先给关系判断，再按两组概念各自的划分依据解释层级、交叉或支持关系。定义只在解释需要时出现一次，不能开头完整列举后再列一遍；数量相同不构成对应。',
     'boundary': '边界逐项判断：直接判断题干各命题以及其推导是否成立，再用条件、反例或限制解释。承认挑战不等于采纳题干建议，能缓解不等于消失；不为简短省掉任何关键边界。',
     'formula_check': '公式冲突核对：直接把同事项公式与解释两端放在同一条判断中，分别引用并保留符号方向、条件和原文位置；再用一句说明如何并列引用和不能确定笔误端，不擅自纠错或删除冲突一端。通常一段两句已足够，不在首段判断后重新列出相同公式和解释，再作第三遍总结。',
-    'causal_evidence': '因果证据判断：首句直接回答是否已经证明，并在同一论断中纳入决定判断的观察与研究设计依据。后续只补尚未交代的采集方式、限制或验证需要，不重新复述首句的证据和结论。短材料可在一段两句内完成，不为凑段数重复便利反馈、对照缺失或因果边界。',
+    'causal_evidence': '因果证据判断：首句直接回答是否已经证明，并在同一论断中纳入决定判断的观察与研究设计依据。明示实际观察结果与题干待证明结果之间缺少哪个验证环节，把证据的对象、采集方式和研究设计限制接到结论，不只依次罗列三件事。不能把资料未报告的测量、样本或干预杜撰为不存在。短材料在一段两条事实内完成，后句仅补尚未交代的限制或验证需要，不重复首句。',
     'boundary_relations': '路径与边界关系：直接否定过度推导后，说明措施缓解的是什么问题、仍须治理的风险是什么，以及为何二者需要同时存在。每段补一个新环节，不再把首句判断和路径重复讲一遍；具体监管措施只保留解释该关系所需的代表项，不罗列全部清单。原文另有风险警示时保持其原有行为主体与触发条件，不把另一种行为的后果直接转移给所问措施。',
+}
+RULES['boundary_relations']+=' 题干给定措施有益，仍不能代替原文中的实际作用机制：要说明它怎样改变问题根源，不用问题定义或治理清单冒充缓解机制。按否定过度推导、实际机制、剩余风险关系三环节组织，最多三段、每段一条完整有据的关系论断。'
+RULES['formula_check']+=' 区分本次能确认的文字方向冲突与不能据此确定的实际高低或错误端，解释为什么并列保留是引用限制；不能把其中一端当成已经核实的单向结论。'
+PRESENTATION_POLICIES={
+    'causal_evidence':{'max_blocks':1,'max_facts_per_block':2},
+    'bounded_formula':{'max_blocks':1,'max_facts_per_block':2},
+    'boundary_relations':{'max_blocks':3,'max_facts_per_block':1},
 }
 PRIORITY = ('formula_check', 'conceptual', 'comparison', 'boundary', 'multi_hop', 'document_overview', 'fact')
 # 表达任务独立于检索预算：多一个问号/格式要求不构成多跳，“人工智能模型”也不是数学核对。
@@ -55,6 +62,17 @@ def strategy_instructions(question):
     return text
 
 
+def presentation_policy(question):
+    kind=strategy_for_question(question)['primary']
+    if kind=='formula_check' and re.search(r'(?:只|仅)核对',question):
+        return dict(PRESENTATION_POLICIES['bounded_formula'])
+    if kind=='boundary' and re.search(r'是否.*证明|因果',question):
+        return dict(PRESENTATION_POLICIES['causal_evidence'])
+    if kind=='boundary' and re.search(r'推导|无需|风险边界',question):
+        return dict(PRESENTATION_POLICIES['boundary_relations'])
+    return {}
+
+
 def policy_signature():
-    return hashlib.sha256(json.dumps([ANSWER_STRATEGY_VERSION, PRIORITY, RULES, PATTERNS], ensure_ascii=False,
+    return hashlib.sha256(json.dumps([ANSWER_STRATEGY_VERSION, PRIORITY, RULES, PATTERNS,PRESENTATION_POLICIES], ensure_ascii=False,
                                     sort_keys=True).encode()).hexdigest()

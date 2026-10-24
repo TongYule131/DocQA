@@ -458,7 +458,7 @@ class RagService:
         if frozen is not None:
             self._verify_table_snapshot(frozen)
         try:
-            if frozen is not None and composition_plan is not None:validate_writer_plan(raw,composition_plan,pack)
+            if frozen is not None and composition_plan is not None:validate_writer_plan(raw,composition_plan,pack,question=question)
             validated = (validate_task_output(raw, pack, question=question,
                          contract_version=frozen.get("answer_contract_version", "fact-context-parts-v1")) if frozen is not None
                          else validate_model_output(raw, pack))

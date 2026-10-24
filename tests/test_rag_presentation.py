@@ -107,3 +107,22 @@ def test_stream_groups_known_facts_without_publishing_arbitrary_plan_text():
     assert groups==[dict(index=0,kind='paragraph'),dict(index=0,kind='paragraph')]
     with pytest.raises(ModelOutputError):
         FactStreamParser(lambda *a:None).feed(json.dumps(dict(presentation=layout(text='因此不需要审批'))))
+
+
+def test_causal_question_paragraph_budget_is_enforced_after_real_fact_validation():
+    from app.rag_context import EvidenceItem,EvidencePack
+    from app.rag_extract_context import assign_unit_options
+    texts=['参与者报告工具更方便。','试点未设置随机分组或对照组。']
+    items=[EvidenceItem(reference_id=n,document_id='d',parse_version_id='v',chunk_id=str(n),page=1,text=t,
+        read_ranges=[[0,len(t)]],segment_policy='sentence-segments-v2',chunk_type='text') for n,t in enumerate(texts,1)]
+    assign_unit_options(items,[])
+    evidence=EvidencePack(items=items,candidates=[],index_id='i',parse_version_id='v',truncated=False,context_chars=1000)
+    facts=[dict(text=t,context=[],claim_type='direct',evidence=[dict(ref=n,unit=1)],part_ids=['p1']) for n,t in enumerate(texts,1)]
+    body=dict(status='answered',conclusion=facts,explanation=[],clarification_questions=[],missing_points=[],
+        answer_parts=[dict(part_id='p1',state='answered',missing_detail='')],presentation={'blocks':[
+            dict(role='evidence',kind='paragraph',fact_indices=[0]),dict(role='evidence',kind='paragraph',fact_indices=[1])]})
+    validate_task_output(json.dumps(body),evidence,question='描述试点记录。',contract_version='fact-context-parts-v8')
+    with pytest.raises(ModelOutputError,match='presentation_invalid'):
+        validate_task_output(json.dumps(body),evidence,question='参与者反馈更方便，是否已经证明提高能力？',contract_version='fact-context-parts-v8')
+    body['presentation']=layout()
+    validate_task_output(json.dumps(body),evidence,question='参与者反馈更方便，是否已经证明提高能力？',contract_version='fact-context-parts-v8')

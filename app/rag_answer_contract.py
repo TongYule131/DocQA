@@ -92,7 +92,8 @@ def validate_task_output(raw, evidence, *, question, contract_version="fact-cont
         from app.rag_claim_evidence import validate_unit_output
         output=validate_unit_output(json.dumps(payload,ensure_ascii=False),evidence,question=question,declare_parts=True,derive_refs=True)
         from app.rag_presentation import validate_presentation
-        output.presentation=validate_presentation(presentation,output.conclusion+output.explanation)
+        from app.rag_answer_strategy import presentation_policy
+        output.presentation=validate_presentation(presentation,output.conclusion+output.explanation,**presentation_policy(question))
         return output
     if contract_version == 'fact-context-parts-v7':
         from app.rag_claim_evidence import validate_unit_output

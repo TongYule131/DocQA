@@ -193,7 +193,7 @@ class KnowledgeWorker:
             if stream_errors:raise stream_errors[0]
             from app.rag_validation import parse_model_output
             raw=value if isinstance(value,str) else dump(value)
-            if composition_plan is not None:validate_writer_plan(raw,composition_plan,pack)
+            if composition_plan is not None:validate_writer_plan(raw,composition_plan,pack,question=payload['question'])
             checked=validate_task_output(raw,pack,question=payload['question'],contract_version=ANSWER_CONTRACT_VERSION)
             validate_user_condition_boundary(checked,pack,question=payload['question']);review_claims(checked,pack)
             return parse_model_output(raw)
