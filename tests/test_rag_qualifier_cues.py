@@ -59,7 +59,12 @@ def test_worker_freezes_cues_and_restored_checkpoint_rejects_changed_cue(tmp_pat
     env.embedding.calls.clear()
     from tests.test_question_jobs import LEGACY_BODY
     from tests.fixtures.rag_quality.claim_protocol import upgrade
-    env.model.handler=lambda *_:json.dumps(upgrade(LEGACY_BODY,{1:text},strict=True),ensure_ascii=False)
+    def response(system,user):
+        body=upgrade(LEGACY_BODY,{1:text},strict=True)
+        reference=json.loads(user)['references'][0]
+        body['conclusion'][0]['evidence']=[dict(ref=reference['ref'],unit=int(u)) for u in reference['quote_units']]
+        return json.dumps(body,ensure_ascii=False)
+    env.model.handler=response
     job, _ = submit(env)
     claimed = env.service.store.claim("fixture", 60, job_id=job["id"])
     evidence = {}

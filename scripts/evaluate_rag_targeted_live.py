@@ -92,7 +92,10 @@ def prepare(repository, settings, case, saved_query):
     if digest([c.model_dump() for c in chunks]) != digest(case["chunks"]):
         raise EvaluationStopped("冻结案例与解析原文不一致")
     raw = index.validate_checkpoint(case["document_id"], snapshot, saved_query["result"])
-    base = build_task_system_prompt(include_table_structure=False)
+    from app.rag_composition import needs_plan,refine_pack,writer_prompt
+    if needs_plan(case['question']):
+        raise EvaluationStopped('历史单次生成范围未授权复杂题规划；需要新的显式执行计划')
+    base = build_task_system_prompt(include_table_structure=False,question=case['question'])
     cap = rag._context_cap(base, case["question"], snapshot["filename"])
     retrieved = plan_retrieval(case["question"], raw, chunks, fulltext_budget=cap,
                                max_items=settings.question_context_k, max_candidates=settings.question_candidate_k,
@@ -105,8 +108,9 @@ def prepare(repository, settings, case, saved_query):
         context_max_chars=settings.question_context_max_chars,extractive_question=case['question']).pack
     if not pack.items:
         raise EvaluationStopped("没有合格输入，不生成")
-    system = build_task_system_prompt(include_table_structure=any(i.table_projection_included for i in pack.items))
-    user = json.loads(build_task_user_prompt(question=case["question"], document_name=snapshot["filename"], evidence_payload=pack.payload()))
+    pack=refine_pack(pack)
+    system = build_task_system_prompt(include_table_structure=any(i.table_projection_included for i in pack.items),question=case['question'])
+    user = json.loads(writer_prompt(build_task_user_prompt(question=case["question"], document_name=snapshot["filename"], evidence_payload=pack.payload()),pack))
     return dict(snapshot=snapshot, retrieved=retrieved, request={"system": system, "user": user},
                 selected_chunk_ids=[i.chunk_id for i in pack.items], context_chars=pack.context_chars,
                 retrieval=evidence_metrics(case, [h["chunk_id"] for h in retrieved["results"]], [i.chunk_id for i in pack.items]))

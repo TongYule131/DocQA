@@ -96,7 +96,7 @@ def test_repair_inherits_original_budget_and_keeps_failure(tmp_path, drift, monk
     assert live.read(tmp_path / "state.json") == stopped
 
 
-@pytest.mark.parametrize("tamper", [None, "request", "snapshot", "answer"])
+@pytest.mark.parametrize("tamper", [None, "request", "snapshot", "answer", "presentation"])
 def test_success_reuse_revalidates_same_input_and_raw_without_new_calls(tmp_path, tamper):
     from app.rag_context import build_evidence
     from app.quote_spans import task_segment_payload as task_evidence_payload
@@ -122,6 +122,7 @@ def test_success_reuse_revalidates_same_input_and_raw_without_new_calls(tmp_path
     if tamper == "request": request["user"]["question"] += "changed"
     if tamper == "snapshot": prior_snapshot["index_id"] = "other"
     if tamper == "answer": record["result"]["answer"]["conclusion"][0]["text"] = "changed"
+    if tamper == "presentation": record["result"]["answer"]["presentation"] = {"blocks": []}
     counts = len(env.embedding.calls), len(env.model.calls)
     if tamper:
         with pytest.raises(EvaluationStopped):

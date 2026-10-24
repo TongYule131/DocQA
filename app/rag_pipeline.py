@@ -15,7 +15,7 @@ from app.rag_source_diagnostics import source_diagnostics
 from app.rag_math_evidence import admission_partners,group_hints
 from app.rag_slot_ranges import visible_ranges
 
-PIPELINE_VERSION = 'grounded-retrieval-pipeline-v3'
+PIPELINE_VERSION = 'grounded-retrieval-pipeline-v4'
 
 
 @dataclass(frozen=True)

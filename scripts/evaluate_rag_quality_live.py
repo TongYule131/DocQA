@@ -121,9 +121,15 @@ def freeze_run(directory, frozen, repair_revision=None):
 
 def revalidate_saved_answer(record, request, raw, pack, *, case, snapshot, prior_snapshot):
     """仅复用相同输入/提示词的成功生成；重新走当前严格解析和来源边界。"""
+    from app.rag_composition import needs_plan,refine_pack,writer_prompt
+    current=snapshot.get('answer_contract_version')=='fact-context-parts-v8'
+    if current:
+        if needs_plan(case['question']):raise EvaluationStopped('缺少复杂题原始规划检查点，不复用')
+        pack=refine_pack(pack)
     expected_request = {"system": build_task_system_prompt(
-        include_table_structure=any(item.table_projection_included for item in pack.items)), "user": json.loads(build_task_user_prompt(
+        include_table_structure=any(item.table_projection_included for item in pack.items),question=case['question'] if current else None), "user": json.loads(build_task_user_prompt(
         question=case["question"], document_name=snapshot["filename"], evidence_payload=pack.payload()))}
+    if current:expected_request['user']=json.loads(writer_prompt(json.dumps(expected_request['user'],ensure_ascii=False),pack))
     if (record.get("case_sha256") != digest(case) or record["job"]["status"] != "succeeded"
             or request != expected_request or prior_snapshot != snapshot
             or record["selected_chunk_ids"] != [i.chunk_id for i in pack.items]):
@@ -136,6 +142,8 @@ def revalidate_saved_answer(record, request, raw, pack, *, case, snapshot, prior
     from app.rag_support_review import review_claims
     review_claims(validated,pack)
     answer = record["result"]["answer"]
+    if current and validated.presentation!=answer.get('presentation'):
+        raise EvaluationStopped('旧回答的段落编排与原始响应不一致')
     def facts(rows):
         return [{"text": f.text, "refs": sorted(f.refs), "context": f.context, "claim_type": f.claim_type,
                  'support_review':f.support_review} for f in rows]

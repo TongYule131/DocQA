@@ -128,11 +128,17 @@ def table_environment(tmp_path):
     env.rag.index.build("qdoc", rebuild=True)
     env.embedding.calls.clear()
     from tests.fixtures.rag_quality.claim_protocol import upgrade
-    env.model.handler = lambda system, user: json.dumps(upgrade({"status": "answered",
+    def response(system,user):
+        body=upgrade({"status": "answered",
         "conclusion": [{"text": "退款金额为0。", "refs": [1], "context": [{"kind": "subject", "text": "退款", "ref": 1}]}],
         "explanation": [], "clarification_questions": [], "evidence_quotes": [{"ref": 1, "span": 1}],
         "answer_parts": [{"part_id": "p1", "state": "answered", "fact_indices": [0], "missing_detail": ""}]},
-        {1: chunks[0].text}), ensure_ascii=False)
+        {1: chunks[0].text})
+        # 生产先声明表格行单元；合成桩引用实际选项，不沿用旧全文单元编号。
+        reference=json.loads(user)['references'][0]
+        body['conclusion'][0]['evidence']=[dict(ref=reference['ref'],unit=int(u)) for u in reference['quote_units']]
+        return json.dumps(body,ensure_ascii=False)
+    env.model.handler=response
     return env, block
 
 
@@ -167,7 +173,8 @@ def test_non_table_task_keeps_base_prompt_budget_and_no_table_instructions(tmp_p
     job, _ = submit(env)
     assert worker(env).run_job(job["id"])
     system, user = env.model.calls[0]
-    assert system == build_task_system_prompt(include_table_structure=False)
+    from tests.test_question_jobs import QUESTION
+    assert system == build_task_system_prompt(include_table_structure=False,question=QUESTION)
     assert "# 本任务的表格行列辅助证据" not in system
     assert all("table_structure" not in r for r in json.loads(user)["references"])
 

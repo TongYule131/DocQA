@@ -160,7 +160,7 @@ def test_successful_worker_records_plan_real_coverage_and_private_safe_trace(tmp
     assert row['requests_used']==2
     prompt=json.loads(env.model.calls[0][1])
     assert prompt['query_plan']['task_type']=='fact'
-    assert '本轮证据策略' in env.model.calls[0][0]
+    assert '本轮回答组织策略' in env.model.calls[0][0]
     assert sum(len(value) for value in env.model.calls[0])<=env.settings.question_input_max_chars
     trace=KnowledgeTraces(env.repository).detail(task['id'])
     assert trace['query_plan']['task_type']=='fact'
@@ -208,7 +208,7 @@ def test_fixed_input_overhead_fails_before_query_embedding(tmp_path,monkeypatch)
     env,access,base=library(tmp_path)
     service=KnowledgeQuestions(access,env.rag);conv=service.create(base['id'],'c')
     task=service.submit(conv['id'],'退货有什么要求','q')
-    monkeypatch.setattr('app.query_planning.task_instructions',lambda plan:'X'*env.settings.question_input_max_chars)
+    monkeypatch.setattr('app.rag_answer_strategy.strategy_instructions',lambda question:'X'*env.settings.question_input_max_chars)
     worker=KnowledgeWorker(env.settings,env.repository,LocalRuntime(),embedding=env.embedding,model=env.model)
     assert worker.run_once(task['id'])
     row=worker.tasks.row(task['id'])

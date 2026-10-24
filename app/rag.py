@@ -174,6 +174,8 @@ class RagService:
         payload["table_projection_version"] = TABLE_PROJECTION_VERSION
         payload["qualifier_cue_version"] = QUALIFIER_CUE_VERSION
         payload["task_evidence_order_version"] = TASK_EVIDENCE_ORDER_VERSION
+        from app.rag_context import EVIDENCE_PACKING_VERSION
+        payload['evidence_packing_version']=EVIDENCE_PACKING_VERSION
         from app.retrieval_planning import RETRIEVAL_STRATEGY_VERSION
         payload["retrieval_strategy_version"] = RETRIEVAL_STRATEGY_VERSION
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()

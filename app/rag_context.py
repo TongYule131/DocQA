@@ -27,6 +27,7 @@ from app.schemas import QualityWarning, SourceLocation
 # 证据包序列化格式版本：变更字段含义时必须同步提升，便于排查历史记录。
 EVIDENCE_SCHEMA_VERSION = "rag-evidence-v1"
 TASK_EVIDENCE_ORDER_VERSION = "source-order-v1"
+EVIDENCE_PACKING_VERSION = "slot-round-robin-v2"
 
 
 class RagError(Exception):
@@ -265,7 +266,7 @@ def pack_evidence(candidates: list[EvidenceItem], *, context_max_chars: int,
             ids = slot.get('candidate_ids', [])
             if position < len(ids) and ids[position] in by_id and ids[position] not in ordered:
                 ordered.append(ids[position])
-    ordered += list(dict.fromkeys(i for slot in slots or [] for i in slot.get('candidate_ids', []) if i in by_id and i not in ordered))
+    # 两轮槽位保全后回到原融合顺序；第三备选不能挤掉其他解释/机制依据。
     ordered += [item.chunk_id for item in candidates if item.chunk_id not in ordered]
     for identifier in ordered:
         candidate = by_id[identifier]

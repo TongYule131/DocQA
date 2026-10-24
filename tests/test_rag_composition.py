@@ -214,3 +214,38 @@ def test_conceptual_definition_expands_the_same_grounded_concepts_as_opening():
     value['blocks'][1]['groups']=[{'label':'另一框架','units':[{'ref':1,'unit':3}]}]
     with pytest.raises(ModelOutputError,match='composition_binding_invalid'):
         validate_plan(value,source,'解释两组概念之间的关系。')
+
+
+def test_paragraph_can_reuse_selected_premise_but_cannot_lose_local_support_or_expand_sources():
+    selected=plan('conclusion');selected['blocks'][0]['groups']=selected['blocks'][0]['groups'][:1]
+    selected['blocks'].append({'role':'mechanism','focus':'本段解释','part_ids':['p1'],
+        'groups':[{'label':'解释依据','units':[{'ref':1,'unit':2}]}]})
+    facts=[{'part_ids':['p1'],'evidence':[{'ref':1,'unit':u}]} for u in [1,1,2]]
+    value={'conclusion':facts[:1],'explanation':facts[1:],
+        'presentation':{'blocks':[{'role':'conclusion','kind':'paragraph','fact_indices':[0]},
+                                 {'role':'mechanism','kind':'paragraph','fact_indices':[1,2]}]}}
+    validate_writer_plan(json.dumps(value),selected)
+    value['explanation'][1]['evidence']=[{'ref':1,'unit':1}]
+    with pytest.raises(ModelOutputError,match='composition_reference_invalid'):
+        validate_writer_plan(json.dumps(value),selected)
+    value['explanation'][1]['evidence']=[{'ref':1,'unit':3}]
+    with pytest.raises(ModelOutputError,match='composition_reference_invalid'):
+        validate_writer_plan(json.dumps(value),selected)
+
+
+@pytest.mark.parametrize('header',['命题4 1)','推论61)','定理2：1)'])
+def test_numbered_statement_keeps_its_identity_with_following_subitems(header):
+    source=refine_pack(pack(header+'甲方案参数为a；2)乙方案参数为b。'))
+    units=unit_catalog(source)
+    assert len(units)==1 and header in units[0]['passages'][0]['text']
+    assert '2)' in units[0]['passages'][0]['text']
+
+
+def test_slot_third_alternative_cannot_displace_originally_ranked_mechanism():
+    from app.rag_context import pack_evidence
+    items=[EvidenceItem(reference_id=0,chunk_id=n,document_id='d',parse_version_id='v',page=1,text=n)
+           for n in ['anchor','mechanism','second','spare']]
+    selected,_,_,_=pack_evidence(items,context_max_chars=2000,max_items=3,
+        serialize=lambda values:json.dumps([i.text for i in values]),
+        slots=[{'candidate_ids':['anchor','second','spare']}])
+    assert [i.chunk_id for i in selected]==['anchor','second','mechanism']
