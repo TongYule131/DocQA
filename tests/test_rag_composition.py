@@ -299,3 +299,91 @@ def test_three_stage_baseline_then_forward_comparisons_keep_complete_application
     body['conclusion'].append(copy.deepcopy(facts[0]));body['presentation']['blocks'][0]['fact_indices']=[0,4]
     with pytest.raises(ModelOutputError,match='composition_layout_mismatch'):
         validate_writer_plan(json.dumps(body),value,source,question=question)
+
+
+def test_complete_layer_header_and_roles_remain_one_original_contiguous_unit():
+    text='系统的三层结构分别承担职能。输入层负责收集。隐藏层负责处理。输出层负责判断。'
+    units=unit_catalog(refine_pack(pack(text)))
+    assert len(units)==1 and units[0]['passages'][0]['text']==text
+
+
+def test_incomplete_visible_layer_definition_is_not_completed_from_hidden_text():
+    text='系统的三层结构分别承担职能。输入层负责收集。隐藏层负责处理。输出层负责判断。'
+    source=pack(text);source.items[0].read_ranges=[[0,text.index('输出层')]]
+    assign_unit_options(source.items,[])
+    units=unit_catalog(refine_pack(source))
+    assert len(units)>1 and all('输出层' not in p['text'] for u in units for p in u['passages'])
+
+
+def test_process_label_choice_decodes_only_from_its_selected_source_unit():
+    from app.rag_composition import plan_request
+    source=process_pack();value=bound_plan();question='比较阶段实践任务。'
+    catalog=json.loads(plan_request(source,question))['evidence_units']
+    choice=next(u for u in catalog if u['unit']==1)['label_choices']
+    key=next(iter(choice));value['blocks'][0]['groups'][0]['label']=key
+    canonical=validate_plan(value,source,question)
+    assert canonical['blocks'][0]['groups'][0]['label']==choice[key]
+    assert validate_plan(canonical,source,question,resolve_label_choices=False)==canonical
+    value['blocks'][0]['groups'][0]['label']='@label:999'
+    with pytest.raises(ModelOutputError,match='composition_binding_invalid'):
+        validate_plan(value,source,question)
+
+
+def test_complete_application_source_cannot_be_replaced_by_generic_test_flow():
+    source=refine_pack(pack('阶段甲认识参数。阶段乙学习网络。阶段丙从原理认知到项目实践，理解数据驱动的模型构建并设计分类器。阶段丙进行测试流程。'))
+    def group(label,anchor,units):return {'label':label,'label_source':{'ref':1,'unit':anchor},'units':[{'ref':1,'unit':n} for n in units]}
+    def block(role,groups):return {'role':role,'focus':'阶段递进','part_ids':['p1'],'groups':groups}
+    a=group('阶段甲',1,[1]);b=group('阶段乙',2,[2]);c=group('阶段丙',4,[3,4])
+    value={'blocks':[block('procedure',[a]),block('comparison',[a,b]),block('comparison',[b,c])],'missing_part_ids':[]}
+    question='比较三阶段如何连接完整系统应用。'
+    validate_plan(value,source,question)
+    value['blocks'][2]['groups'][1]['units']=[{'ref':1,'unit':4}]
+    with pytest.raises(ModelOutputError,match='composition_process_coverage_invalid'):
+        validate_plan(value,source,question)
+    value['blocks'][2]['groups'][1]['units']=[{'ref':1,'unit':3},{'ref':1,'unit':4}]
+    facts=[{'part_ids':['p1'],'evidence':[{'ref':1,'unit':u} for u in units]} for units in [[1],[1,2],[2,3,4]]]
+    body={'conclusion':facts,'explanation':[],'presentation':{'blocks':[dict(role=role,kind='paragraph',fact_indices=[i]) for i,role in enumerate(['procedure','comparison','comparison'])]}}
+    validate_writer_plan(json.dumps(body),value,source,question=question)
+    facts[2]['evidence']=[{'ref':1,'unit':2},{'ref':1,'unit':4}]
+    with pytest.raises(ModelOutputError,match='composition_process_coverage_invalid'):
+        validate_writer_plan(json.dumps(body),value,source,question=question)
+
+
+def test_single_factor_comparison_merges_decision_and_tradeoff_but_keeps_joint_sources():
+    source=refine_pack(pack('方案甲便于访问但须授权。方案乙本地维护。'))
+    value=plan();question='比较两方案，能否仅凭访问便利单独决定？'
+    from app.rag_composition import organization_brief
+    assert organization_brief(question)['max_blocks']==1
+    fact={'part_ids':['p1'],'evidence':[{'ref':1,'unit':u} for u in [1,2]]}
+    body={'conclusion':[fact],'explanation':[],
+          'presentation':{'blocks':[{'role':'comparison','kind':'paragraph','fact_indices':[0]}]}}
+    validate_writer_plan(json.dumps(body),value,source,question=question)
+    fact['evidence'].pop()
+    with pytest.raises(ModelOutputError,match='composition_comparison_unpaired'):
+        validate_writer_plan(json.dumps(body),value,source,question=question)
+    value['blocks'].append(copy.deepcopy(value['blocks'][0]))
+    with pytest.raises(ModelOutputError,match='composition_plan_invalid'):
+        validate_plan(value,source,question)
+
+
+def test_classification_support_relation_merges_each_reason_without_changing_other_concepts():
+    from app.rag_composition import organization_brief
+    brief=organization_brief('两组概念能按数量配对吗？请说明分类轴和支持关系。')
+    assert brief['max_blocks']==2 and brief['max_facts_per_block']==1
+    assert '摘要' in brief['definition_binding'] and '同时' in brief['support_relation_obligation']
+    ordinary=organization_brief('解释两组概念之间的关系。')
+    assert ordinary['max_blocks']==3 and ordinary['max_facts_per_block']==2
+
+
+def test_causal_opening_joins_reported_outcome_and_design_without_inventing_missing_measurements():
+    from app.rag_composition import causal_evidence_roles,validate_causal_opening
+    source=refine_pack(pack('参与者报告使用方便。研究没有对照组。另有后续建议。'))
+    question='这些反馈是否已经证明能力提高？'
+    roles=causal_evidence_roles(source,question)
+    assert roles=={'reported_experience':[{'ref':1,'unit':1}],'design_limit':[{'ref':1,'unit':2}]}
+    validate_causal_opening({'evidence':[{'ref':1,'unit':u} for u in [1,2]]},source,question)
+    with pytest.raises(ModelOutputError,match='composition_comparison_unpaired'):
+        validate_causal_opening({'evidence':[{'ref':1,'unit':2}]},source,question)
+    assert not causal_evidence_roles(source,'请比较使用体验。')
+    incomplete=refine_pack(pack('参与者报告使用方便。研究报告没有说明测量方式。'))
+    assert not causal_evidence_roles(incomplete,question)

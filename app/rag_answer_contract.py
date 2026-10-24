@@ -94,6 +94,10 @@ def validate_task_output(raw, evidence, *, question, contract_version="fact-cont
         from app.rag_presentation import validate_presentation
         from app.rag_answer_strategy import presentation_policy
         output.presentation=validate_presentation(presentation,output.conclusion+output.explanation,**presentation_policy(question))
+        from app.rag_composition import validate_causal_opening
+        if presentation['blocks']:
+            first=presentation['blocks'][0]['fact_indices'][0]
+            validate_causal_opening((payload['conclusion']+payload['explanation'])[first],evidence,question)
         return output
     if contract_version == 'fact-context-parts-v7':
         from app.rag_claim_evidence import validate_unit_output

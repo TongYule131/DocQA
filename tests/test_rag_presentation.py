@@ -125,4 +125,10 @@ def test_causal_question_paragraph_budget_is_enforced_after_real_fact_validation
     with pytest.raises(ModelOutputError,match='presentation_invalid'):
         validate_task_output(json.dumps(body),evidence,question='参与者反馈更方便，是否已经证明提高能力？',contract_version='fact-context-parts-v8')
     body['presentation']=layout()
+    with pytest.raises(ModelOutputError,match='composition_comparison_unpaired'):
+        validate_task_output(json.dumps(body),evidence,question='参与者反馈更方便，是否已经证明提高能力？',contract_version='fact-context-parts-v8')
+    # 同处一段仍是两条分离前提；联合论断需把观察对象和设计限制接在一起。
+    body['conclusion']=[dict(text='参与者报告工具更方便；试点未设置随机分组或对照组。',context=[],claim_type='synthesis',
+        evidence=[dict(ref=n,unit=1) for n in [1,2]],part_ids=['p1'])]
+    body['presentation']['blocks'][0]['fact_indices']=[0]
     validate_task_output(json.dumps(body),evidence,question='参与者反馈更方便，是否已经证明提高能力？',contract_version='fact-context-parts-v8')
