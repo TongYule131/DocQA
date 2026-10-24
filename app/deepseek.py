@@ -5,6 +5,7 @@ import httpx
 
 from app.config import Settings
 from app.provider_usage import response_metadata
+from app.resource_governance import guarded_provider
 
 
 class ModelError(Exception):
@@ -24,6 +25,7 @@ class DeepSeekModel:
         # 同一适配器可被并发同步接口使用，元数据按执行上下文隔离。
         return self._call_metadata.get()
 
+    @guarded_provider("deepseek", ModelError)
     def generate(self, system_prompt: str, user_prompt: str) -> str:
         self._call_metadata.set(None)
         if not self.settings.deepseek_api_key.strip():
@@ -82,6 +84,7 @@ class DeepSeekModel:
             raise ModelError(502, "DeepSeek 未返回有效答案正文")
         return content.strip()
 
+    @guarded_provider("deepseek", ModelError)
     def generate_stream(self, system_prompt: str, user_prompt: str, on_text, check_active=lambda: None) -> str:
         """单次真实上游流；思考不外传，中断不降级为第二次生成。"""
         from app.answer_stream import MAX_STREAM_CHARS

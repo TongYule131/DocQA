@@ -146,7 +146,7 @@ def _plan_retrieval_v1(question: str, vector_result: dict, chunks: list, *, max_
     return result
 
 
-RETRIEVAL_STRATEGY_VERSION = "hybrid-context-v9"
+RETRIEVAL_STRATEGY_VERSION = "hybrid-context-v10"
 
 
 def _search_text(text: str) -> str:
@@ -247,7 +247,7 @@ def _definition_and_section_anchors(question: str, pool: list[dict], texts: list
     return selected
 
 
-def plan_retrieval(question: str, vector_result: dict, chunks: list, *, max_candidates: int = 40,
+def _plan_retrieval_current(question: str, vector_result: dict, chunks: list, *, max_candidates: int = 40,
                    fulltext_budget: int | None = None, max_items: int = 20, payload_transform=None,
                    query_plan: dict | None = None) -> dict:
     """本地覆盖重排：先保留各子问和结构解释，再有限扩展并动态停止。
@@ -481,3 +481,9 @@ def input_coverage_hints(planning: dict, selected_ids: set[str]) -> dict:
     return {"heuristic_only":True,"semantic_completeness_verified":False,
         "aspects":[{"id":a["id"],"selected_chunk_ids":[i for i in a["candidate_ids"] if i in selected_ids]}
                    for a in planning.get("aspects",[])]}
+
+
+def plan_retrieval(question, vector_result, chunks, *, reranker=None, **kwargs):
+    from app.retrieval_channels import attach_channels
+    result = _plan_retrieval_current(question, vector_result, chunks, **kwargs)
+    return attach_channels(question, vector_result, chunks, result, reranker=reranker) if chunks else result

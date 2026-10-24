@@ -1120,6 +1120,8 @@ class Repository:
                     db.execute("INSERT INTO analysis_request_keys VALUES (?,?,?,?)",
                                (job.document_id, job.idempotency_key, active["id"], request_fingerprint))
                 return self._analysis_job_from_row(active), False
+            from app.resource_governance import admit
+            admit(db,self,None)
             db.execute(
                 f"""INSERT INTO analysis_jobs ({self._ANALYSIS_JOB_COLUMNS})
                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",                (job.id, job.document_id, job.parse_version_id, job.kind, job.status, job.stage,
@@ -1230,15 +1232,8 @@ class Repository:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             self._recover_expired_analysis_leases(db)
-            if job_id:
-                row = db.execute(
-                    "SELECT id, attempt_count, stage FROM analysis_jobs"
-                    " WHERE id=? AND status='queued' AND cancel_requested=0", (job_id,)).fetchone()
-            else:
-                row = db.execute(
-                    "SELECT id, attempt_count, stage FROM analysis_jobs"
-                    " WHERE status='queued' AND cancel_requested=0"
-                    " ORDER BY created_at LIMIT 1").fetchone()
+            from app.resource_governance import choose
+            row = choose(db,self,'analysis_jobs',job_id)
             if row is None:
                 return None
             updated = db.execute(

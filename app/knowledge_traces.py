@@ -80,6 +80,11 @@ class KnowledgeTraces:
                     diagnostics.append(dict(kind='retrieval',attempt=attempt,
                         **{k:value.get(k) for k in ('admitted_count','context_chars','truncated','drop_count')},
                         budget=value.get('budget'), coverage=value.get('coverage'),
+                        channel_hits={channel:sum(d.get('channels',{}).get(channel,0) for d in value.get('documents',[]))
+                                      for channel in ('vector','lexical','structural')},
+                        fusion_counts={key:sum(d.get('fusion',{}).get(key,0) for d in value.get('documents',[]))
+                                       for key in ('unique_recalled_count','rank_excluded_count','admitted_count','quality_excluded_count',
+                                                   'budget_excluded_count','threshold_excluded_count','group_excluded_count','unattributed_excluded_count')},
                         slot_counts=dict(total=len(value.get('slots',{}).get('slots',[])),unfilled=value.get('slots',{}).get('unfilled_count',0)),
                         math_evidence=dict(total=len(value.get('math_evidence',{}).get('groups',[])),
                             **{k:value.get('math_evidence',{}).get(k,0) for k in ('incomplete_count','blocked_count','unlinked_formula_count')}),

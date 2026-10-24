@@ -99,6 +99,7 @@ class AnalysisJobService:
     def __init__(self, settings: Settings, repository: Repository):
         self.settings = settings
         self.repository = repository
+        repository.settings = settings
 
     # ------------------------------------------------------------------
     # 前置检查与规划

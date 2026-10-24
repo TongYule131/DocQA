@@ -26,3 +26,5 @@
 .document-options input:disabled{cursor:default}
 .document-options>button{padding:7px 10px;margin:0 0 5px}
 @media(max-width:800px){.kb-chat-header{gap:10px}.chat-title-details #chat-title{font-size:14px}.chat-settings>summary{font-size:12px;padding-right:0}}
+
+.entity-memory-tools{border:0;margin:0;padding:0;min-width:0}

@@ -389,12 +389,14 @@ class DocumentIndex:
             raise EmbeddingError(409, "原文已变化，请重新建立索引")
         results = []
         try:
+            from app.index_cache import VECTOR_CACHE
+            decoded,cache_hit=VECTOR_CACHE.decode(
+                (str(self.repository.path.resolve()),document_id,version_id,index_id,state['source_signature'],state['provider_signature']),
+                [(r['chunk_id'],r['vector']) for r in vector_rows],len(query_vector),
+                getattr(self.embedding.settings,'index_cache_mb',32)*1024*1024)
             for chunk in chunks:
                 # 向量损坏（空向量、非数值、维度不符）一律拒绝检索，不给出无意义的排序结果。
-                try:
-                    vector = normalize_vector(json.loads(vector_map[chunk.id]))
-                except EmbeddingError:
-                    raise ValueError("corrupt vector") from None
+                vector = decoded[chunk.id]
                 if len(vector) != len(query_vector):
                     raise ValueError("dimension mismatch")
                 score = max(-1.0, min(1.0, sum(a * b for a, b in zip(query_vector, vector))))
@@ -423,6 +425,7 @@ class DocumentIndex:
             "index_id": index_id, "parse_version_id": version_id,
             "is_old_version": is_old_version, "is_legacy": info["is_legacy"],
             "chunk_count": len(chunks),
+            "vector_decode_cache_hit": cache_hit,
             # 仅供本地融合规划使用；复用已经计算的真实余弦分值，不能给词面补召回伪造0分。
             **({"candidate_scores": {hit["chunk_id"]: hit["score"] for hit in results}} if include_scores else {}),
             "timings_ms": {"query_embedding": embedding_ms,

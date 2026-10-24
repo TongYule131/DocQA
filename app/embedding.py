@@ -8,6 +8,7 @@ from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError
 
 from app.config import Settings
 from app.provider_usage import response_metadata
+from app.resource_governance import provider_guard
 
 
 class EmbeddingError(Exception):
@@ -64,8 +65,9 @@ class APIEmbedding:
                         timeout=self.settings.embedding_timeout_seconds, max_retries=0) as client:
                 for offset in range(0, len(texts), self.settings.embedding_batch_size):
                     batch = texts[offset:offset + self.settings.embedding_batch_size]
-                    response = client.embeddings.create(
-                        model=self.settings.embedding_model, input=batch, encoding_format="float")
+                    with provider_guard(self.settings, 'embedding', EmbeddingError):
+                        response = client.embeddings.create(
+                            model=self.settings.embedding_model, input=batch, encoding_format="float")
                     call_metadata.append(response_metadata(response))
                     self._call_metadata.set({"calls": list(call_metadata)})
                     # 按响应 index 恢复输入顺序，不能依赖服务商返回数组的排列。

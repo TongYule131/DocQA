@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 
 from app import vector_index
+from app.retrieval_channels import configured_reranker
 from app.conversation_memory import MEMORY_RULE, MEMORY_SIGNATURE, retrieval_question, valid_memory, with_memory_prompt
 from app.config import Settings
 from app.rag_context import (
@@ -94,6 +95,7 @@ class RagService:
                  index: vector_index.DocumentIndex, model):
         self.settings = settings
         self.repository = repository
+        self.repository.settings = settings
         self.index = index
         self.model = model
 
@@ -149,6 +151,8 @@ class RagService:
                  "deepseek_reasoning_effort", "deepseek_max_tokens", "rag_retrieval_k",
                  "rag_context_k", "rag_context_max_chars", "rag_input_max_chars", "rag_min_score")
         payload = {name: getattr(self.settings, name) for name in names}
+        from app.query_understanding import policy
+        payload["understanding_policy"] = policy(self.settings)
         payload["prompt_version"] = PROMPT_VERSION
         payload["question_retrieval_strategy"] = self.settings.question_retrieval_strategy
         payload["question_context_k"] = self.settings.question_context_k
@@ -283,7 +287,9 @@ class RagService:
             raise RagError(409, 'conversation_policy_changed', '会话上下文策略已变化，请创建新任务')
         if memory is not None and not valid_memory(memory):
             raise RagError(409, 'conversation_context_invalid', '会话上下文无效，请重新提问')
-        search_question = retrieval_question(question, memory)
+        from app.query_understanding import understand
+        understanding = understand(question,(memory or {}).get("entity_context",{}),self.settings)
+        search_question = retrieval_question(understanding["search_question"], memory)
         system_prompt = (build_task_system_prompt(include_table_structure=False, question=question) if frozen is not None
                          else build_system_prompt())
         user_prompt_builder = build_task_user_prompt if frozen is not None else build_user_prompt
@@ -314,7 +320,8 @@ class RagService:
                         self.repository.chunks(document_id, frozen["parse_version_id"]),
                         max_candidates=self.settings.question_candidate_k,
                         fulltext_budget=context_cap, max_items=self.settings.question_context_k,
-                        payload_transform=task_evidence_payload)
+                        payload_transform=task_evidence_payload,
+                        reranker=configured_reranker(self.settings))
             emit("query_completed", {"search_result": search_result,
                                      "provider_usage": getattr(self.index.embedding, "last_call_metadata", None)})
         retrieval_ms = _elapsed_ms(retrieval_started)

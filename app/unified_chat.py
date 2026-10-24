@@ -128,7 +128,8 @@ class UnifiedChat:
             'revision':canonical['revision'] if canonical else original.get('revision',0),'archived':canonical['archived'] if canonical else original.get('archived',0),
             'memory_enabled':canonical['memory_enabled'] if canonical else original.get('memory_enabled',True),
             'memory_notes':canonical['memory_notes'] if canonical else original.get('memory_notes',''),
-            'document_ids':document_ids,'turns':turns,'submissions':waiting}
+            'document_ids':document_ids,'turns':turns,'submissions':waiting,
+            'entity_memory':canonical.get('entity_memory') if canonical else None}
 
     def bridge(self,identifier):
         source,original=self.original(identifier);raw=identifier.split(':',1)[1]
@@ -202,6 +203,8 @@ class UnifiedChat:
                 waits=[j['id'] for j in jobs if j['document_id'] in wanted]
             else:
                 waits=[j['id'] for j in jobs if j['status'] in ('queued','running','review')] if not base['active_snapshot_id'] else []
+            from app.resource_governance import admit
+            admit(db,self.repository,self.owner)
             submission='submission-'+uuid4().hex;stamp=now_iso()
             db.execute('INSERT INTO chat_submissions(id,conversation_id,owner_user_id,request_key,fingerprint,question,document_ids_json,waiting_jobs_json,memory_epoch,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
                 (submission,canonical_id,self.owner,key,signature,question,dump(ids),dump(waits),conv['memory_epoch'],stamp,stamp))

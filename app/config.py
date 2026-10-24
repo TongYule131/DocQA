@@ -95,6 +95,20 @@ class Settings:
     question_context_max_chars: int = 24000
     question_input_max_chars: int = 32000
     question_candidate_k: int = 64
+    # S2～S5：新模型规划和离线精排默认关闭；配额独立于单任务费用上限。
+    reranker_replay_path: str = ""
+    query_term_mapping: str = "{}"
+    query_planner_enabled: bool = False
+    memory_summary_enabled: bool = False
+    active_global_limit: int = 4
+    active_user_limit: int = 1
+    queue_global_limit: int = 100
+    queue_user_limit: int = 20
+    calls_global_daily_limit: int = 10000
+    calls_user_daily_limit: int = 1000
+    circuit_failure_threshold: int = 3
+    circuit_open_seconds: int = 60
+    index_cache_mb: int = 32
     # ------------------------------------------------------------------
     # 摘要与信息提取（分析任务）
     # 预算单位仍是字符，不是 token；这里的数值只用于本地输入限流与费用上界，
@@ -171,6 +185,19 @@ class Settings:
             question_context_max_chars=int(value("DOCQA_QUESTION_CONTEXT_MAX_CHARS", "24000")),
             question_input_max_chars=int(value("DOCQA_QUESTION_INPUT_MAX_CHARS", "32000")),
             question_candidate_k=int(value("DOCQA_QUESTION_CANDIDATE_K", "64")),
+            reranker_replay_path=value("DOCQA_RERANKER_REPLAY_PATH", ""),
+            query_term_mapping=value("DOCQA_QUERY_TERM_MAPPING", "{}"),
+            query_planner_enabled=value("DOCQA_QUERY_PLANNER_ENABLED", "0") == "1",
+            memory_summary_enabled=value("DOCQA_MEMORY_SUMMARY_ENABLED", "0") == "1",
+            active_global_limit=int(value("DOCQA_ACTIVE_GLOBAL_LIMIT", "4")),
+            active_user_limit=int(value("DOCQA_ACTIVE_USER_LIMIT", "1")),
+            queue_global_limit=int(value("DOCQA_QUEUE_GLOBAL_LIMIT", "100")),
+            queue_user_limit=int(value("DOCQA_QUEUE_USER_LIMIT", "20")),
+            calls_global_daily_limit=int(value("DOCQA_CALLS_GLOBAL_DAILY_LIMIT", "10000")),
+            calls_user_daily_limit=int(value("DOCQA_CALLS_USER_DAILY_LIMIT", "1000")),
+            circuit_failure_threshold=int(value("DOCQA_CIRCUIT_FAILURE_THRESHOLD", "3")),
+            circuit_open_seconds=int(value("DOCQA_CIRCUIT_OPEN_SECONDS", "60")),
+            index_cache_mb=int(value("DOCQA_INDEX_CACHE_MB", "32")),
             analysis_max_requests=int(value("DOCQA_ANALYSIS_MAX_REQUESTS", "8")),
             analysis_batch_max_chars=int(value("DOCQA_ANALYSIS_BATCH_MAX_CHARS", "12000")),
             analysis_reduce_max_chars=int(value("DOCQA_ANALYSIS_REDUCE_MAX_CHARS", "16000")),
@@ -181,6 +208,16 @@ class Settings:
         )
 
     def __post_init__(self):
+        from app.query_understanding import term_mapping
+        term_mapping(self)
+        for name in ("active_global_limit", "active_user_limit", "queue_global_limit", "queue_user_limit",
+                     "calls_global_daily_limit", "calls_user_daily_limit", "circuit_failure_threshold", "circuit_open_seconds"):
+            if type(getattr(self,name)) is not int or not 1 <= getattr(self,name) <= 1000000:
+                raise ValueError(name + " 必须是1到1000000的整数")
+        if self.active_user_limit > self.active_global_limit or self.queue_user_limit > self.queue_global_limit:
+            raise ValueError("用户配额不能超过全局配额")
+        if type(self.index_cache_mb) is not int or not 0 <= self.index_cache_mb <= 512:
+            raise ValueError("index_cache_mb 必须为0到512，0禁用缓存")
         if not 1 <= self.attachment_ttl_hours <= 720 or not 1 <= self.attachment_max_active <= 50:
             raise ValueError('临时附件保留期须为1～720小时，同时可用数量须为1～50')
         # 启动前拒绝无效限制，避免所有上传请求都因配置问题失败。

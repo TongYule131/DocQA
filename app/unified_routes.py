@@ -27,6 +27,11 @@ class Retry(StrictBody):
     acknowledge_uncertain:bool=False
 
 
+class Entities(StrictBody):
+    expected_revision:int=Field(ge=0)
+    names:list[str]=Field(max_length=12)
+
+
 class Policy(StrictBody):
     activation_policy:Literal['auto','review']
     expected_revision:int=Field(ge=0)
@@ -60,6 +65,12 @@ def install_unified_routes(app,access,rag,legacy):
 
     @router.patch('/api/chat/conversations/{identifier}')
     def update(identifier:str,body:ConversationUpdate):return chat.update(identifier,body)
+
+    @router.patch('/api/chat/conversations/{identifier}/entities')
+    def edit_entities(identifier:str,body:Entities):
+        from app.entity_memory import edit
+        edit(knowledge,chat.bridge(identifier),body.names,body.expected_revision)
+        return chat.detail(identifier)
 
     @router.post('/api/chat/conversations/{identifier}/turns',status_code=202)
     def turn(identifier:str,body:Turn):return chat.submit(identifier,body.question.strip(),body.request_key,body.document_ids)

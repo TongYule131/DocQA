@@ -76,6 +76,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     runtime = RuntimeGuard(settings.data_dir, "web")
     model = DeepSeekModel(settings)
     repository = Repository(settings.data_dir / "docqa.db")
+    repository.settings = settings
     embedding = APIEmbedding(settings)
     index = DocumentIndex(repository, embedding)
     access = ProductAccess(repository, settings, index)
@@ -238,6 +239,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get('/admin/users', include_in_schema=False)
     def admin_users():
         return workspace_page('admin.html', 'users')
+
+    @app.get('/admin/feedback', include_in_schema=False)
+    def admin_feedback():
+        return workspace_page('feedback-admin.html')
 
     @app.get('/admin/settings', include_in_schema=False)
     def admin_settings():
@@ -867,6 +872,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     install_attachment_routes(app, conversations, parse, build_index)
     from app.answer_stream_routes import install_answer_stream_routes
     install_answer_stream_routes(app, access, questions)
+    from app.answer_feedback import install_feedback_routes
+    install_feedback_routes(app,access,questions)
+    from app.resource_governance import install_governance_routes
+    install_governance_routes(app,access)
     return app
 
 

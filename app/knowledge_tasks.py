@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from app.repository import now_iso, lease_expiry_iso
 from app.question_jobs import _usage_metadata
+from app.resource_governance import task_owner
 
 KNOWLEDGE_PROMPT_VERSION = 'knowledge-task-v2'
 KNOWLEDGE_RULE = '\n这是知识库多文档问答。不同资料的观点冲突时分别引用，不擅自调和。先用自然语言直答，再按问题需要解释；避免逐句重复“文档指出”。'
@@ -40,7 +41,8 @@ def configuration(settings, embedding):
     from app.rag_answer_contract import ANSWER_CONTRACT_VERSION
     from app.rag_answer_strategy import policy_signature
     from app.rag_composition import COMPOSITION_VERSION
-    return fingerprint([PIPELINE_VERSION,QUERY_PLAN_VERSION,RETRIEVAL_STRATEGY_VERSION,SLOT_PLAN_VERSION,SOURCE_DIAGNOSTIC_VERSION,
+    from app.query_understanding import policy
+    return fingerprint([policy(settings),PIPELINE_VERSION,QUERY_PLAN_VERSION,RETRIEVAL_STRATEGY_VERSION,SLOT_PLAN_VERSION,SOURCE_DIAGNOSTIC_VERSION,
         SELECTION_VERSION,NUMERIC_ROLE_VERSION,MATH_EVIDENCE_VERSION,SLOT_RANGE_VERSION,PAGE_LABEL_VERSION,PRESENTATION_VERSION,ANSWER_CONTRACT_VERSION,policy_signature(),COMPOSITION_VERSION,PHRASE_POLICY_VERSION,embedding.signature, settings.deepseek_base_url, settings.deepseek_model,
         settings.deepseek_thinking, TASK_PROMPT_VERSION, KNOWLEDGE_PROMPT_VERSION, KNOWLEDGE_RULE, settings.question_context_max_chars,
         settings.question_input_max_chars, settings.question_context_k,settings.question_candidate_k,
@@ -80,6 +82,8 @@ class KnowledgeTasks:
                     if not submission or submission['status']!='waiting' or submission['conversation_id']!=conversation_id or submission['owner_user_id']!=owner:raise HTTPException(409,'等待请求已取消或会话已变化')
             if kind=='index' and db.execute("SELECT 1 FROM kb_tasks WHERE document_id=? AND kind='index' AND status IN ('queued','running')", (document_id,)).fetchone():
                 raise HTTPException(409,'文档已有索引任务，请刷新查看进度')
+            from app.resource_governance import admit
+            admit(db,self.repository,owner,submission_id=payload.get('submission_id'))
             db.execute('INSERT INTO kb_tasks(id,kind,base_id,document_id,owner_user_id,request_key,input_json,input_hash,max_requests,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
                 (identifier,kind,base_id,document_id,owner,key,encoded,fingerprint(payload),max_requests,stamp,stamp))
             if conversation_id:
@@ -144,8 +148,8 @@ class KnowledgeTasks:
                 db.execute("UPDATE kb_trace_spans SET status='interrupted',finished_at=?,error_code='lease_expired' WHERE task_id=? AND status='running'",(now_iso(),entry[0]))
                 db.execute('UPDATE kb_tasks SET status=?,error_code=?,error_message=?,lease_token=NULL,lease_expires_at=NULL WHERE id=?',
                     ('needs_attention' if pending else 'queued','call_uncertain' if pending else None,'存在未确认调用，请核实后明确重试' if pending else None,entry[0]))
-            sql="SELECT * FROM kb_tasks WHERE status='queued' ORDER BY created_at LIMIT 1"
-            row=db.execute(sql if identifier is None else "SELECT * FROM kb_tasks WHERE status='queued' AND id=?",() if identifier is None else (identifier,)).fetchone()
+            from app.resource_governance import choose
+            row=choose(db,self.repository,'kb_tasks',identifier)
             if not row:return None
             if not self.allowed(db,row):
                 db.execute("UPDATE kb_tasks SET status='cancelled',error_code='access_revoked',error_message='账号、会话或资料权限已变更',finished_at=? WHERE id=?",(now_iso(),row['id']))
@@ -198,6 +202,7 @@ class KnowledgeTasks:
                 (job['id'],name,dump(payload),now_iso()))
         return True
 
+    @task_owner
     def call(self, job, role, work, *, checkpoint=None, validate=lambda value:value):
         saved=self.checkpoint(job['id'],checkpoint) if checkpoint else None
         if saved is not None:return validate(saved)

@@ -127,6 +127,8 @@ class QuestionJobStore:
                     'WHERE s.id=? AND m.user_id=? AND d.document_id=?', (knowledge_snapshot_id, owner_user_id, document_id)).fetchone())
                 if not allowed:
                     raise TaskConflict('账号或资料权限已变更，请刷新后操作')
+            from app.resource_governance import admit
+            admit(db,self.repository,owner_user_id)
             db.execute("""INSERT INTO question_jobs
                 (id,document_id,parse_version_id,index_id,question,idempotency_key,request_id,
                  request_fingerprint,snapshot_json,max_requests,created_at,updated_at,owner_user_id,knowledge_snapshot_id,conversation_id)
@@ -218,9 +220,8 @@ class QuestionJobStore:
         with self.repository.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             self._recover(db)
-            where, params = ("AND id=?", (job_id,)) if job_id else ("", ())
-            row = db.execute("SELECT * FROM question_jobs WHERE status='queued' AND cancel_requested=0 "
-                             + where + " ORDER BY created_at,rowid LIMIT 1", params).fetchone()
+            from app.resource_governance import choose
+            row = choose(db,self.repository,'question_jobs',job_id)
             if row is None:
                 return None
             db.execute("UPDATE question_jobs SET status='running',lease_token=?,lease_expires_at=?,heartbeat_at=?,"
@@ -524,6 +525,7 @@ class QuestionJobService:
 
     def __init__(self, settings, repository: Repository, rag):
         self.settings, self.repository, self.rag = settings, repository, rag
+        self.repository.settings=settings
         self.store = QuestionJobStore(repository)
 
     def submit(self, document_id: str, payload, *, request_id: str | None = None,

@@ -61,7 +61,7 @@ def authorize_request(access, request):
     actor, path, method = access.actor, request.url.path, request.method
     if path.startswith('/api/auth/'):
         return
-    if path.startswith(('/api/kb-conversations','/api/kb-tasks/','/api/chat/','/api/ingestions')) or path=='/app/knowledge':
+    if path.startswith(('/api/feedback','/api/kb-conversations','/api/kb-tasks/','/api/chat/','/api/ingestions')) or path=='/app/knowledge':
         # 库级服务逐对象核对归属、发布快照和当前授权。
         return
     if path == '/api/conversations' or path.startswith('/api/conversations/'):

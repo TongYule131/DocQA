@@ -12,6 +12,7 @@
 param(
     [string]$DataDir = "",
     [switch]$Force,
+    [switch]$KeepSupervisor,
     [switch]$KeepRecords
 )
 
@@ -20,6 +21,13 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'local_service_common.ps1')
 $resolvedDataDir = Resolve-LocalDataDir $DataDir $projectRoot
 $logDir = Join-Path $resolvedDataDir '.local-service'
+# 手动停止必须先阻止监管器重启；监管器自身恢复时显式跳过此标志。
+if (-not $KeepSupervisor -and (Test-Path -LiteralPath (Join-Path $logDir 'supervisor.json'))) {
+    $supervisorRecord=Get-Content -LiteralPath (Join-Path $logDir 'supervisor.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($supervisorRecord.data_dir -eq $resolvedDataDir) {
+        Set-Content -LiteralPath (Join-Path $logDir 'supervisor.stop') -Value 'operator_stop' -Encoding UTF8
+    }
+}
 
 # 停止顺序：先 worker 后 Web，避免 Web 停止后 worker 仍写入任务状态造成困惑。
 $roleOrder = @("analysis-worker", "parse-worker", "web")

@@ -86,6 +86,8 @@ class KnowledgeQuestions:
         with self.repository.connect() as db:ids=[r[0] for r in db.execute('SELECT task_id FROM kb_conversation_turns WHERE conversation_id=? ORDER BY turn_no',(identifier,))]
         conv['turns']=[self.present(self.require_task(i)) for i in ids]
         conv['base']=self.access.base(conv['base_id'])
+        from app.entity_memory import context
+        with self.repository.connect() as db:conv['entity_memory']=context(db,conv,self.access.settings)
         return conv
 
     def submit(self, identifier, question, key, *, document_ids=None, submission_id=None):
@@ -104,7 +106,12 @@ class KnowledgeQuestions:
         if conv['memory_enabled'] and conv['memory_epoch']==0:history=(json.loads(conv['initial_context_json'])+history)[-3:]
         history=[q[:600] for q in history]
         from app.conversation_memory import MEMORY_VERSION,retrieval_question
-        memory={'version':MEMORY_VERSION,'notes':conv['memory_notes'] if conv['memory_enabled'] else '','recent_questions':history}
+        from app.entity_memory import context
+        with self.repository.connect() as db:entity_context=context(db,conv,self.access.settings)
+        memory={'version':MEMORY_VERSION,'notes':conv['memory_notes'] if conv['memory_enabled'] else '',
+                'recent_questions':history,'entity_context':entity_context}
+        from app.query_understanding import understand
+        understanding=understand(question,entity_context,self.access.settings)
         base=self.access.base(conv['base_id'])
         from app.intent_management import IntentManagement
         resolution=IntentManagement(self.repository).evaluate(question,base['id']);route=resolution['route']
@@ -118,10 +125,10 @@ class KnowledgeQuestions:
                  'conversation_id':identifier,'memory_epoch':conv['memory_epoch'],'recent_questions':history,
                  'memory_notes':conv['memory_notes'] if conv['memory_enabled'] else '',
                  'document_filter':document_ids,'route':route,'intent_decision':resolution['decision'],
-                 'query_plan':resolution['query_plan']}
+                 'query_plan':resolution['query_plan'],'understanding':understanding,'conversation_context':memory}
         from app.query_planning import execution_budget
         payload['retrieval_budget']=execution_budget(resolution['query_plan'],self.access.settings,route)
-        payload['retrieval_question']=retrieval_question(question,memory) if memory['notes'] or history else question
+        payload['retrieval_question']=retrieval_question(understanding['search_question'],memory)
         if anchor:payload['legacy_anchor']={'source':anchor[0],'id':anchor[1]}
         if submission_id:payload['submission_id']=submission_id
         if route['kind']=='KB':
@@ -129,7 +136,7 @@ class KnowledgeQuestions:
             from app.rag_composition import needs_plan
             payload['stream_protocol']=STREAM_VERSION
             # 随任务冻结；不能用新版分类器反算旧任务曾经需要的请求数。
-            payload['provider_requests_expected']=2+int(needs_plan(question))
+            payload['provider_requests_expected']=2+int(needs_plan(question))+int(self.access.settings.query_planner_enabled)
         if route['kind']=='MCP':
             from app.knowledge_tools import ToolRegistry
             tool=ToolRegistry(self.repository).get(route.get('tool_id'))

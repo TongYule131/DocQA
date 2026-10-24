@@ -21,6 +21,7 @@ from app.quote_spans import task_segment_payload
 class KnowledgeWorker:
     def __init__(self, settings, repository, runtime, *, embedding=None, model=None):
         self.settings,self.repository,self.runtime=settings,repository,runtime
+        repository.settings=settings
         self.embedding=embedding or APIEmbedding(settings);self.model=model or DeepSeekModel(settings)
         self.tasks=KnowledgeTasks(repository);self.worker_id='knowledge-'+uuid4().hex
         self.stop_requested=False
@@ -118,14 +119,14 @@ class KnowledgeWorker:
         self.check(job)
         system=build_task_system_prompt(question=payload['question'])+KNOWLEDGE_RULE
         memory=payload.get('recent_questions',[])
-        if memory or payload.get('memory_notes'):
+        if memory or payload.get('memory_notes') or payload.get('conversation_context',{}).get('entity_context',{}).get('entities'):
             from app.conversation_memory import MEMORY_RULE
             system+=MEMORY_RULE
         def user_prompt(entries,math_state=None):
             value=json.loads(build_task_user_prompt(question=payload['question'],document_name='知识库资料',evidence_payload=entries))
-            if memory or payload.get('memory_notes'):
+            if memory or payload.get('memory_notes') or payload.get('conversation_context',{}).get('entity_context',{}).get('entities'):
                 from app.conversation_memory import MEMORY_VERSION
-                value['conversation_context']={'version':MEMORY_VERSION,'notes':payload.get('memory_notes',''),'recent_questions':memory}
+                value['conversation_context']=payload.get('conversation_context') or {'version':MEMORY_VERSION,'notes':payload.get('memory_notes',''),'recent_questions':memory}
             if 'formula_check' in plan['facets']:
                 # 预留最长状态文本的实际序列化长度，生成时只使用最终装入后的真实状态。
                 value['mathematical_evidence']={'representation_status':math_state or max(
@@ -137,6 +138,25 @@ class KnowledgeWorker:
         if budget<1000:raise TaskStopped('input_budget_exceeded','问题、记忆与系统规则超过输入预算，未发起外部请求')
         original_index=DocumentIndex(self.repository,self.embedding)
         search_question=payload.get('retrieval_question',payload['question'])
+        if self.settings.query_planner_enabled:
+            from app.query_understanding import planner_messages,validate_plan
+            context=payload.get('conversation_context',{}).get('entity_context',{})
+            ps,pu=planner_messages(payload['question'],context)
+            if len(ps)+len(pu)>self.settings.question_input_max_chars:
+                raise TaskStopped('input_budget_exceeded','问题规划输入超出预算，未外调')
+            def planning_call():
+                return self.model.generate(ps,pu),getattr(self.model,'last_call_metadata',None)
+            try:
+                extra=self.tasks.call(job,'query_planning',planning_call,checkpoint='query_understanding',
+                    validate=lambda raw:validate_plan(raw,payload['question'],context))
+            except TaskStopped as exc:
+                # 不确定请求仍需人工核实；只有已确认失败的规划可回到原问题，不重发规划。
+                if exc.status=='needs_attention' or exc.code not in ('call_failed',):raise
+                extra={'search_terms':[],'subquestions':[]}
+                with self.repository.connect() as db:
+                    db.execute('INSERT OR IGNORE INTO kb_task_checkpoints VALUES (?,?,?,?)',
+                        (job['id'],'query_understanding',dump(extra),__import__('app.repository',fromlist=['now_iso']).now_iso()))
+            search_question+='\n检索子问：'+'；'.join(extra['search_terms']+extra['subquestions'])
         for doc in payload['documents']:original_index.verify_snapshot(doc['document_id'],doc['snapshot'])
         self.tasks.stage(job['id'],job['lease_token'],'retrieving')
         with self.tasks.span(job,'查询向量','EMBEDDING',parent):

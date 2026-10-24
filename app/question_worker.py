@@ -4,6 +4,7 @@ RagService 仍负责原有提示词、证据和引用校验。本模块只包围
 在回调前预扣，保存查询或已校验回答后才结算，明确区分安全恢复与不确定调用。
 """
 from __future__ import annotations
+from app.resource_governance import task_owner
 
 import json
 import logging
@@ -84,6 +85,7 @@ class QuestionWorker:
             done.set()
             thread.join(timeout=2)
 
+    @task_owner
     def _process_job(self, job: dict) -> None:
         job_id, token = job["id"], job["lease_token"]
         current_sequence: int | None = None

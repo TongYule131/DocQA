@@ -9,13 +9,14 @@ from app.rag_context import EvidencePack, build_evidence, pack_evidence
 from app.rag_extract_context import assign_unit_options
 from app.quote_spans import task_segment_payload
 from app.retrieval_planning import plan_retrieval
+from app.retrieval_channels import configured_reranker, admission_report
 from app.rag_evidence_slots import slot_hints
 from app.query_planning import plan_query, public_plan
 from app.rag_source_diagnostics import source_diagnostics
 from app.rag_math_evidence import admission_partners,group_hints
 from app.rag_slot_ranges import visible_ranges
 
-PIPELINE_VERSION = 'grounded-retrieval-pipeline-v4'
+PIPELINE_VERSION = 'grounded-retrieval-pipeline-v5'
 
 
 @dataclass(frozen=True)
@@ -55,7 +56,7 @@ def knowledge_context(index, repository, documents, question, search_question, s
         with observe('关键词、结构线索与融合重排', 'RETRIEVE_FUSION'):
             planned = plan_retrieval(question, found, chunks, max_candidates=budget.candidate_limit,
                 fulltext_budget=budget.context_chars, max_items=budget.context_limit,
-                payload_transform=task_segment_payload, query_plan=query_plan)
+                payload_transform=task_segment_payload, query_plan=query_plan, reranker=configured_reranker(settings))
             for slot in planned.get('planning', {}).get('evidence_slots', []):
                 key = ('global',slot['key']) if slot.get('scope') == 'global' else (doc['document_id'],slot['id'])
                 combined = slots_by_key.setdefault(key, dict(slot, id=f'global-slot-{len(slots_by_key)+1}',candidate_ids=[],candidate_ranges={}))
@@ -71,7 +72,9 @@ def knowledge_context(index, repository, documents, question, search_question, s
         diagnostics.append(dict(document_id=doc['document_id'],parse_version_id=doc['snapshot']['parse_version_id'],
             source_count=len(chunks),vector_count=len(found.get('results',[])),
             candidate_count=len(planned.get('results',[])),admitted_count=len(built.pack.items),
-            channels=dict(Counter(planned.get('planning',{}).get('selection_reasons',{}).values())),
+            channels=planned.get('planning',{}).get('channel_contract',{}).get('channel_hits',{}),
+            fusion=admission_report(planned.get('planning',{}).get('channel_contract',{}),[i.chunk_id for i in built.pack.items],built.pack.drop_reasons),
+            _discard_details=built.pack.drop_reasons,
             numeric_slots=planned.get('planning',{}).get('numeric_slot_count',0),
             retrieval_route=planned.get('planning',{}).get('route'), source_diagnostics=quality,
             math_evidence=built.pack.math_hints))
@@ -108,6 +111,10 @@ def knowledge_context(index, repository, documents, question, search_question, s
             math_hints=group_hints(math_groups,{i.chunk_id for i in candidates},{i.chunk_id for i in items}))
         pack.math_hints.update(blocked_count=sum(p.math_hints.get('blocked_count',0) for p in packs),
             unlinked_formula_count=sum(p.math_hints.get('unlinked_formula_count',0) for p in packs))
+    for diagnostic in diagnostics:
+        admitted = [i.chunk_id for i in items if i.document_id == diagnostic['document_id']]
+        diagnostic['fusion'] = admission_report(diagnostic['fusion'], admitted, diagnostic.pop('_discard_details')+drops)
+        diagnostic['admitted_count'] = len(admitted)
     complete = len(items)==sum(d['source_count'] for d in diagnostics) and all(
         i.read_ranges is None or i.read_ranges == [[0,len(i.text)]] for i in items)
     report=dict(version=PIPELINE_VERSION,budget=budget.__dict__,documents=diagnostics,

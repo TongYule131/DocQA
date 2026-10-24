@@ -64,6 +64,7 @@ def cancel_user_jobs(db, user_id: str, base_id: str | None = None):
 class ProductAccess:
     def __init__(self, repository, settings, index):
         self.repository, self.settings, self.index = repository, settings, index
+        repository.settings=settings
 
     @property
     def actor(self):

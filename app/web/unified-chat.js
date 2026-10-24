@@ -2,6 +2,7 @@ import {createApiClient,encoded} from './api-client.js';
 import {node,renderAnswer,sourceLocationsText,answerTextForDisplay} from './answer-view.js';
 import {createAnswerStream} from './answer-stream.js';
 import {createUnifiedClient} from './unified-client.js';
+import {feedbackButton,showMyFeedback} from './feedback-ui.js';
 
 const api=createApiClient(),$=id=>document.getElementById(id),json=(method,body)=>({method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
 const active=t=>['queued','running'].includes(t.status),labels={queued:'等待处理',running:'正在准备',parsing:'解析文档',indexing:'建立问答索引',review:'等待管理员审核',ready:'资料可用',failed:'准备失败',needs_attention:'需要确认',cancelled:'已停止',uploaded:'已保存原件',retrieving:'查找原文',planning:'选择证据与组织回答',generating:'生成回答',validating:'核对引用'};
@@ -11,6 +12,7 @@ const streams={knowledge:createAnswerStream({source:'knowledge',changed:()=>rend
 function notice(text){$('chat-notice').textContent=text;}
 function remember(){sessionStorage.setItem(storagePrefix+'.selected',current?.id||'');}
 function controls(){const blocked=busy||Boolean(client?.pending)||current?.turns.some(active)||current?.submissions.some(s=>s.status==='waiting');$('kb-send').disabled=Boolean(blocked||!baseId||current?.archived||!selectedDocuments().length);$('new-chat').disabled=busy||Boolean(client?.pending);$('kb-picker').disabled=busy||Boolean(client?.pending);$('confirm-pending').hidden=!client?.pending;$('confirm-pending').disabled=busy;$('kb-memory').disabled=Boolean(blocked);$('upload-open').disabled=busy||Boolean(client?.pending);for(const id of ['rename-chat','save-notes','clear-memory','archive-chat'])$(id).disabled=busy||!current||Boolean(client?.pending);$('kb-memory').setAttribute('aria-checked',String(current?Boolean(current.memory_enabled):draftMemory));
+  $('entity-memory-tools').disabled=busy||Boolean(client?.pending)||!current;
   // render可能发生在busy期间；请求结束时必须连同“全部资料”重新计算禁用状态。
   for(const control of document.querySelectorAll('#document-options input, #document-options button'))control.disabled=Boolean(blocked||!baseId||current?.archived||(control.dataset.selectAll==='true'&&!readyDocuments().length));
 }
@@ -28,7 +30,7 @@ function renderTurns(){
   const signature=JSON.stringify([current?.id,current?.turns,current?.submissions,streams.knowledge.revision,streams.question.revision]);if(signature===rendered)return;rendered=signature;
   const scroll=$('kb-scroll'),bottom=scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight<160,container=$('kb-turns');container.replaceChildren();
   for(const task of current?.turns||[]){const turn=node('section','','kb-chat-turn');turn.append(node('p',task.question,'kb-user-message'));const answer=node('article','','kb-assistant');answer.append(node('strong','DocQA'));
-    if(task.result){const body=node('div','','answer-body');renderAnswer(body,task.result,source);answer.append(body);const actions=node('div','','row');actions.append(button('复制回答',async()=>{await navigator.clipboard.writeText(answerTextForDisplay(task.result));notice('已复制回答');}));if(task.export_url){const a=node('a','导出结果','button secondary');a.href=task.export_url;actions.append(a);}answer.append(actions);}
+    if(task.result){const body=node('div','','answer-body');renderAnswer(body,task.result,source);answer.append(body);const actions=node('div','','row');actions.append(button('复制回答',async()=>{await navigator.clipboard.writeText(answerTextForDisplay(task.result));notice('已复制回答');}));if(task.export_url){const a=node('a','导出结果','button secondary');a.href=task.export_url;actions.append(a);}actions.append(feedbackButton(task,{api,run,notice}));answer.append(actions);}
     else{streams[task.source].render(answer,task,source);answer.append(node('p',task.error_message||labels[task.stage]||labels[task.status]||task.status));if(active(task))answer.append(button(task.cancel_requested?'正在停止':'停止生成',async()=>{await api(`/api/${task.source==='knowledge'?'kb-tasks':'question-jobs'}/${encoded(task.id)}/cancel`,{method:'POST'});await refresh();}));}
     if(!task.result&&task.source==='knowledge'&&['failed','needs_attention'].includes(task.status))answer.append(button('复用检查点重试',async()=>{const ack=task.calls?.some(c=>c.status==='uncertain');if(ack&&!confirm('有未确认调用，可能已计费。核实后是否重试？'))return;await api(`/api/kb-tasks/${encoded(task.id)}/retry`,json('POST',{acknowledge_uncertain:Boolean(ack)}));await refresh();}));
     turn.append(answer);container.append(turn);
@@ -44,6 +46,18 @@ function render(){
   const history=$('kb-history'),search=$('history-search').value.toLowerCase();history.replaceChildren();for(const c of historyItems.filter(c=>c.title.toLowerCase().includes(search))){const b=node('button',c.title,c.id===current?.id?'active':'');b.title=c.title;b.onclick=()=>run(async()=>{if(client.pending)throw new Error('请先确认上次提交');current=await api('/api/chat/conversations/'+encoded(c.id));baseId=current.base_id;restoreDocuments(current.document_ids);remember();render();});history.append(b);}
   const options=$('document-options'),all=button('使用全部可用资料',async()=>{documentIds=null;render();});all.dataset.selectAll='true';options.replaceChildren(all);for(const d of base()?.documents||[]){const label=node('label'),check=node('input');check.type='checkbox';check.value=d.id;check.checked=selectedDocuments().includes(d.id);check.onchange=()=>{const selected=selectedDocuments();documentIds=check.checked?[...new Set([...selected,d.id])]:selected.filter(i=>i!==d.id);scopeCaption();controls();};label.append(check,node('span',d.filename+(d.ready?'':' · 准备中')));options.append(label);}
   scopeCaption();
+  const tools=$('entity-memory-tools');
+  tools.replaceChildren();
+  if(current){
+    tools.append(button('我的反馈',()=>showMyFeedback(api)));
+    const state=current.entity_memory;
+    if(state&&current.memory_enabled){const details=node('details'),summary=node('summary','实体与比较对象（仅作理解线索）'),input=node('textarea');
+      input.value=state.entities.map(e=>e.name).join('\n');input.maxLength=720;input.setAttribute('aria-label','实体名称，每行一个');
+      details.append(summary,input,node('p',state.entities.map(e=>`${e.name}：用户轮次 ${e.source_turn}`).join('；'),'muted'));
+      if(state.summary)details.append(node('p',`较早问题摘要 · 来源轮次 ${state.summary.source_turns.join('、')}`),node('p',state.summary.text));
+      details.append(button('保存实体',async()=>{current=await api('/api/chat/conversations/'+encoded(current.id)+'/entities',json('PATCH',{expected_revision:current.revision,names:input.value.split('\n').map(s=>s.trim()).filter(Boolean)}));await refresh();}));tools.append(details);
+    }
+  }
   $('chat-name').value=current?.title||'';$('memory-notes').value=current?.memory_notes||'';$('archive-chat').textContent=current?.archived?'恢复会话':'归档会话';
   const progress=$('file-progress');progress.replaceChildren();for(const j of jobs.filter(j=>j.status!=='succeeded')){const row=node('div','','file-status');row.append(node('span',`${j.filename} · ${j.error_message||labels[j.stage]||labels[j.status]}`));if(active(j))row.append(button('停止',async()=>{await api(`/api/ingestions/${encoded(j.id)}/cancel`,{method:'POST'});await refresh();}));else if(['failed','needs_attention','cancelled'].includes(j.status))row.append(button('重试',async()=>{let acknowledge=j.status==='needs_attention';if(acknowledge&&!confirm('该任务有未确认调用，可能已计费。核实后是否重试？'))return;await api(`/api/ingestions/${encoded(j.id)}/retry`,json('POST',{acknowledge_uncertain:acknowledge}));await refresh();}));progress.append(row);}
   renderTurns();controls();
