@@ -18,6 +18,10 @@ class Discard(str):
         value.chunk_id, value.code = chunk_id, code
         return value
 
+    def __getnewargs__(self):
+        # 质量评估会复制整个报告；复制／序列化须保留机器归因及兼容显示串。
+        return self.chunk_id, self.code, str(self)
+
 
 def fingerprint(value):
     return sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,

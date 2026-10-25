@@ -173,7 +173,7 @@ class QuestionWorker:
                 from app.intent_management import IntentManagement
                 routing_started=time.perf_counter()
                 current=IntentManagement(self.repository).evaluate(job['question'],snapshot.get('intent_base_id'),scope='document',
-                    context=snapshot.get('conversation_context',{}).get('entity_context',{}),provider_signature=self.rag.index.embedding.signature)
+                    context=(snapshot.get('conversation_context') or {}).get('entity_context',{}),provider_signature=self.rag.index.embedding.signature)
                 if current!=resolution:raise _Stopped('intent_changed','意图配置已变化，请重新提交本轮')
                 if resolution['route']['kind']=='SYSTEM':
                     from app.intent_replies import interaction_answer

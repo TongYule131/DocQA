@@ -3,7 +3,7 @@ import json
 import re
 from hashlib import sha256
 
-UNDERSTANDING_VERSION = 'query-understanding-v2'
+UNDERSTANDING_VERSION = 'query-understanding-v3'
 ENTITY_VERSION = 'user-entity-memory-v1'
 SUMMARY_VERSION = 'user-clue-summary-v1'
 MEMORY_TURN_LIMIT = 100  # 与会话100轮上限一致；不把实体记忆退化为最近问题窗口。
@@ -101,7 +101,8 @@ def build_memory(history, *, notes='', edited=None, summary_enabled=False, seed=
     return state
 
 
-def understand(question, memory, settings):
+def understand(question, memory, settings, *, scope='knowledge'):
+    if scope not in ('knowledge','document'):raise ValueError('invalid_understanding_scope')
     terms = [v for k, v in term_mapping(settings).items() if
              (re.search(r'(?<![A-Za-z])' + re.escape(k) + r'(?![A-Za-z])', question, re.I)
               if k.isascii() else k in question)]
@@ -118,6 +119,11 @@ def understand(question, memory, settings):
                     bindings.append({'reference':token,'names':pair if token in ('两者','二者','他们') else [value]});resolved=resolved.replace(token,value)
     if re.search(r'它|该方法|这个方法|该机制|这种机制',question):
         target=explicit if len(explicit)==1 else names
+        # 单文档入口已由服务端固定材料；只在无实体候选的章节数量追问中绑定该材料。
+        # 方法／条件追问和知识库多资料范围仍必须确认具体对象。
+        if (not target and scope=='document' and
+                re.fullmatch(r'它(?:一共)?(?:有|分为|分成|包含|包括)(?:多少|几)个?(?:部分|章节|章|节)[？?]?',question.strip())):
+            target=['当前文档']
         if len(target)!=1:needed=max(needed,1)
         else:
             for token in ('该方法','这个方法','该机制','这种机制','它'):

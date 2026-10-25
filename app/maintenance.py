@@ -25,13 +25,13 @@ def file_lock(path,*,shared=False):
             api.UnlockFileEx.restype=wintypes.BOOL
             native=msvcrt.get_osfhandle(handle.fileno());overlapped=Overlapped()
             if not api.LockFileEx(native,1|(0 if shared else 2),0,1,0,ctypes.byref(overlapped)):
-                raise RuntimeError('数据目录正在运行或维护，未取得互斥许可')
+                raise RuntimeError('数据目录正在运行或维护，请先停止本目录角色并等待维护结束')
             try:yield
             finally:api.UnlockFileEx(native,0,1,0,ctypes.byref(overlapped))
         else:
             import fcntl
             try:fcntl.flock(handle.fileno(),(fcntl.LOCK_SH if shared else fcntl.LOCK_EX)|fcntl.LOCK_NB)
-            except BlockingIOError:raise RuntimeError('数据目录正在运行或维护，未取得互斥许可') from None
+            except BlockingIOError:raise RuntimeError('数据目录正在运行或维护，请先停止本目录角色并等待维护结束') from None
             try:yield
             finally:fcntl.flock(handle.fileno(),fcntl.LOCK_UN)
     finally:handle.close()

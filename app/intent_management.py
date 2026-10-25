@@ -81,7 +81,7 @@ class IntentManagement:
         if context and not valid_entity_context(context):raise HTTPException(422,'问题理解上下文格式无效')
         from app.query_understanding import understand
         from app.resource_governance import policy
-        settings=policy(self.repository);understanding=understand(question,context or {},settings)
+        settings=policy(self.repository);understanding=understand(question,context or {},settings,scope=scope)
         rows=self.list();semantic=[];semantic_policy=None
         if getattr(settings,'semantic_intent_enabled',False) and provider_signature:
             from app.semantic_intents import SemanticIntents

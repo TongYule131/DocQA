@@ -291,7 +291,7 @@ class RagService:
         if memory is not None and not valid_memory(memory):
             raise RagError(409, 'conversation_context_invalid', '会话上下文无效，请重新提问')
         from app.query_understanding import understand
-        understanding = understand(question,(memory or {}).get("entity_context",{}),self.settings)
+        understanding = understand(question,(memory or {}).get("entity_context",{}),self.settings,scope='document')
         search_question = retrieval_question(understanding["search_question"], memory)
         system_prompt = (build_task_system_prompt(include_table_structure=False, question=question) if frozen is not None
                          else build_system_prompt())

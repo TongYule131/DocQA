@@ -114,6 +114,11 @@ def test_remove_stops_worker_publication_and_purge_preserves_ledger(team):
         purge_expired(data)
     for p in (data / '.local-service').glob('*.ready'):
         p.unlink()
+    # 删除ready记录不能绕过存活服务持有的生命周期锁；真正关闭服务后才能离线清理。
+    with pytest.raises(RuntimeError, match='先停止'):
+        purge_expired(data)
+    for client in clients.values():
+        client.__exit__(None,None,None)
     assert purge_expired(data)['purged'] == [c['document_id']]
     assert purge_expired(data)['purged'] == []
     assert not (data / 'uploads' / c['document_id']).exists()
