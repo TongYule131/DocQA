@@ -23,6 +23,11 @@ export function locationText(source) {
 export function sourceLocationsText(sources = []) {
   return [...new Set(sources.map(locationText))].join(' / ');
 }
+export function contextCovered(context, text) {
+  // 与服务端仅按排版空白比较；不删否定、数值、英文词间空格或改写存储引文。
+  const layout=value=>String(value).replace(/\s+/gu,' ').replace(/(?<=[\u3400-\u9fff，。；：（）]) +| +(?=[\u3400-\u9fff，。；：（）])/gu,'').trim();
+  return layout(text).includes(layout(context));
+}
 function inline(parent, text, citations, open) {
   const pattern = /(\*\*([^*\n]+)\*\*|\[(\d+)\])/g;
   let cursor = 0;
@@ -53,6 +58,10 @@ export function answerTextForDisplay(answer) {
     // 仅转换能由结构化事实完整重建的旧展示串；不对任意正文做正则清洗。
     const display=(fact.claim_type==='inference'?'【结构推断】':'')+content;
     if(text.includes(decorated))text=text.split(decorated).join(display);
+    // 旧结果仍按其原事实与限定完整重建，再仅移去已在正文逐字覆盖的重复括注。
+    const remaining=(fact.context || []).filter(c=>typeof c.text==='string' && contexts[c.kind] && !contextCovered(c.text,fact.text)).map(c=>contexts[c.kind]+'：'+c.text);
+    const compact=(fact.claim_type==='inference'?'【结构推断】':'')+fact.text+(remaining.length?'（'+remaining.join('；')+'）':'');
+    if(compact!==display && text.includes(display))text=text.split(display).join(compact);
   }
   return text;
 }

@@ -1,4 +1,4 @@
-import { node, sourceLocationsText } from './answer-view.js';
+import { node, sourceLocationsText, contextCovered } from './answer-view.js';
 
 // SSE只订阅已有任务。切换页面、重连和游标重放不发送生成POST。
 export function createAnswerStream({source='question',changed=()=>{},finished=()=>{},
@@ -68,11 +68,13 @@ export function createAnswerStream({source='question',changed=()=>{},finished=()
           parent=paragraphs.get(plan.index);
         }
         const fact=block.fact,article=node(grouped?'span':'div','','stream-fact');
-        const extra=(fact.context||[]).filter(c=>typeof c.text==='string'&&!String(fact.text).includes(c.text)).map(c=>(labels[c.kind]||'条件')+'：'+c.text);
+        const extra=(fact.context||[]).filter(c=>typeof c.text==='string'&&!contextCovered(c.text,fact.text)).map(c=>(labels[c.kind]||'条件')+'：'+c.text);
         article.append(node(grouped?'span':'p',(fact.claim_type==='inference'?'【结构推断】':'')+String(fact.text)+(extra.length?'（'+extra.join('；')+'）':'')));
         const sources=node(grouped?'span':'div','','stream-sources');
         for(const citation of block.citations||[]) {
-          const b=node('button',sourceLocationsText(citation.sources)||'查看原文','source-chip');b.type='button';
+          const location=sourceLocationsText(citation.sources)||'来源位置未提供';
+          const b=node('button',String(citation.reference_id),'reference');b.type='button';
+          b.setAttribute('aria-label',`查看引用 ${citation.reference_id}，${location}`);b.title=location;
           b.onclick=()=>openCitation(citation,b);sources.append(b);
         }
         article.append(sources);parent.append(article);

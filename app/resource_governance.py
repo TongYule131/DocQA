@@ -300,17 +300,21 @@ def install_governance_routes(app,access):
         services=app.state.runtime_guard.service_status()
         from app.operations_metrics import backup_status
         last_backup=backup_status(access.settings.data_dir)
+        from app.resident_audit import summarize
+        session_audit=summarize(access.settings.data_dir,fingerprint=getattr(app.state.runtime_guard,'fingerprint',None))
+        session_evidence={k:session_audit[k] for k in ('startup_count','invalid_records','incomplete_tails','different_logon_context_observed','real_logoff_logon_verified')}
         alerts=[]
         if uncertain:alerts.append({'code':'uncertain_calls','severity':'attention','count':uncertain})
         if reserved:alerts.append({'code':'pending_storage_reservations','severity':'attention','count':reserved})
         if any(not w['ready'] for w in services['workers']):alerts.append({'code':'worker_not_ready','severity':'error','count':sum(not w['ready'] for w in services['workers'])})
         if any((c['open_until'] or '')>stamp() or (c['probe_until'] or '')>stamp() for c in circuits):alerts.append({'code':'provider_circuit','severity':'attention','count':1})
         if last_backup['status']=='unknown' or last_backup.get('age_seconds',0)>7*86400:alerts.append({'code':'backup_unverified_or_old','severity':'attention','count':1})
+        if session_audit['invalid_records']:alerts.append({'code':'resident_audit_invalid','severity':'attention','count':session_audit['invalid_records']})
         disk=shutil.disk_usage(access.settings.data_dir)
         if disk.free<access.settings.storage_free_min_mb*1024*1024:alerts.append({'code':'disk_low','severity':'error','count':disk.free})
         return {'active':sum(r['status']=='running' for r in rows),'queued':sum(r['status']=='queued' for r in rows),
                 'calls_today':today,'circuits':circuits,'supervisor':supervisor,
-                'services':services,'alerts':alerts,'latency':latency,'last_backup':last_backup,'alert_delivery':'in_app_only',
+                'services':services,'alerts':alerts,'latency':latency,'last_backup':last_backup,'resident_session_evidence':session_evidence,'alert_delivery':'in_app_only',
                 'usage':{'known_total_tokens':known_tokens,'unknown_usage_calls':unknown,'verified_cost':None,'currency':None},
                 'storage':{'original_bytes':stored,'reserved_bytes':reserved,'disk_free_bytes':disk.free,'global_limit_bytes':access.settings.storage_global_mb*1024*1024},
                 'limits':{'active_global':access.settings.active_global_limit,'active_user':access.settings.active_user_limit,

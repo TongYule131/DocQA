@@ -54,6 +54,18 @@ def eligible_rows(rows, base_id, scope='knowledge'):
     return eligible
 
 
+def resolve_understood_route(question,base_id,rows,scope,understanding,*,semantic_candidates=(),semantic_policy=None):
+    """执行、测试台与冻结评估共用同一确定性路由，不执行检索或工具。"""
+    route,decision=decide(question,base_id,rows,scope,contextual_question=understanding['resolved_question'],
+        semantic_candidates=semantic_candidates,semantic_policy=semantic_policy)
+    business_route=route
+    if understanding['ambiguous_reference'] and route['kind']!='SYSTEM':
+        route={'kind':'SYSTEM','code':'clarification-needed','base_id':base_id,'top_k':None,'response_text':understanding['clarification']['question']}
+        decision={**decision,'code':route['code'],'name':'确认问题对象','kind':'SYSTEM','method':'clarification','reason':'指代对象尚未唯一确认'}
+    from app.query_planning import plan_query
+    return {'route':route,'business_route':business_route,'decision':decision,'query_plan':plan_query(understanding['resolved_question'],route),'understanding':understanding}
+
+
 def decide(question, base_id, rows, scope='knowledge', *, contextual_question=None, semantic_candidates=(), semantic_policy=None):
     query = normalized(question)
     contextual = normalized(contextual_question or question)

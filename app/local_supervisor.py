@@ -14,9 +14,15 @@ from app.runtime import RuntimeGuard, PROJECT_ROOT, process_start_token
 
 def write_state(directory, value):
     path = directory / 'supervisor.json'
+    try:previous=json.loads(path.read_text(encoding='utf-8-sig'))
+    except (OSError,ValueError):previous={}
+    if not isinstance(previous,dict):previous={}
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
     temporary.replace(path)
+    if (previous.get('status'),previous.get('process_start_token'))!=(value.get('status'),value.get('process_start_token')):
+        from app.resident_audit import record
+        record(directory,'state_changed',value)
 
 
 @contextmanager
@@ -107,6 +113,10 @@ def supervise(data_dir, port=8000, *, max_cycles=None, sleep=time.sleep, run_scr
             return 3
         base = {'pid': os.getpid(), 'process_start_token': process_start_token(os.getpid()),
                 'data_dir': str(guard.data_dir), 'code_fingerprint': guard.fingerprint, 'port': port}
+        from app.resident_audit import current_logon_context,record
+        try:base['logon_context']=current_logon_context()
+        except (OSError,ValueError,AttributeError):base['logon_context']=None
+        record(directory,'supervisor_started',base)
         cycles = 0
         while max_cycles is None or cycles < max_cycles:
             cycles += 1

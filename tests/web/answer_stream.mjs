@@ -4,6 +4,7 @@ class Element {
   constructor(tag){this.tagName=tag;this.children=[];this.text='';}
   set textContent(value){this.text=value;this.children=[];}get textContent(){return this.text+this.children.map(c=>c.textContent).join('');}
   append(...items){this.children.push(...items);}walk(){return [this,...this.children.flatMap(c=>c.walk())];}
+  setAttribute(name,value){this[name]=value;}
 }
 globalThis.document={createElement:tag=>new Element(tag)};
 const connections=[],done=[];let paints=0;
@@ -50,4 +51,13 @@ root=new Element('div');grouped.render(root,running,()=>{});
 assert.equal(root.walk().filter(e=>e.className==='stream-paragraph').length,1);
 assert.equal(root.walk().filter(e=>e.className==='stream-fact'&&e.tagName==='div').length,2);
 grouped.dispose();
-console.log('11 answer stream client scenarios passed');
+// OCR排版空白不能令已覆盖限定重现；未覆盖的否定仍须显示，逐条引用保持可点。
+const polished=createAnswerStream({eventSource:url=>new Source(url)});polished.watch([running]);const polishedSource=connections.at(-1);
+polishedSource.fire('update',{id:1,attempt:1,kind:'reset',payload:{}});
+polishedSource.fire('update',{id:2,attempt:1,kind:'block',payload:{...block,
+  fact:{text:'61.8%的教师存在迁移障碍。',claim_type:'direct',context:[{kind:'scope',text:' 61.8% 的教师存在迁移障碍 '},{kind:'condition',text:'仅限样本，未经审计'}]}}});
+root=new Element('div');polished.render(root,running,()=>{});
+assert.equal((root.textContent.match(/61\.8/g)||[]).length,1);assert.match(root.textContent,/仅限样本，未经审计/);
+const reference=root.walk().find(e=>e.tagName==='button');assert.equal(reference.textContent,'1');assert.match(reference['aria-label'],/引用 1.*第 3 页/);assert.equal(reference.title,'第 3 页');
+polished.dispose();
+console.log('12 answer stream client scenarios passed');

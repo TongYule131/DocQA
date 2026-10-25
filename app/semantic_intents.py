@@ -16,6 +16,26 @@ def configuration(rows, signature):
     return fingerprint([VERSION,signature,[{k:r.get(k) for k in ('id','parent_id','revision','enabled','base_id','kind','examples','tool_id')} for r in rows]])
 
 
+def rank_cached_examples(rows,query_vector,cache,*,strict=False):
+    """运行与离线评估共用分值；评估不能把缺缓存／错维向量算作正确回退。"""
+    q=normalize_vector(query_vector);result=[]
+    for row in rows:
+        if row['kind']=='SYSTEM':continue
+        expected={sha256(s.encode()).hexdigest() for s in row['examples']};stored=cache.get(row['id'],[])
+        if not expected:continue
+        if {r['example_hash'] for r in stored}!=expected or len(stored)!=len(expected):
+            if strict:raise ValueError('semantic_examples_incomplete')
+            continue
+        values=[normalize_vector(r['vector']) for r in stored]
+        if any(len(v)!=len(q) for v in values):
+            if strict:raise ValueError('semantic_vector_dimension_mismatch')
+            continue
+        score=max(sum(a*b for a,b in zip(q,v)) for v in values)
+        result.append({'code':row['code'],'name':row['name'],'kind':row['kind'],'method':'semantic',
+            'score':round(max(-1.0,min(1.0,score)),8),'node_id':row['id']})
+    return sorted(result,key=lambda r:(-r['score'],r['code']))
+
+
 class SemanticIntents:
     def __init__(self,repository):self.repository=repository
 
@@ -86,21 +106,18 @@ class SemanticIntents:
         return {'prepared_examples':len(work),'expected_http_requests':batches,'provider_signature':embedding.signature,
                 'enabled_for_routing':False,'next_action':'使用独立校准集校准后启用'}
 
-    def candidates(self,rows,query_vector,signature):
-        q=normalize_vector(query_vector);result=[]
+    def snapshot_examples(self,rows,signature):
+        cache={}
         with self.repository.connect() as db:
             for row in rows:
                 if row['kind']=='SYSTEM':continue
-                expected={sha256(s.encode()).hexdigest() for s in row['examples']}
-                stored=list(db.execute('SELECT example_hash,vector_json FROM intent_semantic_examples WHERE node_id=? AND revision=? AND provider_signature=?',
-                    (row['id'],row['revision'],signature)))
-                if not expected or {r['example_hash'] for r in stored}!=expected:continue
-                values=[normalize_vector(json.loads(r['vector_json'])) for r in stored]
-                if any(len(v)!=len(q) for v in values):continue
-                score=max(sum(a*b for a,b in zip(q,v)) for v in values)
-                result.append({'code':row['code'],'name':row['name'],'kind':row['kind'],'method':'semantic',
-                    'score':round(max(-1.0,min(1.0,score)),8),'node_id':row['id']})
-        return sorted(result,key=lambda r:(-r['score'],r['code']))
+                cache[row['id']]=[{'example_hash':r['example_hash'],'vector':json.loads(r['vector_json'])} for r in
+                    db.execute('SELECT example_hash,vector_json FROM intent_semantic_examples WHERE node_id=? AND revision=? AND provider_signature=? ORDER BY example_hash',
+                        (row['id'],row['revision'],signature))]
+        return cache
+
+    def candidates(self,rows,query_vector,signature):
+        return rank_cached_examples(rows,query_vector,self.snapshot_examples(rows,signature))
 
     def policy(self,rows,signature):
         with self.repository.connect() as db:row=db.execute('SELECT * FROM intent_semantic_policy WHERE id=1').fetchone()
@@ -119,13 +136,14 @@ class SemanticIntents:
             or not any(c.get('expected_code')!='knowledge-default' for c in cases)):
             raise HTTPException(422,'校准须包含唯一题号、正例和独立回退负例')
         # 校准入口只读取保存向量，不把测试台变成收费接口。
+        cache=self.snapshot_examples(rows,signature)
         for case in cases:
             if not all(k in case for k in ('id','expected_code','query_vector','base_id','document_group')):raise HTTPException(422,'校准标签不完整')
             from app.intent_routing import eligible_rows
             eligible=eligible_rows(rows,case['base_id'],case.get('scope','knowledge'))
             if case['expected_code']!='knowledge-default' and case['expected_code'] not in {r['code'] for r in eligible if r['kind']!='SYSTEM'}:
                 raise HTTPException(422,'预期节点不在本题受控候选范围')
-            try:ranked=self.candidates(eligible,case['query_vector'],signature)
+            try:ranked=rank_cached_examples(eligible,case['query_vector'],cache,strict=True)
             except (ValueError,TypeError,EmbeddingError):raise HTTPException(422,'校准向量形状或维度无效') from None
             selected=ranked[0]['code'] if ranked and ranked[0]['score']>=threshold and (len(ranked)<2 or ranked[0]['score']-ranked[1]['score']>=margin) else 'knowledge-default'
             outputs.append({'id':case['id'],'expected':case['expected_code'],'actual':selected,'passed':selected==case['expected_code']})

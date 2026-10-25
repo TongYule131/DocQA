@@ -1,0 +1,13 @@
+[
+  {"context":" 61.8% 的教师存在迁移障碍 ","text":"61.8%的教师存在迁移障碍。","covered":true},
+  {"context":"哲 学理想和伦理道德","text":"哲学理想和伦理道德。","covered":true},
+  {"context":"AI 能力","text":"AI能力。","covered":true},
+  {"context":"Open   Source","text":"Open Source","covered":true},
+  {"context":"Open Source","text":"OpenSource","covered":false},
+  {"context":"未经审计","text":"已经审计。","covered":false},
+  {"context":"仅限2025年预测值","text":"2025年的金额为7亿元。","covered":false},
+  {"context":"20 25年","text":"2025年","covered":false},
+  {"context":"61.8 %","text":"61.8%","covered":false},
+  {"context":"OpenCV","text":"opencv","covered":false},
+  {"context":"仅限甲方","text":"仅限乙方。","covered":false}
+]

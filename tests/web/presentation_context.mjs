@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {contextCovered,answerTextForDisplay} from '../../app/web/answer-view.js';
+const cases=JSON.parse(readFileSync(new URL('../fixtures/presentation_context.json',import.meta.url),'utf8'));
+for(const row of cases)assert.equal(contextCovered(row.context,row.text),row.covered,JSON.stringify(row));
+const fact={text:'61.8%的教师存在迁移障碍。',claim_type:'inference',context:[{kind:'scope',text:' 61.8% 的教师存在迁移障碍 '},{kind:'condition',text:'未经审计'}]};
+const legacy={answer:'【结构推断】'+fact.text+'（范围： 61.8% 的教师存在迁移障碍 ；限定：未经审计）[1]',conclusion:[fact]};
+const original=JSON.stringify(legacy),display=answerTextForDisplay(legacy);
+assert.equal((display.match(/61\.8/g)||[]).length,1);assert.match(display,/限定：未经审计/);assert.match(display,/\[1\]$/);
+assert.equal(JSON.stringify(legacy),original,'display must not rewrite stored facts or citations');
+assert.equal(answerTextForDisplay({answer:'不能由结构化事实重建的旧正文。'}),'不能由结构化事实重建的旧正文。');
+console.log(`${cases.length} shared context cases and historical-display checks passed`);

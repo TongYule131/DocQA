@@ -3,10 +3,12 @@ import json
 import re
 from hashlib import sha256
 
-UNDERSTANDING_VERSION = 'query-understanding-v3'
+UNDERSTANDING_VERSION = 'query-understanding-v4'
 ENTITY_VERSION = 'user-entity-memory-v1'
 SUMMARY_VERSION = 'user-clue-summary-v1'
 MEMORY_TURN_LIMIT = 100  # 与会话100轮上限一致；不把实体记忆退化为最近问题窗口。
+PAIR_REFERENCE = r'两者|二者|前者|后者|它们|他们|(?:这|那)两(?:个|种|套)(?:算法|方法|机制|方案|模型|理论|阶段|对象)'
+SINGLE_REFERENCE = r'该方法|这个方法|该机制|这种机制|它(?!们)'
 DEFAULT_TERMS = {'AI': '人工智能', '人工智能': 'AI', 'RAG': '检索增强生成', '检索增强生成': 'RAG'}
 
 
@@ -111,13 +113,16 @@ def understand(question, memory, settings, *, scope='knowledge'):
     pair=memory.get('comparison_objects',[]);explicit=entities(question)
     if len(explicit)>=2:pair=explicit[:2]
     resolved=question;bindings=[];needed=0
-    if re.search(r'两者|二者|前者|后者|他们',question):
+    pair_references=list(re.finditer(PAIR_REFERENCE,question))
+    if pair_references:
         if len(pair)!=2:needed=2
         else:
-            for token,value in [('两者','与'.join(pair)),('二者','与'.join(pair)),('他们','与'.join(pair)),('前者',pair[0]),('后者',pair[1])]:
-                if token in resolved:
-                    bindings.append({'reference':token,'names':pair if token in ('两者','二者','他们') else [value]});resolved=resolved.replace(token,value)
-    if re.search(r'它|该方法|这个方法|该机制|这种机制',question):
+            for token in dict.fromkeys(match.group() for match in pair_references):
+                value=pair[0] if token=='前者' else pair[1] if token=='后者' else '与'.join(pair)
+                bindings.append({'reference':token,'names':[value] if token in ('前者','后者') else pair})
+            resolved=re.sub(PAIR_REFERENCE,lambda m:pair[0] if m.group()=='前者' else pair[1] if m.group()=='后者' else '与'.join(pair),resolved)
+    if len(pair)!=2 and re.search(r'先(?:问清|确认|澄清).{0,8}(?:哪两|两(?:个|种|套)|双方)',question):needed=2
+    if re.search(SINGLE_REFERENCE,question):
         target=explicit if len(explicit)==1 else names
         # 单文档入口已由服务端固定材料；只在无实体候选的章节数量追问中绑定该材料。
         # 方法／条件追问和知识库多资料范围仍必须确认具体对象。
@@ -126,8 +131,8 @@ def understand(question, memory, settings, *, scope='knowledge'):
             target=['当前文档']
         if len(target)!=1:needed=max(needed,1)
         else:
-            for token in ('该方法','这个方法','该机制','这种机制','它'):
-                if token in resolved:bindings.append({'reference':token,'names':target});resolved=resolved.replace(token,target[0])
+            for token in dict.fromkeys(match.group() for match in re.finditer(SINGLE_REFERENCE,question)):bindings.append({'reference':token,'names':target})
+            resolved=re.sub(SINGLE_REFERENCE,lambda m:target[0],resolved)
     ambiguous=needed>0
     from app.query_planning import plan_query
     plan=plan_query(resolved)
@@ -172,7 +177,7 @@ def validate_plan(raw, question, context):
         names={e['name'] for e in (context or {}).get('entities',[])}
         for binding in value['bindings']:
             if (not isinstance(binding,dict) or set(binding)!={'reference','name'} or binding['name'] not in names
-                or binding['reference'] not in question or binding['reference'] not in ('它','两者','二者','前者','后者','该方法','这个方法')):raise ValueError('query_plan_invalid')
+                or binding['reference'] not in {m.group() for m in re.finditer(PAIR_REFERENCE+'|'+SINGLE_REFERENCE,question)}):raise ValueError('query_plan_invalid')
     return value
 
 
