@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 
-QUERY_PLAN_VERSION = 'query-plan-v1'
+QUERY_PLAN_VERSION = 'query-plan-v3'
 
 # 这些是执行策略，不是为某篇论文预设的答案或后台演示节点。
 TASKS = {
@@ -21,7 +21,7 @@ REQUIREMENTS = {
     'overview_body': ('正文论证', r'.', 'body'),
     'author_position': ('作者结论与立场', r'结论|结语|总结|conclusions?', 'heading'),
     'direct_definition': ('直接定义', r'是指|意指|指的是|定义为|定义是|defined as|means\b', 'text'),
-    'mechanism_body': ('机制及关系解释', r'机制|基础设施|物质基础|层面|层次|层级|关系|作用|分类|分为', 'text'),
+    'mechanism_body': ('机制及关系解释', r'机制|基础设施|物质基础|层面|层次|层级|结构|职能|关系|作用|分类|分为|原则|流程|要素|由于|从而|因此|导致|根源|路径|影响', 'text'),
     'boundary_conditions': ('条件、例外与否定边界', r'但是|然而|并非|不意味|不代表|不能|局限|仅|例外|条件|前提|除外', 'text'),
     'formula_source': ('原始公式及不等式', r'[=<>≤≥≠∂∑]|\\(?:frac|leq|geq|partial|sum)\b', 'text'),
     'formula_explanation': ('命题、推论的解释正文', r'表明|说明|意味着|解释|高于|低于|增加|减少|上升|下降', 'text'),
@@ -42,13 +42,13 @@ def plan_query(question: str, route: dict | None = None) -> dict:
     facets = []
     if re.search(r'公式|不等式|推导|符号|数学模型', text) and re.search(r'核对|矛盾|一致|冲突|比较|解释|说明', text):
         facets.append('formula_check')
-    if re.search(r'一一对应|辨析|两组|概念结构|如何定位|分类轴|概念层级', text):
+    if re.search(r'一一对应|辨析|两组|概念结构|如何定位|分类轴|概念层级|配对|什么关系|何种关系|有何联系|定义|界定|什么是', text):
         facets.append('conceptual')
-    if re.search(r'对比|比较|相比|异同|区别|两者|二者|两种机制', text):
+    if re.search(r'对比|比较|相比|异同|区别|两者|二者|两种机制|有何不同|怎样对照|各自', text):
         facets.append('comparison')
-    if re.search(r'是否符合|是否意味着|是否说明|是否支持|是否失效|不需要|不再需要|有观点认为|边界|否定|该说法', text):
+    if re.search(r'是否符合|是否意味着|是否说明|是否支持|是否失效|是否(?:就|已经|足以|都|只能|能)|能否|可否|是不是|算不算|不需要|不再需要|有观点认为|边界|否定|该说法', text):
         facets.append('boundary')
-    if len(parts) > 1 or len(set(re.findall(r'《([^》]+)》', text))) > 1 or re.search(r'综合|多跳|分别|连贯论证', text):
+    if len(parts) > 1 or len(set(re.findall(r'《([^》]+)》', text))) > 1 or re.search(r'综合|多跳|分别|连贯论证|为什么|为何|怎样导致|如何导致|什么原因', text):
         facets.append('multi_hop')
     if not facets and re.search(r'讲了什么|讲的什么|说了什么|主要讲|主要内容|概述|总结|概括|摘要|全文|整体介绍', text):
         facets.append('document_overview')
@@ -60,6 +60,7 @@ def plan_query(question: str, route: dict | None = None) -> dict:
             if name not in requirements: requirements.append(name)
     if 'document_overview' in facets: need('overview_abstract', 'overview_body', 'author_position')
     if 'conceptual' in facets: need('direct_definition', 'mechanism_body')
+    if re.search(r'为什么|为何|怎样导致|如何导致|什么原因|(?:任务|认知).*(?:变化|递进)',text): need('mechanism_body')
     if 'boundary' in facets: need('author_position', 'boundary_conditions')
     if 'formula_check' in facets: need('formula_source', 'formula_explanation')
     return dict(version=QUERY_PLAN_VERSION, route_kind=kind, task_type=facets[0], facets=facets,

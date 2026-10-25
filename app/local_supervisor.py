@@ -54,7 +54,12 @@ def roles_ready(directory, guard):
                     or not record.get('process_start_token')
                     or process_start_token(record.get('pid')) != record['process_start_token']):
                 return False
-        except (OSError, ValueError, TypeError):
+            heartbeat=json.loads((directory/(role+'.heartbeat')).read_text(encoding='utf-8'))
+            age=(datetime.now(timezone.utc)-datetime.fromisoformat(heartbeat['checked_at'])).total_seconds()
+            if (heartbeat.get('pid')!=record['pid'] or heartbeat.get('role')!=role or heartbeat.get('data_dir')!=str(guard.data_dir)
+                or heartbeat.get('process_start_token')!=record['process_start_token'] or heartbeat.get('code_fingerprint')!=guard.fingerprint
+                or not -30<=age<=heartbeat.get('grace_seconds',30)):return False
+        except (OSError, ValueError, TypeError,KeyError):
             return False
     return True
 
@@ -75,16 +80,31 @@ def script(name, data_dir, port=None):
         command += ['-KeepSupervisor']
     if port is not None:
         command += ['-Port', str(port)]
-    # 无凭证命令；stdout 只包含启动诊断，保留到本机日志，不写控制台原文。
-    return subprocess.run(command, cwd=PROJECT_ROOT, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
-                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180, check=False)
+    # Windows 后台角色可能继承管道句柄；communicate()会等到角色退出才收到EOF。
+    # 直接写文件并等待脚本进程，不能把长期存活角色当作启动脚本仍在运行。
+    directory=Path(data_dir)/'.local-service';directory.mkdir(parents=True,exist_ok=True)
+    output=directory/('supervisor-'+Path(name).stem+'.log')
+    with output.open('w+b') as stream:
+        result=subprocess.run(command,cwd=PROJECT_ROOT,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0),
+            stdout=stream,stderr=subprocess.STDOUT,timeout=180,check=False)
+        stream.seek(0)
+        return subprocess.CompletedProcess(result.args,result.returncode,stdout=stream.read(65536))
 
 
-def supervise(data_dir, port=8000, *, max_cycles=None, sleep=time.sleep, run_script=script):
+def supervise(data_dir, port=8000, *, max_cycles=None, sleep=time.sleep, run_script=script, resume=False):
     guard = RuntimeGuard(data_dir, 'supervisor')
     directory = guard.data_dir / '.local-service'
     with exclusive(directory / 'supervisor.lock'):
-        attempts = []
+        if resume:(directory/'supervisor.stop').unlink(missing_ok=True)
+        window = directory / 'restart-window.json'
+        try:
+            attempts = json.loads(window.read_text(encoding='utf-8')) if window.exists() else []
+            import math
+            if not isinstance(attempts,list) or any(type(t) not in (int,float) or not math.isfinite(t) or t<=0 for t in attempts):
+                raise ValueError('invalid restart history')
+        except (OSError,ValueError,TypeError):
+            write_state(directory,{'status':'needs_attention','reason':'restart_history_invalid'})
+            return 3
         base = {'pid': os.getpid(), 'process_start_token': process_start_token(os.getpid()),
                 'data_dir': str(guard.data_dir), 'code_fingerprint': guard.fingerprint, 'port': port}
         cycles = 0
@@ -102,13 +122,16 @@ def supervise(data_dir, port=8000, *, max_cycles=None, sleep=time.sleep, run_scr
                 write_state(directory, {**base, 'status': 'ready', 'checked_at': datetime.now(timezone.utc).isoformat()})
                 sleep(5)
                 continue
-            now = time.monotonic()
+            now = time.time()
             attempts = [t for t in attempts if now - t < 600]
             if len(attempts) >= 3:
                 write_state(directory, {**base, 'status': 'needs_attention', 'reason': 'restart_limit'})
                 return 3
             write_state(directory, {**base, 'status': 'recovering', 'restart_count': len(attempts) + 1})
             attempts.append(now)
+            temporary = window.with_suffix('.tmp')
+            temporary.write_text(json.dumps(attempts),encoding='utf-8')
+            temporary.replace(window)
             # stop_local 会写停止标志；监管内部恢复通过专用参数保留监管器。
             try:
                 result = run_script('stop_local.ps1', guard.data_dir)
@@ -146,9 +169,7 @@ def main(argv=None):
         parser.error('port must be 1..65535')
     if os.name != 'nt':
         parser.error('Windows resident supervisor only')
-    if args.resume:
-        (args.data_dir.resolve() / '.local-service' / 'supervisor.stop').unlink(missing_ok=True)
-    return supervise(args.data_dir, args.port)
+    return supervise(args.data_dir, args.port,resume=args.resume)
 
 
 if __name__ == '__main__':

@@ -99,6 +99,7 @@ class Settings:
     reranker_replay_path: str = ""
     query_term_mapping: str = "{}"
     query_planner_enabled: bool = False
+    semantic_intent_enabled: bool = False
     memory_summary_enabled: bool = False
     active_global_limit: int = 4
     active_user_limit: int = 1
@@ -109,6 +110,10 @@ class Settings:
     circuit_failure_threshold: int = 3
     circuit_open_seconds: int = 60
     index_cache_mb: int = 32
+    queue_wait_seconds:int=3600
+    storage_global_mb:int=4096
+    storage_user_mb:int=512
+    storage_free_min_mb:int=256
     # ------------------------------------------------------------------
     # 摘要与信息提取（分析任务）
     # 预算单位仍是字符，不是 token；这里的数值只用于本地输入限流与费用上界，
@@ -188,6 +193,7 @@ class Settings:
             reranker_replay_path=value("DOCQA_RERANKER_REPLAY_PATH", ""),
             query_term_mapping=value("DOCQA_QUERY_TERM_MAPPING", "{}"),
             query_planner_enabled=value("DOCQA_QUERY_PLANNER_ENABLED", "0") == "1",
+            semantic_intent_enabled=value("DOCQA_SEMANTIC_INTENT_ENABLED", "0") == "1",
             memory_summary_enabled=value("DOCQA_MEMORY_SUMMARY_ENABLED", "0") == "1",
             active_global_limit=int(value("DOCQA_ACTIVE_GLOBAL_LIMIT", "4")),
             active_user_limit=int(value("DOCQA_ACTIVE_USER_LIMIT", "1")),
@@ -198,6 +204,10 @@ class Settings:
             circuit_failure_threshold=int(value("DOCQA_CIRCUIT_FAILURE_THRESHOLD", "3")),
             circuit_open_seconds=int(value("DOCQA_CIRCUIT_OPEN_SECONDS", "60")),
             index_cache_mb=int(value("DOCQA_INDEX_CACHE_MB", "32")),
+            queue_wait_seconds=int(value("DOCQA_QUEUE_WAIT_SECONDS","3600")),
+            storage_global_mb=int(value("DOCQA_STORAGE_GLOBAL_MB","4096")),
+            storage_user_mb=int(value("DOCQA_STORAGE_USER_MB","512")),
+            storage_free_min_mb=int(value("DOCQA_STORAGE_FREE_MIN_MB","256")),
             analysis_max_requests=int(value("DOCQA_ANALYSIS_MAX_REQUESTS", "8")),
             analysis_batch_max_chars=int(value("DOCQA_ANALYSIS_BATCH_MAX_CHARS", "12000")),
             analysis_reduce_max_chars=int(value("DOCQA_ANALYSIS_REDUCE_MAX_CHARS", "16000")),
@@ -210,6 +220,9 @@ class Settings:
     def __post_init__(self):
         from app.query_understanding import term_mapping
         term_mapping(self)
+        if (any(type(getattr(self,k)) is not int or not 1<=getattr(self,k)<=1000000 for k in ('queue_wait_seconds','storage_global_mb','storage_user_mb'))
+            or self.storage_user_mb>self.storage_global_mb or type(self.storage_free_min_mb) is not int or not 0<=self.storage_free_min_mb<=1000000):
+            raise ValueError('排队超时和存储容量配置无效')
         for name in ("active_global_limit", "active_user_limit", "queue_global_limit", "queue_user_limit",
                      "calls_global_daily_limit", "calls_user_daily_limit", "circuit_failure_threshold", "circuit_open_seconds"):
             if type(getattr(self,name)) is not int or not 1 <= getattr(self,name) <= 1000000:

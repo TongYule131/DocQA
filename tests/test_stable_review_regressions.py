@@ -227,6 +227,8 @@ def test_v4_migration_backfills_keys_without_changing_jobs(tmp_path):
         projection=','.join('"'+column+'"' for column in legacy_columns)
         before = [tuple(row) for row in db.execute('SELECT '+projection+' FROM analysis_jobs')]
         # 形成真实v3夹具：不能保留后续问答结构却只删除迁移登记来伪造旧库。
+        from tests.schema_fixtures import remove_v16
+        remove_v16(db)
         for table in ('feedback_events','answer_feedback','conversation_entity_memory',
                       'provider_guard_calls','provider_circuits','dispatch_fairness'):
             db.execute(f'DROP TABLE {table}')

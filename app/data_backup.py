@@ -8,7 +8,16 @@ import shutil
 import sqlite3
 
 from app.runtime import process_start_token
-from app.migrations import validate_schema
+from app.migrations import validate_schema, detect_version, SCHEMA_VERSION
+
+SKIP_NAMES={'docqa.db','docqa.db-wal','docqa.db-shm','docqa.db-journal','restore-complete.json','restore-incomplete.json','backup-manifest.json'}
+
+
+def validate_saved_schema(db):
+    version = detect_version(db)
+    if not 1 <= version <= SCHEMA_VERSION:
+        raise ValueError('unsupported_backup_schema')
+    return validate_schema(db, version=version)
 
 
 def digest(path):
@@ -31,7 +40,13 @@ def stopped(data_dir):
             raise ValueError('supervisor_must_be_stopped')
 
 
-def backup(data_dir, destination):
+def backup(data_dir,destination):
+    from app.maintenance import maintenance
+    with maintenance(data_dir,'backup'):
+        return _backup(data_dir,destination)
+
+
+def _backup(data_dir, destination):
     source, target = data_dir.resolve(), destination.resolve()
     if source == target or source in target.parents or target in source.parents or target.exists():
         raise ValueError('backup_requires_new_directory_outside_source')
@@ -44,7 +59,7 @@ def backup(data_dir, destination):
     before_database=database_marker()
     files = [p for p in source.rglob('*') if p.is_file() and
              not any(part in {'.local-service', 'db-backups'} for part in p.relative_to(source).parts)
-             and p.name not in {'docqa.db', 'docqa.db-wal', 'docqa.db-shm', 'docqa.db-journal'}]
+             and p.name not in SKIP_NAMES]
     if any(p.is_symlink() or any(parent.is_symlink() for parent in p.parents if parent != source.parent) for p in files):
         raise ValueError('symlinks_not_supported')
     source_manifest={p.relative_to(source).as_posix():(p.stat().st_size,p.stat().st_mtime_ns) for p in files}
@@ -53,7 +68,7 @@ def backup(data_dir, destination):
     with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as original:
         with closing(sqlite3.connect(target / 'docqa.db')) as copy:
             original.backup(copy)
-            version = validate_schema(copy)
+            version = validate_saved_schema(copy)
             if copy.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
                 raise ValueError('backup_integrity_failed')
     entries.append({'path': 'docqa.db', 'sha256': digest(target / 'docqa.db')})
@@ -69,11 +84,16 @@ def backup(data_dir, destination):
     stopped(source)
     after_files=[p for p in source.rglob('*') if p.is_file() and
              not any(part in {'.local-service','db-backups'} for part in p.relative_to(source).parts)
-             and p.name not in {'docqa.db','docqa.db-wal','docqa.db-shm','docqa.db-journal'}]
+             and p.name not in SKIP_NAMES]
     if (before_database!=database_marker() or source_manifest!={p.relative_to(source).as_posix():(p.stat().st_size,p.stat().st_mtime_ns) for p in after_files}):
         raise ValueError('source_changed_during_backup')
     manifest = {'version': 'docqa-data-backup-v1', 'schema_version': version, 'files': entries}
     (target / 'backup-manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
+    from datetime import datetime,timezone
+    directory=source/'.local-service';directory.mkdir(exist_ok=True)
+    marker={'status':'completed','completed_at':datetime.now(timezone.utc).isoformat(),'schema_version':version,
+        'file_count':len(entries),'manifest_sha256':digest(target/'backup-manifest.json')}
+    temporary=directory/'last-backup.tmp';temporary.write_text(json.dumps(marker),encoding='utf-8');temporary.replace(directory/'last-backup.json')
     return manifest
 
 
@@ -98,14 +118,23 @@ def restore(backup_dir, destination):
     if 'docqa.db' not in seen:
         raise ValueError('backup_database_missing')
     target.mkdir(parents=True)
-    for item in manifest['files']:
-        out = target / item['path']
-        out.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source / item['path'], out)
-    with closing(sqlite3.connect(target / 'docqa.db')) as db:
-        if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
-            raise ValueError('restored_integrity_failed')
-        validate_schema(db)
+    from app.maintenance import maintenance
+    with maintenance(target,'restore'):
+        (target / 'restore-incomplete.json').write_text(json.dumps({'complete':False}),encoding='utf-8')
+        for item in manifest['files']:
+            out = target / item['path']
+            if out.exists():raise ValueError('restore_target_changed')
+            out.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source / item['path'], out)
+            if digest(out) != item['sha256'] or digest(source / item['path']) != item['sha256']:
+                raise ValueError('restored_file_hash_changed')
+        with closing(sqlite3.connect(target / 'docqa.db')) as db:
+            if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                raise ValueError('restored_integrity_failed')
+            if validate_saved_schema(db) != manifest['schema_version']:
+                raise ValueError('backup_manifest_schema_mismatch')
+        (target / 'restore-incomplete.json').unlink()
+        (target / 'restore-complete.json').write_text(json.dumps({'complete':True,'schema_version':manifest['schema_version']}),encoding='utf-8')
     return {'restored': True, 'file_count': len(seen), 'schema_version': manifest['schema_version'],
             'services_started': False, 'provider_calls': 0}
 

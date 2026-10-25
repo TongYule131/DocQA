@@ -30,6 +30,12 @@ class Retry(StrictBody):
 class Entities(StrictBody):
     expected_revision:int=Field(ge=0)
     names:list[str]=Field(max_length=12)
+    mode:Literal['auto','replace','merge']='replace'
+
+
+class Clarify(StrictBody):
+    names:list[str]=Field(min_length=1,max_length=2)
+    request_key:str=Field(min_length=1,max_length=100)
 
 
 class Policy(StrictBody):
@@ -69,11 +75,21 @@ def install_unified_routes(app,access,rag,legacy):
     @router.patch('/api/chat/conversations/{identifier}/entities')
     def edit_entities(identifier:str,body:Entities):
         from app.entity_memory import edit
-        edit(knowledge,chat.bridge(identifier),body.names,body.expected_revision)
+        edit(knowledge,chat.bridge(identifier),body.names,body.expected_revision,body.mode)
         return chat.detail(identifier)
 
     @router.post('/api/chat/conversations/{identifier}/turns',status_code=202)
     def turn(identifier:str,body:Turn):return chat.submit(identifier,body.question.strip(),body.request_key,body.document_ids)
+
+    @router.post('/api/chat/conversations/{identifier}/clarifications/{clarification}/resolve')
+    def resolve_clarification(identifier:str,clarification:str,body:Clarify):
+        from app.clarifications import resolve
+        return resolve(chat,identifier,clarification,body.names,body.request_key)
+
+    @router.post('/api/chat/conversations/{identifier}/clarifications/{clarification}/cancel')
+    def cancel_clarification(identifier:str,clarification:str):
+        from app.clarifications import cancel
+        return cancel(chat,identifier,clarification)
 
     @router.post('/api/chat/conversations/{identifier}/submissions/{submission}/cancel')
     def cancel_waiting(identifier:str,submission:str):

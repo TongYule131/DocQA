@@ -9,6 +9,12 @@ from app.repository import now_iso
 _SNIFF_BYTES = 1024 * 1024
 
 def store_upload(repository, settings, file, idempotency_key, *, scope='local', link=None):
+    from app.maintenance import file_lock
+    with file_lock(settings.data_dir/'.local-service'/'lifecycle.lock',shared=True):
+        return _store_upload(repository,settings,file,idempotency_key,scope=scope,link=link)
+
+
+def _store_upload(repository, settings, file, idempotency_key, *, scope='local', link=None):
     upload_dir = settings.data_dir / "uploads"
     filename = sanitize_filename(file.filename or "")
     if idempotency_key and (len(idempotency_key) > 200 or not idempotency_key.strip()):
@@ -38,6 +44,17 @@ def store_upload(repository, settings, file, idempotency_key, *, scope='local', 
         detected = detect_format(filename, probe, max_pdf_pages=settings.max_pdf_pages)
         if size == 0:
             raise UploadFormatError(422, "文件为空")
+        from app.storage_governance import reserve,commit
+        fingerprint=sha256(filename.encode()+b'\0'+probe).hexdigest()
+        if idempotency_key:
+            with repository.connect() as db:
+                prior=db.execute('SELECT * FROM document_upload_requests WHERE scope=? AND request_key=?',(scope,idempotency_key)).fetchone()
+                if prior:
+                    if prior['fingerprint']!=fingerprint:raise HTTPException(409,'该上传请求键已用于其他文件')
+                    document=repository.get(prior['document_id'])
+                    if not document:raise HTTPException(409,'原上传记录不可用')
+                    return {'document':document,'format':detected.format,'format_source':detected.source,'format_note':detected.note}
+        reserve(repository,settings,document_id,size)
         with target.open("xb") as output:
             output.write(head)
             if rest:
@@ -67,13 +84,20 @@ def store_upload(repository, settings, file, idempotency_key, *, scope='local', 
                         (scope, idempotency_key, fingerprint, document.id, now_iso()))
                 if link is not None:
                     link(db, document)
+                commit(db,document_id,document.id)
         else:
-            repository.create(document)
+            with repository.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                db.execute('INSERT INTO documents(id,filename,size,created_at,status,page_count,chunk_count,error,format) VALUES (:id,:filename,:size,:created_at,:status,:page_count,:chunk_count,:error,:format)',document.model_dump())
+                if link is not None:link(db,document)
+                commit(db,document_id,document.id)
         return {"document": document, "format": detected.format,
                 "format_source": detected.source, "format_note": detected.note}
     except Exception:
         # 上传校验或元数据写入失败时清理本次原件，避免残留无记录文件。
         target.unlink(missing_ok=True)
+        from app.storage_governance import release
+        release(repository,document_id)
         raise
     finally:
         # 无论上传成功与否，都释放上传文件句柄。

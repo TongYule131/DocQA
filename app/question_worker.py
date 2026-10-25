@@ -172,7 +172,8 @@ class QuestionWorker:
             if resolution:
                 from app.intent_management import IntentManagement
                 routing_started=time.perf_counter()
-                current=IntentManagement(self.repository).evaluate(job['question'],snapshot.get('intent_base_id'),scope='document')
+                current=IntentManagement(self.repository).evaluate(job['question'],snapshot.get('intent_base_id'),scope='document',
+                    context=snapshot.get('conversation_context',{}).get('entity_context',{}),provider_signature=self.rag.index.embedding.signature)
                 if current!=resolution:raise _Stopped('intent_changed','意图配置已变化，请重新提交本轮')
                 if resolution['route']['kind']=='SYSTEM':
                     from app.intent_replies import interaction_answer
@@ -205,15 +206,15 @@ class QuestionWorker:
         except _Stopped as exc:
             self.store.finish(job_id, token, status=exc.status, code=exc.code, message=exc.message,
                               call_status="uncertain" if current_sequence is not None else "failed",
-                              elapsed_ms=_elapsed(call_started) if call_started is not None else None, provider_usage=provider_usage())
+                              elapsed_ms=_elapsed(call_started) if call_started is not None else None, provider_usage=provider_usage(), not_sent=getattr(exc,'not_sent',False))
         except (ModelError, EmbeddingError) as exc:
             # 适配器异常虽然是安全提示，统一返回稳定状态，避免测试或新适配器夹带原始响应。
-            uncertain = exc.status_code == 504
-            code = "call_uncertain" if uncertain else "generation_error" if isinstance(exc, ModelError) else "embedding_error"
+            uncertain = exc.status_code == 504 or getattr(exc,'uncertain',False)
+            code = 'not_sent' if getattr(exc,'not_sent',False) else "call_uncertain" if uncertain else "generation_error" if isinstance(exc, ModelError) else "embedding_error"
             self.store.finish(job_id, token, status="needs_attention" if uncertain else "failed", code=code,
                 message=("上游请求超时，调用结果不确定；系统不会自动重发，请核实后明确重试" if uncertain else
-                         "问答上游请求失败，系统不会自动重发；请检查模型配置或服务状态"),
-                call_status="uncertain" if uncertain else "failed", elapsed_ms=_elapsed(call_started), provider_usage=provider_usage())
+                         "配额或熔断阻止发送，未消耗调用额度；可稍后明确重试" if code=='not_sent' else "问答上游请求失败，系统不会自动重发；请检查模型配置或服务状态"),
+                call_status="uncertain" if uncertain else "failed", elapsed_ms=_elapsed(call_started), provider_usage=provider_usage(),not_sent=getattr(exc,'not_sent',False))
             logger.warning("问答任务 %s request_id=%s 失败 code=%s", job_id, job["request_id"], code)
         except RagError as exc:
             self.store.finish(job_id, token, status="failed", code=exc.code,

@@ -219,7 +219,9 @@ class RagService:
         from app.answer_stream import STREAM_VERSION
         from app.rag_answer_strategy import strategy_for_question
         from app.rag_composition import needs_plan
+        from app.query_understanding import policy
         frozen = {
+            'reranker_input_hash':policy(self.settings)['reranker_replay_hash'],
             "answer_strategy":strategy_for_question(question),
             "composition_version":"evidence-composition-v1",
             "provider_requests_expected":2+int(needs_plan(question)),
@@ -322,7 +324,7 @@ class RagService:
                         max_candidates=self.settings.question_candidate_k,
                         fulltext_budget=context_cap, max_items=self.settings.question_context_k,
                         payload_transform=task_evidence_payload,
-                        reranker=configured_reranker(self.settings))
+                        reranker=configured_reranker(self.settings,frozen.get('reranker_input_hash')))
             emit("query_completed", {"search_result": search_result,
                                      "provider_usage": getattr(self.index.embedding, "last_call_metadata", None)})
         retrieval_ms = _elapsed_ms(retrieval_started)

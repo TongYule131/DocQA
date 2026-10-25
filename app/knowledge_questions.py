@@ -79,6 +79,11 @@ class KnowledgeQuestions:
         value['result']=json.loads(row['result_json']) if row['result_json'] else None
         with self.repository.connect() as db:
             value['calls']=[{k:r[k] for k in ['sequence_no','role','status','error_code','elapsed_ms']} for r in db.execute('SELECT * FROM kb_task_calls WHERE task_id=? ORDER BY sequence_no',(row['id'],))]
+            if value['result'] and value['result'].get('clarification'):
+                state=db.execute('SELECT state,resolve_key,choices_json FROM conversation_clarifications WHERE task_id=?',(row['id'],)).fetchone()
+                value['result']['clarification']['state']=state['state'] if state else 'cancelled'
+                if state and state['state']=='resolving':
+                    value['result']['clarification'].update(request_key=state['resolve_key'],confirmed_names=json.loads(state['choices_json']))
         return value
 
     def detail(self, identifier):
@@ -88,6 +93,9 @@ class KnowledgeQuestions:
         conv['base']=self.access.base(conv['base_id'])
         from app.entity_memory import context
         with self.repository.connect() as db:conv['entity_memory']=context(db,conv,self.access.settings)
+        with self.repository.connect() as db:
+            documents=[dict(r) for r in db.execute('SELECT d.document_id,p.filename FROM knowledge_base_snapshot_documents d JOIN documents p ON p.id=d.document_id JOIN knowledge_bases b ON b.active_snapshot_id=d.snapshot_id WHERE b.id=?',(conv['base_id'],))]
+        conv['entity_memory']['material_scope']=[{'document_id':d['document_id'],'name':d['filename']} for d in documents if not json.loads(conv['document_filter_json']) or d['document_id'] in json.loads(conv['document_filter_json'])]
         return conv
 
     def submit(self, identifier, question, key, *, document_ids=None, submission_id=None):
@@ -108,24 +116,28 @@ class KnowledgeQuestions:
         from app.conversation_memory import MEMORY_VERSION,retrieval_question
         from app.entity_memory import context
         with self.repository.connect() as db:entity_context=context(db,conv,self.access.settings)
+        entity_context['material_scope']=[{'document_id':d['document_id']} for d in self.base_scope(conv['base_id'],document_ids)[1]]
         memory={'version':MEMORY_VERSION,'notes':conv['memory_notes'] if conv['memory_enabled'] else '',
                 'recent_questions':history,'entity_context':entity_context}
         from app.query_understanding import understand
         understanding=understand(question,entity_context,self.access.settings)
         base=self.access.base(conv['base_id'])
         from app.intent_management import IntentManagement
-        resolution=IntentManagement(self.repository).evaluate(question,base['id']);route=resolution['route']
+        resolution=IntentManagement(self.repository).evaluate(question,base['id'],context=entity_context,provider_signature=self.access.index.embedding.signature);route=resolution['route']
+        understanding=resolution['understanding']
         docs=[] if route['kind']=='SYSTEM' else self.base_scope(conv['base_id'],document_ids)[1]
         frozen=[]
         for doc in docs:
             snapshot=self.rag.capture_snapshot(doc['document_id'],question,published=doc) if route['kind']=='KB' else None
             frozen.append({'snapshot':snapshot,'filename':doc['filename'],'document_id':doc['document_id']})
-        payload={'question':question,'documents':frozen,'snapshot_id':base['active_snapshot_id'],
+        from app.query_understanding import policy
+        payload={'question':question,'documents':frozen,'snapshot_id':base['active_snapshot_id'],'understanding_policy':policy(self.access.settings),
                  'configuration':configuration(self.access.settings,self.access.index.embedding),
                  'conversation_id':identifier,'memory_epoch':conv['memory_epoch'],'recent_questions':history,
                  'memory_notes':conv['memory_notes'] if conv['memory_enabled'] else '',
                  'document_filter':document_ids,'route':route,'intent_decision':resolution['decision'],
-                 'query_plan':resolution['query_plan'],'understanding':understanding,'conversation_context':memory}
+                 'query_plan':resolution['query_plan'],'understanding':understanding,'conversation_context':memory,
+                 'semantic_pending':resolution['semantic_pending']}
         from app.query_planning import execution_budget
         payload['retrieval_budget']=execution_budget(resolution['query_plan'],self.access.settings,route)
         payload['retrieval_question']=retrieval_question(understanding['search_question'],memory)
@@ -142,6 +154,15 @@ class KnowledgeQuestions:
             tool=ToolRegistry(self.repository).get(route.get('tool_id'))
             if not tool or not tool['enabled']:raise HTTPException(409,'此意图的工具尚未启用')
             payload['tool_revision']=tool['revision']
+        if resolution['semantic_pending']:
+            from app.intent_routing import eligible_rows
+            from app.knowledge_tools import ToolRegistry
+            registry=ToolRegistry(self.repository)
+            payload['semantic_tool_revisions']={}
+            for candidate in eligible_rows(IntentManagement(self.repository).list(),base['id']):
+                if candidate['kind']=='MCP':
+                    tool=registry.get(candidate.get('tool_id'))
+                    if tool and tool['enabled'] and tool['read_only']:payload['semantic_tool_revisions'][tool['id']]=tool['revision']
         row=self.tasks.create('question',payload,identifier+'/'+key,base_id=base['id'],owner=self.owner,max_requests=8,conversation_id=identifier)
         return self.present(row)
 
@@ -151,6 +172,7 @@ class KnowledgeQuestions:
             db.execute('BEGIN IMMEDIATE')
             if db.execute("SELECT 1 FROM kb_conversation_turns t JOIN kb_tasks j ON j.id=t.task_id WHERE t.conversation_id=? AND j.status IN ('queued','running')",(identifier,)).fetchone():raise HTTPException(409,'请等待本轮完成或停止后修改记忆')
             db.execute('UPDATE kb_conversations SET memory_enabled=?,memory_epoch=memory_epoch+1,updated_at=? WHERE id=?',(int(enabled),now_iso(),identifier))
+            db.execute("UPDATE conversation_clarifications SET state='cancelled',updated_at=? WHERE conversation_id=? AND state IN ('awaiting','resolving')",(now_iso(),identifier))
             # 清除通过epoch隔离，旧历史仍可审计，但不再进入记忆。
             if clear:
                 db.execute('UPDATE kb_conversations SET memory_enabled=0 WHERE id=?',(identifier,))

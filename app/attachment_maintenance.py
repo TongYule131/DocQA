@@ -19,6 +19,12 @@ def require_stopped(data):
 
 
 def purge_expired(data):
+    from app.maintenance import maintenance
+    with maintenance(data,'temporary_purge'):
+        return _purge_expired(data)
+
+
+def _purge_expired(data):
     data = Path(data).resolve()
     require_stopped(data)
     repository = Repository(data / 'docqa.db')
@@ -70,14 +76,23 @@ def purge_expired(data):
             db.execute("UPDATE parse_versions SET result_json_path=NULL,markdown_path=NULL,quality_summary=NULL WHERE document_id=?", (doc,))
             db.execute("UPDATE documents SET filename='已清理临时资料',error=NULL,chunk_count=0,active_parse_version_id=NULL,active_index_id=NULL WHERE id=?", (doc,))
             db.execute('UPDATE conversation_attachments SET purged_at=? WHERE document_id=?', (now_iso(), doc))
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='document_storage_owners'").fetchone():
+                db.execute('DELETE FROM document_storage_owners WHERE document_id=?',(doc,))
             if db.execute('PRAGMA foreign_key_check').fetchone():
                 raise RuntimeError('附件清理后外键检查未通过')
         purged.append(doc)
-    temporary=purge_temporary_bases(data,repository)
+    temporary=_purge_temporary_bases(data,repository)
     return {'purged': purged, 'temporary_bases':temporary,'provider_calls': 0}
 
 
 def purge_temporary_bases(data,repository):
+    from app.maintenance import maintenance
+    with maintenance(data,'temporary_purge'):
+        require_stopped(Path(data))
+        return _purge_temporary_bases(Path(data),repository)
+
+
+def _purge_temporary_bases(data,repository):
     """同一停机维护覆盖新临时库；只清内容，保留任务、费用及幂等墓碑。"""
     with repository.connect() as db:
         bases=db.execute("SELECT k.id FROM knowledge_bases k WHERE k.kind='temporary' AND k.purged_at IS NULL AND (k.expires_at<=? OR k.revoked_at IS NOT NULL OR EXISTS(SELECT 1 FROM knowledge_base_documents d JOIN conversation_attachments a ON a.document_id=d.document_id JOIN conversations c ON c.id=a.conversation_id WHERE d.knowledge_base_id=k.id AND (a.revoked_at IS NOT NULL OR a.purged_at IS NOT NULL OR c.deleted_at IS NOT NULL)))",(now_iso(),)).fetchall()
@@ -102,6 +117,12 @@ def purge_temporary_bases(data,repository):
         with repository.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             # 外部在途请求的账本不删除，也不把它误记为未收费。
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='conversation_entity_memory'").fetchone():
+                db.execute('DELETE FROM conversation_entity_memory WHERE conversation_id IN (SELECT id FROM kb_conversations WHERE base_id=?)',(base_id,))
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='answer_feedback'").fetchone():
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='feedback_cases'").fetchone():
+                    db.execute("UPDATE feedback_cases SET payload_json=NULL WHERE feedback_id IN (SELECT id FROM answer_feedback WHERE source='knowledge' AND task_id IN (SELECT id FROM kb_tasks WHERE base_id=?))",(base_id,))
+                db.execute("UPDATE answer_feedback SET share_context=0,context_json=NULL,comment='',revision=revision+1 WHERE source='knowledge' AND task_id IN (SELECT id FROM kb_tasks WHERE base_id=?)",(base_id,))
             db.execute("UPDATE kb_task_calls SET status='uncertain',error_code='temporary_purged',finished_at=? WHERE task_id IN (SELECT id FROM kb_tasks WHERE base_id=?) AND status='intent'",(now_iso(),base_id))
             db.execute('DELETE FROM answer_stream_events WHERE kb_task_id IN (SELECT id FROM kb_tasks WHERE base_id=?)',(base_id,))
             db.execute('DELETE FROM kb_task_checkpoints WHERE task_id IN (SELECT id FROM kb_tasks WHERE base_id=?)',(base_id,))
@@ -119,6 +140,8 @@ def purge_temporary_bases(data,repository):
                 db.execute('UPDATE parse_attempts SET detail=NULL,error_message=NULL WHERE task_id IN (SELECT id FROM parse_tasks WHERE document_id=?)',(doc,))
                 db.execute('UPDATE parse_versions SET result_json_path=NULL,markdown_path=NULL,quality_summary=NULL WHERE document_id=?',(doc,))
                 db.execute("UPDATE documents SET filename='已清理临时资料',active_parse_version_id=NULL,active_index_id=NULL,chunk_count=0,error=NULL WHERE id=?",(doc,))
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='document_storage_owners'").fetchone():
+                    db.execute('DELETE FROM document_storage_owners WHERE document_id=?',(doc,))
             db.execute('UPDATE knowledge_bases SET purged_at=? WHERE id=?',(now_iso(),base_id))
             if db.execute('PRAGMA foreign_key_check').fetchone():raise RuntimeError('临时库清理后外键检查未通过')
         purged.append(base_id)

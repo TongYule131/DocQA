@@ -13,7 +13,7 @@ export function feedbackButton(task,{api,run,notice}){
     const title=node('h3','回答反馈'),category=node('select'),comment=node('textarea'),share=node('input'),label=node('label'),error=node('p','','error'),submit=node('button','提交反馈'),close=node('button','关闭','secondary');
     category.setAttribute('aria-label','错误类型');for(const [value,name] of Object.entries(categories)){const option=node('option',name);option.value=value;category.append(option);}
     comment.maxLength=2000;comment.setAttribute('aria-label','反馈说明');comment.placeholder='说明问题发生在哪里（可选）';
-    share.type='checkbox';label.append(share,node('span','自愿向管理员分享本题问题、回答和引用快照，可在“我的反馈”撤回。'));
+    share.type='checkbox';label.append(share,node('span','自愿分享本题问题、回答、引用及必要版本／复现信息，不含其他会话。可在“我的反馈”撤回后续读取。'));
     submit.type=close.type='button';close.onclick=()=>dialog.close();
     submit.onclick=()=>run(async()=>{submit.disabled=true;error.textContent='';try{
       await api('/api/feedback',json('POST',{source:task.source,task_id:task.id,request_key:key,category:category.value,comment:comment.value,share_context:share.checked}));
@@ -27,8 +27,13 @@ export function feedbackButton(task,{api,run,notice}){
 export async function showMyFeedback(api){
   const dialog=node('dialog'),close=node('button','关闭','secondary'),body=node('div');close.type='button';close.onclick=()=>{dialog.close();dialog.remove();};
   dialog.append(node('h3','我的反馈'),body,close);document.body.append(dialog);dialog.showModal();
-  try{const rows=await api('/api/feedback');if(!rows.length)body.append(node('p','暂无反馈'));
+  let offset=0;const limit=20,previous=node('button','上一页','secondary'),next=node('button','下一页','secondary');
+  previous.type=next.type='button';dialog.insertBefore(previous,close);dialog.insertBefore(next,close);
+  async function load(){previous.disabled=next.disabled=true;body.replaceChildren();try{const rows=await api(offset?`/api/feedback?offset=${offset}&limit=${limit}`:'/api/feedback');if(!rows.length)body.append(node('p','暂无反馈'));
     for(const row of rows){const item=node('section');item.append(node('p',`${categories[row.category]} · ${states[row.status]}`),node('p',row.comment||''));
+      if(row.client_reply)item.append(node('p','处理结果：'+row.client_reply));
       if(row.share_context){const revoke=node('button','撤回正文分享','secondary');revoke.onclick=async()=>{try{await api(`/api/feedback/${encodeURIComponent(row.id)}/shared-context`,{method:'DELETE'});revoke.disabled=true;revoke.textContent='已撤回';}catch(e){body.append(node('p',e.message,'error'));}};item.append(revoke);}body.append(item);}
-  }catch(e){body.append(node('p',e.message,'error'));}
+    previous.disabled=offset===0;next.disabled=rows.length<limit;
+  }catch(e){body.append(node('p',e.message,'error'));previous.disabled=offset===0;}}
+  previous.onclick=()=>{offset=Math.max(0,offset-limit);return load();};next.onclick=()=>{offset+=limit;return load();};await load();
 }

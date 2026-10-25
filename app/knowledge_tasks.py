@@ -71,6 +71,9 @@ class KnowledgeTasks:
             if prior:
                 if prior['input_hash']!=fingerprint(payload): raise HTTPException(409,'请求键已用于不同的输入')
                 return dict(prior)
+            if payload.get('operation')=='intent_examples':
+                active=db.execute("SELECT * FROM kb_tasks WHERE kind='index' AND status IN ('queued','running') AND json_extract(input_json,'$.operation')='intent_examples' AND json_extract(input_json,'$.semantic_configuration')=?",(payload['semantic_configuration'],)).fetchone()
+                if active:return dict(active)
             if conversation_id:
                 conv=db.execute('SELECT * FROM kb_conversations WHERE id=? AND owner_user_id IS ?', (conversation_id,owner)).fetchone()
                 if not conv or conv['deleted_at'] or conv['archived'] or conv['base_id']!=base_id or conv['memory_epoch']!=payload.get('memory_epoch'):
@@ -83,13 +86,17 @@ class KnowledgeTasks:
             if kind=='index' and db.execute("SELECT 1 FROM kb_tasks WHERE document_id=? AND kind='index' AND status IN ('queued','running')", (document_id,)).fetchone():
                 raise HTTPException(409,'文档已有索引任务，请刷新查看进度')
             from app.resource_governance import admit
-            admit(db,self.repository,owner,submission_id=payload.get('submission_id'))
+            admit(db,self.repository,owner,submission_id=payload.get('submission_id'),ingestion_id=payload.get('ingestion_id'))
             db.execute('INSERT INTO kb_tasks(id,kind,base_id,document_id,owner_user_id,request_key,input_json,input_hash,max_requests,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
                 (identifier,kind,base_id,document_id,owner,key,encoded,fingerprint(payload),max_requests,stamp,stamp))
             if conversation_id:
                 number=db.execute('SELECT COALESCE(MAX(turn_no),0)+1 FROM kb_conversation_turns WHERE conversation_id=?',(conversation_id,)).fetchone()[0]
                 if number>100:raise HTTPException(409,'会话已达100轮，请新建会话')
                 db.execute('INSERT INTO kb_conversation_turns VALUES (?,?,?)',(conversation_id,number,identifier))
+                clarification=payload.get('understanding',{}).get('clarification')
+                if clarification and payload.get('route',{}).get('code')=='clarification-needed':
+                    db.execute('INSERT INTO conversation_clarifications(id,task_id,conversation_id,owner_user_id,epoch,needed_count,choices_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
+                        ('clarify-'+identifier,identifier,conversation_id,owner,payload['memory_epoch'],clarification['needed_count'],dump(clarification['choices']),stamp,stamp))
                 db.execute("UPDATE kb_conversations SET updated_at=?,title=CASE WHEN title='新会话' THEN ? ELSE title END WHERE id=?",(stamp,payload.get('question','')[:60],conversation_id))
         return self.row(identifier)
 
@@ -130,6 +137,12 @@ class KnowledgeTasks:
             if payload.get('tool_revision') is not None and row['status'] in ('queued','running'):
                 tool=db.execute('SELECT enabled,revision FROM mcp_tools WHERE id=?',(payload['route'].get('tool_id'),)).fetchone()
                 if not tool or not tool['enabled'] or tool['revision']!=payload['tool_revision']:return False
+            if row['status'] in ('queued','running'):
+                resolved=db.execute("SELECT payload_json FROM kb_task_checkpoints WHERE task_id=? AND name='resolved_intent'",(row['id'],)).fetchone()
+                route=json.loads(resolved[0]).get('route',{}) if resolved else {}
+                if route.get('kind')=='MCP':
+                    tool=db.execute('SELECT enabled,revision FROM mcp_tools WHERE id=?',(route.get('tool_id'),)).fetchone()
+                    if not tool or not tool['enabled'] or tool['revision']!=payload.get('semantic_tool_revisions',{}).get(route.get('tool_id')):return False
         return True
 
     @classmethod
@@ -191,6 +204,15 @@ class KnowledgeTasks:
         with self.repository.connect() as db:row=db.execute('SELECT payload_json FROM kb_task_checkpoints WHERE task_id=? AND name=?',(identifier,name)).fetchone()
         return json.loads(row[0]) if row else None
 
+    def save_local_resolution(self,job,resolution,name='resolved_intent'):
+        encoded=dump(resolution)
+        with self.repository.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not self.valid(db,job['id'],job['lease_token']):raise TaskStopped('task_stopped','执行状态已变化','cancelled')
+            prior=db.execute('SELECT payload_json FROM kb_task_checkpoints WHERE task_id=? AND name=?',(job['id'],name)).fetchone()
+            if prior and prior[0]!=encoded:raise TaskStopped('intent_changed','语义策略或对象规划已变化，请新建任务')
+            db.execute('INSERT OR IGNORE INTO kb_task_checkpoints VALUES (?,?,?,?)',(job['id'],name,encoded,now_iso()))
+
     def diagnostic(self, job, kind, payload):
         """诊断不是成功检查点；不能供恢复路径跳过校验或再次触发模型调用。"""
         if kind not in {'retrieval','validation'}:raise ValueError('invalid_diagnostic_kind')
@@ -212,9 +234,9 @@ class KnowledgeTasks:
             if not self.valid(db,identifier,token):raise TaskStopped('task_stopped','任务已停止','cancelled')
             row=db.execute('SELECT * FROM kb_tasks WHERE id=?',(identifier,)).fetchone()
             if row['requests_used']>=row['max_requests']:raise TaskStopped('budget_exhausted','任务请求预算不足，未发起新的请求','needs_attention')
-            sequence=row['requests_used']+1
-            db.execute('UPDATE kb_tasks SET requests_used=? WHERE id=?',(sequence,identifier))
-            db.execute("INSERT INTO kb_task_calls(id,task_id,sequence_no,role,status,started_at) VALUES (?,?,?,?,'intent',?)",('kcall-'+uuid4().hex,identifier,sequence,role,now_iso()))
+            sequence=db.execute('SELECT COALESCE(MAX(sequence_no),0)+1 FROM kb_task_calls WHERE task_id=?',(identifier,)).fetchone()[0]
+            db.execute('UPDATE kb_tasks SET requests_used=requests_used+1 WHERE id=?',(identifier,))
+            db.execute("INSERT INTO kb_task_calls(id,task_id,sequence_no,role,status,started_at,delivery_status) VALUES (?,?,?,?,'intent',?,'reserved')",('kcall-'+uuid4().hex,identifier,sequence,role,now_iso()))
         started=time.perf_counter();raw=usage=None
         try:
             raw,usage=work()
@@ -222,22 +244,28 @@ class KnowledgeTasks:
             with self.repository.connect() as db:
                 db.execute('BEGIN IMMEDIATE')
                 # 调用完成即结算，即使中途撤权也保留费用记录，但不能发布正文。
-                db.execute("UPDATE kb_task_calls SET status='succeeded',usage_json=?,finished_at=?,elapsed_ms=? WHERE task_id=? AND sequence_no=?",(dump(_usage_metadata(usage)),now_iso(),round((time.perf_counter()-started)*1000),identifier,sequence))
+                db.execute("UPDATE kb_task_calls SET status='succeeded',delivery_status='sent',usage_json=?,finished_at=?,elapsed_ms=? WHERE task_id=? AND sequence_no=?",(dump(_usage_metadata(usage)),now_iso(),round((time.perf_counter()-started)*1000),identifier,sequence))
                 if self.valid(db,identifier,token) and checkpoint:
                     db.execute('INSERT OR IGNORE INTO kb_task_checkpoints VALUES (?,?,?,?)',(identifier,checkpoint,dump(value),now_iso()))
             self.check(identifier,token)
             return value
         except Exception as exc:
             from app.rag_validation import ModelOutputError
-            uncertain=(getattr(exc,'status_code',None)==504 or isinstance(exc,TaskStopped) and exc.status=='needs_attention'
+            if getattr(exc, 'not_sent', False):
+                from app.call_accounting import settle_not_sent
+                with self.repository.connect() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    settle_not_sent(db, 'kb_task_calls', identifier, sequence)
+                raise TaskStopped('not_sent', '配额、熔断或执行状态阻止发送，未消耗调用额度；可稍后明确重试') from None
+            uncertain=(getattr(exc,'uncertain',False) or getattr(exc,'status_code',None)==504 or isinstance(exc,TaskStopped) and exc.status=='needs_attention'
                 or not hasattr(exc,'status_code') and not isinstance(exc,(TaskStopped,ValueError,ModelOutputError)))
             code='output_'+exc.reason if isinstance(exc,ModelOutputError) else 'call_uncertain' if uncertain else 'call_failed'
             if role=='generation' and isinstance(exc,ModelOutputError):
                 self.diagnostic(job,'validation',dict(reason=exc.reason,location=exc.location,
                     sequence_no=sequence,output=raw if isinstance(raw,(str,dict)) else None))
             with self.repository.connect() as db:
-                db.execute("UPDATE kb_task_calls SET status=?,error_code=?,usage_json=?,finished_at=?,elapsed_ms=? WHERE task_id=? AND sequence_no=? AND status='intent'",
-                    ('uncertain' if uncertain else 'failed',code,dump(_usage_metadata(usage)),now_iso(),round((time.perf_counter()-started)*1000),identifier,sequence))
+                db.execute("UPDATE kb_task_calls SET status=?,delivery_status=?,error_code=?,usage_json=?,finished_at=?,elapsed_ms=? WHERE task_id=? AND sequence_no=? AND status='intent'",
+                    ('uncertain' if uncertain else 'failed','uncertain' if uncertain else 'sent',code,dump(_usage_metadata(usage)),now_iso(),round((time.perf_counter()-started)*1000),identifier,sequence))
             if isinstance(exc,TaskStopped):raise
             messages = {
                 'output_composition_plan_invalid': '证据选材与段落计划无效，未发起正文生成',

@@ -63,6 +63,7 @@ class AnalysisWorker:
                  model=None, worker_id: str | None = None, sleep=time.sleep):
         self.settings = settings
         self.runtime = RuntimeGuard(settings.data_dir, "analysis-worker")
+        self.runtime.health_grace_seconds=max(settings.deepseek_timeout_seconds,settings.embedding_timeout_seconds)+120
         self.repository = repository or Repository(settings.data_dir / "docqa.db")
         if model is None:
             from app.deepseek import DeepSeekModel
@@ -546,10 +547,11 @@ class AnalysisWorker:
         try:
             raw = self.model.generate(system_prompt, user_prompt)
         except ModelError as exc:
-            self.repository.settle_analysis_call(job.id, sequence, status="failed",
-                                                error_code=ERROR_MODEL,
-                                                elapsed_ms=_elapsed_ms(started))
-            return None, (ERROR_MODEL, str(exc), False)
+            uncertain=not getattr(exc,'not_sent',False) and (exc.status_code==504 or getattr(exc,'uncertain',False))
+            self.repository.settle_analysis_call(job.id, sequence, status='uncertain' if uncertain else 'failed',
+                                                error_code='not_sent' if getattr(exc,'not_sent',False) else ERROR_MODEL,
+                                                elapsed_ms=_elapsed_ms(started),not_sent=getattr(exc,'not_sent',False))
+            return None, ('not_sent' if getattr(exc,'not_sent',False) else ERROR_MODEL, str(exc), uncertain)
         except Exception:
             # 未分类异常：调用可能已在供应商侧发生，账本保持 intent，
             # 交由恢复逻辑转 needs_attention，绝不自动重发。
@@ -898,6 +900,8 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s")
     settings = Settings.from_env()
+    from app.role_logging import configure
+    configure(settings.data_dir,'analysis-worker')
     worker = AnalysisWorker(settings)
     signal.signal(signal.SIGINT, worker.request_stop)
     if hasattr(signal, "SIGTERM"):

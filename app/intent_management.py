@@ -76,10 +76,27 @@ class IntentManagement:
             if db.execute('SELECT 1 FROM intent_nodes WHERE parent_id=?',(identifier,)).fetchone():raise HTTPException(409,'请先处理子节点')
             if not db.execute('DELETE FROM intent_nodes WHERE id=? AND revision=?',(identifier,revision)).rowcount:raise HTTPException(409,'节点已变更或不存在')
 
-    def evaluate(self,question,base_id=None,scope='knowledge'):
-        route,decision=decide(question,base_id,self.list(),scope)
+    def evaluate(self,question,base_id=None,scope='knowledge',*,context=None,query_vector=None,provider_signature=None):
+        from app.conversation_memory import valid_entity_context
+        if context and not valid_entity_context(context):raise HTTPException(422,'问题理解上下文格式无效')
+        from app.query_understanding import understand
+        from app.resource_governance import policy
+        settings=policy(self.repository);understanding=understand(question,context or {},settings)
+        rows=self.list();semantic=[];semantic_policy=None
+        if getattr(settings,'semantic_intent_enabled',False) and provider_signature:
+            from app.semantic_intents import SemanticIntents
+            from app.intent_routing import eligible_rows
+            index=SemanticIntents(self.repository);semantic_policy=index.policy(rows,provider_signature)
+            if query_vector is not None:semantic=index.candidates(eligible_rows(rows,base_id,scope),query_vector,provider_signature)
+        route,decision=decide(question,base_id,rows,scope,contextual_question=understanding['resolved_question'],
+            semantic_candidates=semantic,semantic_policy=semantic_policy)
+        business_route=route
+        if understanding['ambiguous_reference'] and route['kind']!='SYSTEM':
+            route={'kind':'SYSTEM','code':'clarification-needed','base_id':base_id,'top_k':None,'response_text':understanding['clarification']['question']}
+            decision={**decision,'code':route['code'],'name':'确认问题对象','kind':'SYSTEM','method':'clarification','reason':'指代对象尚未唯一确认'}
         from app.query_planning import plan_query
-        return {'route':route,'decision':decision,'query_plan':plan_query(question,route)}
+        return {'route':route,'business_route':business_route,'decision':decision,'query_plan':plan_query(understanding['resolved_question'],route),'understanding':understanding,
+            'semantic_pending':bool(getattr(settings,'semantic_intent_enabled',False) and query_vector is None and route['kind']=='KB')}
 
     def resolve(self,question,base_id,scope='knowledge'):
         return self.evaluate(question,base_id,scope)['route']

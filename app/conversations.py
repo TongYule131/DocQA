@@ -84,10 +84,10 @@ class Conversations:
                 (conversation['id'], conversation['memory_after_turn']))][::-1]
         from app.query_understanding import build_memory,MEMORY_TURN_LIMIT
         source_turns=[{'turn':r['turn_no'],'question':r['question'][:600]} for r in db.execute(
-            "SELECT t.turn_no,t.question FROM conversation_turns t JOIN question_jobs j ON j.id=t.job_id "
-            "WHERE t.conversation_id=? AND t.turn_no>? AND j.status='succeeded' ORDER BY t.turn_no DESC LIMIT ?",
+            "SELECT t.turn_no,t.question FROM conversation_turns t JOIN question_jobs j ON j.id=t.job_id JOIN question_results r ON r.id=j.result_id "
+            "WHERE t.conversation_id=? AND t.turn_no>? AND j.status='succeeded' AND COALESCE(json_extract(r.answer_json,'$.response_kind'),'knowledge')!='system' ORDER BY t.turn_no DESC LIMIT ?",
             (conversation['id'],conversation['memory_after_turn'],MEMORY_TURN_LIMIT))][::-1] if conversation['memory_enabled'] else []
-        entity_context=build_memory(source_turns,summary_enabled=self.access.settings.memory_summary_enabled)
+        entity_context=build_memory(source_turns,notes=conversation['memory_notes'],summary_enabled=self.access.settings.memory_summary_enabled)
         return {'enabled': bool(conversation['memory_enabled']), 'epoch': conversation['memory_epoch'],
                 'context': {'version': MEMORY_VERSION, 'notes': conversation['memory_notes'] if conversation['memory_enabled'] else '',
                             'recent_questions': questions, **({'entity_context':entity_context} if entity_context['entities'] or entity_context['summary'] else {})}}
@@ -143,7 +143,8 @@ class Conversations:
         with self.repository.connect() as db:
             base_row=db.execute('SELECT knowledge_base_id FROM knowledge_base_snapshots WHERE id=?',(published['snapshot_id'],)).fetchone() if published else None
         intent_base_id=base_row[0] if base_row else None
-        resolution=IntentManagement(self.repository).evaluate(payload.question.strip(),intent_base_id,scope='document')
+        resolution=IntentManagement(self.repository).evaluate(payload.question.strip(),intent_base_id,scope='document',
+            context=(memory.get('context') or {}).get('entity_context',{}),provider_signature=self.access.index.embedding.signature)
         return self.questions.submit(conversation['document_id'],
             {'question': payload.question.strip(), 'idempotency_key': 'conv/' + identifier + '/' + payload.idempotency_key},
             request_id=request_id, owner_user_id=self.owner,

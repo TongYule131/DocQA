@@ -23,6 +23,7 @@ from typing import Any, Callable
 
 from app.config import Settings
 from app.schemas import QualityWarning, SourceLocation
+from app.retrieval_channels import Discard
 
 # 证据包序列化格式版本：变更字段含义时必须同步提升，便于排查历史记录。
 EVIDENCE_SCHEMA_VERSION = "rag-evidence-v1"
@@ -204,21 +205,21 @@ def build_candidates(results: list[dict], *, min_score: float | None) -> tuple[l
             drop_reasons.append("候选缺少 chunk_id，已丢弃")
             continue
         if item.chunk_id in seen_ids:
-            drop_reasons.append(f"重复候选 chunk_id={item.chunk_id}，已去重")
+            drop_reasons.append(Discard(item.chunk_id,'duplicate',f"重复候选 chunk_id={item.chunk_id}，已去重"))
             continue
         seen_ids.add(item.chunk_id)
         if min_score is not None and item.score < min_score:
             drop_reasons.append(
-                f"候选 chunk_id={item.chunk_id} 分值低于配置阈值，已丢弃")
+                Discard(item.chunk_id,'threshold',f"候选 chunk_id={item.chunk_id} 分值低于配置阈值，已丢弃"))
             continue
         if not item.text.strip():
-            drop_reasons.append(f"候选 chunk_id={item.chunk_id} 没有正文，已丢弃")
+            drop_reasons.append(Discard(item.chunk_id,'quality',f"候选 chunk_id={item.chunk_id} 没有正文，已丢弃"))
             continue
         # 同一句话出现在不同章节/表格/页上可能支持不同事实，不能只按正文消重。
         key = (item.text, item.heading_path, item.block_id, item.page,
                json.dumps([s.model_dump() for s in item.sources], sort_keys=True))
         if key in seen_text:
-            drop_reasons.append(f"候选 chunk_id={item.chunk_id} 与已选片段正文重复，已去重")
+            drop_reasons.append(Discard(item.chunk_id,'duplicate',f"候选 chunk_id={item.chunk_id} 与已选片段正文重复，已去重"))
             continue
         seen_text.add(key)
         candidates.append(item)
@@ -273,12 +274,12 @@ def pack_evidence(candidates: list[EvidenceItem], *, context_max_chars: int,
         if candidate in selected: continue
         required=(partners or {}).get(identifier,[identifier])
         if any(i not in by_id for i in required):
-            drop_reasons.append(f"候选 chunk_id={candidate.chunk_id} 的关联证据缺少成员，已整组舍弃")
+            drop_reasons.append(Discard(candidate.chunk_id,'incomplete_group',f"候选 chunk_id={candidate.chunk_id} 的关联证据缺少成员，已整组舍弃"))
             continue
         unit = [by_id[i] for i in required if by_id[i] not in selected]
         if not unit: unit = [candidate]
         if max_items is not None and len(selected) + len(unit) > max_items:
-            drop_reasons.append(f"候选 chunk_id={candidate.chunk_id} 超出证据块数上限，已舍弃")
+            drop_reasons.extend(Discard(i.chunk_id,'budget',f"候选 chunk_id={i.chunk_id} 超出证据块数上限，已舍弃") for i in unit)
             continue
         # 先用占位编号序列化，确认整块装入后是否仍在预算内。
         for n,item in enumerate(unit,len(selected)+1): item.reference_id=n
@@ -286,8 +287,7 @@ def pack_evidence(candidates: list[EvidenceItem], *, context_max_chars: int,
         if len(serialized) > context_max_chars:
             for item in unit: item.reference_id=0
             truncated = True
-            drop_reasons.append(
-                f"候选 chunk_id={candidate.chunk_id} 超出参考资料字符预算，已整块舍弃")
+            drop_reasons.extend(Discard(i.chunk_id,'budget',f"候选 chunk_id={i.chunk_id} 超出参考资料字符预算，已整块舍弃") for i in unit)
             continue
         selected.extend(unit)
         context_chars = len(serialized)
@@ -383,7 +383,7 @@ def build_evidence(search_result: dict, settings: Settings, *,
     blocked=set(math_plan.get('blocked_chunk_ids',[]))
     if blocked:
         candidates=[i for i in candidates if i.chunk_id not in blocked]
-        drop_reasons.extend(f'候选 chunk_id={identifier} 的数学表示不可读，未用于本轮公式核对' for identifier in sorted(blocked))
+        drop_reasons.extend(Discard(identifier,'quality',f'候选 chunk_id={identifier} 的数学表示不可读，未用于本轮公式核对') for identifier in sorted(blocked))
 
     configured_cap = settings.rag_context_max_chars if context_max_chars is None else context_max_chars
     max_chars = configured_cap if context_cap is None else min(configured_cap, context_cap)
@@ -466,7 +466,7 @@ def build_evidence(search_result: dict, settings: Settings, *,
         victim=max(selected,key=lambda i:candidates.index(i))
         discarded=set(partners.get(victim.chunk_id,[victim.chunk_id]))
         selected=[i for i in selected if i.chunk_id not in discarded];truncated=True
-        drop_reasons.append('关联引用元数据超出预算，已舍弃完整关联组')
+        drop_reasons.extend(Discard(identifier,'budget','关联引用元数据超出预算，已舍弃完整关联组') for identifier in discarded)
         for n,item in enumerate(selected,1):item.reference_id=n
         context_chars=len(serialize(selected)) if selected else 0
     # truncated 只表示“因为字符预算不足而舍弃了本可入选的整块”，

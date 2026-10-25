@@ -5,7 +5,7 @@ import httpx
 
 from app.config import Settings
 from app.provider_usage import response_metadata
-from app.resource_governance import guarded_provider
+from app.resource_governance import guarded_provider, mark_provider_sent,mark_provider_completed,record_provider_usage
 
 
 class ModelError(Exception):
@@ -38,6 +38,7 @@ class DeepSeekModel:
                 timeout=self.settings.deepseek_timeout_seconds,
                 max_retries=0,
             ) as client:
+                mark_provider_sent()
                 response = client.chat.completions.create(
                     model=self.settings.deepseek_model,
                     messages=[{"role": "system", "content": system_prompt},
@@ -47,10 +48,13 @@ class DeepSeekModel:
                     reasoning_effort=self.settings.deepseek_reasoning_effort,
                     extra_body={"thinking": {"type": self.settings.deepseek_thinking}},
                 )
+                mark_provider_completed()
         except APITimeoutError:
             raise ModelError(504, "DeepSeek 响应超时，请稍后重试或调整超时配置") from None
         except APIConnectionError:
-            raise ModelError(502, "无法连接 DeepSeek，请检查网络和 API 基础地址") from None
+            error=ModelError(502,"无法连接 DeepSeek，请检查网络和 API 基础地址；请求是否到达上游不确定")
+            error.uncertain=True
+            raise error from None
         except APIStatusError as exc:
             messages = {
                 400: "DeepSeek 请求参数不受支持，请检查模型和思考参数配置",
@@ -75,6 +79,7 @@ class DeepSeekModel:
         except (AttributeError, IndexError, TypeError):
             raise ModelError(502, "DeepSeek 响应结构不完整") from None
         self._call_metadata.set(response_metadata(response, finish_reason=finish_reason))
+        record_provider_usage(self.last_call_metadata)
         if not complete:
             if finish_reason == "length":
                 raise ModelError(502, "DeepSeek 未返回完整答案：输出额度已耗尽；"
@@ -91,11 +96,13 @@ class DeepSeekModel:
         self._call_metadata.set(None)
         if not self.settings.deepseek_api_key.strip():
             raise ModelError(503, '尚未配置 DEEPSEEK_API_KEY')
-        fragments=[];size=0;finish=None;metadata={}
+        from app.rag_validation import ModelOutputError
+        fragments=[];size=0;finish=None;metadata={};validation_error=None;completed=False
         try:
             with OpenAI(api_key=self.settings.deepseek_api_key,base_url=self.settings.deepseek_base_url,
                         timeout=self.settings.deepseek_timeout_seconds,max_retries=0) as client:
                 check_active()
+                mark_provider_sent()
                 with client.chat.completions.create(model=self.settings.deepseek_model,
                     messages=[{'role':'system','content':system_prompt},{'role':'user','content':user_prompt}],
                     stream=True,stream_options={'include_usage':True},max_tokens=self.settings.deepseek_max_tokens,
@@ -116,10 +123,17 @@ class DeepSeekModel:
                             if finish is not None or not isinstance(text,str):raise ModelError(502,'流式响应顺序无效')
                             size+=len(text)
                             if size>MAX_STREAM_CHARS:raise ModelError(502,'流式响应超出受控长度')
-                            fragments.append(text);on_text(text)
+                            fragments.append(text)
+                            if validation_error is None:
+                                try:on_text(text)
+                                except ModelOutputError as exc:
+                                    # 保留首错并停止后续展示；仍读完同一次流取得结束/用量。
+                                    # 不关闭硬闸，不请求第二次生成，不把后续正文当成已校验。
+                                    validation_error=exc;exc.provider_health_neutral=True
                         if choice.finish_reason is not None:
                             if finish is not None:raise ModelError(502,'流式结束标识重复')
                             finish=choice.finish_reason;metadata['finish_reason']=finish
+                    completed=True;mark_provider_completed()
                     request_id=stream.response.headers.get('x-request-id')
                     if request_id and len(request_id)<=200 and all(c.isalnum() or c in '-_.:' for c in request_id):
                         metadata['provider_request_id']=request_id
@@ -131,9 +145,18 @@ class DeepSeekModel:
                              '流式请求被上游拒绝，请检查模型、网关及流式参数；未自动降级重发') from None
         except APIError:
             raise ModelError(504,'上游流式连接未正常结束；系统不会自动重发') from None
+        except BaseException as exc:
+            if not completed:exc.uncertain=True
+            if isinstance(exc,ModelOutputError) or getattr(exc,'status',None) in ('cancelled','needs_attention'):
+                exc.provider_health_neutral=True
+            raise
         finally:
             metadata.setdefault('usage',None);metadata.setdefault('usage_status','unknown')
             self._call_metadata.set(metadata)
+            record_provider_usage(metadata)
+        if validation_error is not None:
+            validation_error.raw_output=''.join(fragments)
+            raise validation_error
         if finish!='stop':
             raise ModelError(502 if finish in ('length','content_filter','tool_calls','function_call') else 504,
                              '流式答案未完整结束；已接收内容不作为最终回答，未自动重发')

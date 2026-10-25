@@ -25,7 +25,11 @@ def rules(tmp_path_factory):
 def test_frozen_routing_corpus(rules,case):
     env,intents=rules
     for scope in ('document','knowledge'):
-        assert intents.evaluate(case['question'],scope=scope)['route']['code']==case['expected']
+        # 原60题封存的是业务分类；S3新增执行前澄清不改写该标签。
+        resolution=intents.evaluate(case['question'],scope=scope)
+        assert resolution['business_route']['code']==case['expected']
+        if resolution['route']['code']=='clarification-needed':
+            assert resolution['understanding']['ambiguous_reference']
     assert not env.embedding.calls and not env.model.calls
 
 

@@ -45,6 +45,7 @@ def test_ready_publication_waits_for_transient_windows_lock_atomically(tmp_path,
     attempts, sleeps = [], []
 
     def locked_replace(source, target):
+        if Path(target)!=destination:return replace(source,target)
         attempts.append((source, target))
         assert destination.read_text(encoding='utf-8') == 'old-complete-record'
         if len(attempts) < 3:
@@ -67,8 +68,10 @@ def test_ready_publication_fails_closed_on_persistent_or_unrelated_errors(
     initialized(tmp_path)
     runtime = RuntimeGuard(tmp_path, 'web')
     attempts, sleeps = [], []
+    replace=os.replace
 
     def denied_replace(source, target):
+        if Path(target).suffix!='.ready':return replace(source,target)
         attempts.append((source, target))
         error = PermissionError('simulated persistent or unrelated failure')
         if winerror is not None:

@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import time
+import threading
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,7 +53,7 @@ def process_start_token(pid: int) -> str | None:
         return None
 
 
-def code_fingerprint() -> str:
+def _code_digest(normalized=False) -> str:
     """绑定业务代码、网页和启停入口，文档/缓存变化不要求重启服务。"""
     paths = [p for p in (PROJECT_ROOT / "app").rglob("*")
              if p.is_file() and p.suffix in {".py", ".js", ".css", ".html"}]
@@ -61,9 +62,19 @@ def code_fingerprint() -> str:
     for path in sorted(paths):
         digest.update(path.relative_to(PROJECT_ROOT).as_posix().encode())
         digest.update(b"\0")
-        digest.update(path.read_bytes())
+        content=path.read_bytes()
+        digest.update(content.replace(b'\r\n',b'\n') if normalized else content)
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def code_fingerprint() -> str:
+    return _code_digest()
+
+
+def source_identity() -> str:
+    """跨Windows／Linux报告绑定；启动身份仍检查实际原始字节。"""
+    return _code_digest(normalized=True)
 
 
 class RuntimeMismatch(RuntimeError):
@@ -78,6 +89,7 @@ class RuntimeGuard:
         self.fingerprint = code_fingerprint()
         self.started_at = datetime.now(timezone.utc).isoformat()
         self.process_start_token = process_start_token(os.getpid())
+        self._heartbeat_lock=threading.Lock()
         expected = os.getenv("DOCQA_EXPECTED_CODE_FINGERPRINT")
         if expected and expected != self.fingerprint:
             raise RuntimeMismatch("启动期间代码已变更，请停止三个本地角色后重新启动")
@@ -87,6 +99,19 @@ class RuntimeGuard:
             raise RuntimeMismatch("代码已更新，当前服务仍是旧进程；请停止 Web 和两个 worker 后重新启动")
 
     def prepare_database(self, allow_upgrade: bool = False) -> None:
+        if not getattr(self,'_lifecycle',None):
+            from app.maintenance import file_lock
+            self._lifecycle=file_lock(self.data_dir/'.local-service'/'lifecycle.lock',shared=True)
+            try:self._lifecycle.__enter__()
+            except RuntimeError:
+                self._lifecycle=None
+                raise RuntimeMismatch('数据目录处于备份、恢复或清理维护中，未启动服务') from None
+        try:self._prepare_database(allow_upgrade)
+        except BaseException:
+            self.release_lifecycle()
+            raise
+
+    def _prepare_database(self,allow_upgrade):
         self.check_code()
         info = inspect_database(self.data_dir)
         if not info["structure_valid"]:
@@ -104,11 +129,43 @@ class RuntimeGuard:
                 version = migrations.validate_schema(db)
         except (sqlite3.Error, migrations.MigrationError) as exc:
             raise RuntimeMismatch("数据库与当前代码不兼容，服务已阻止继续操作；请检查数据库版本和结构") from exc
-        return {"role": self.role, "pid": os.getpid(), "data_dir": str(self.data_dir),
+        state={"role": self.role, "pid": os.getpid(), "data_dir": str(self.data_dir),
                 "database_path": str(self.database_path), "schema_version": version,
                 "expected_schema_version": migrations.SCHEMA_VERSION,
                 "code_fingerprint": self.fingerprint, "started_at": self.started_at,
                 "process_start_token": self.process_start_token}
+        self._publish_heartbeat(state)
+        return state
+
+    def _publish_heartbeat(self,state):
+        if not self._heartbeat_lock.acquire(blocking=False):return
+        try:self._publish_heartbeat_locked(state)
+        finally:self._heartbeat_lock.release()
+
+    def _publish_heartbeat_locked(self,state):
+        if time.monotonic()-getattr(self,'_last_beat',-100)>5:
+            directory=self.data_dir/'.local-service';directory.mkdir(parents=True,exist_ok=True)
+            heartbeat={**state,'checked_at':datetime.now(timezone.utc).isoformat(),
+                'grace_seconds':getattr(self,'health_grace_seconds',30)}
+            temporary=directory/(self.role+f'.{os.getpid()}.{threading.get_ident()}.heartbeat.tmp')
+            temporary.write_text(json.dumps(heartbeat,ensure_ascii=False),encoding='utf-8')
+            for attempt in range(6):
+                try:
+                    temporary.replace(directory/(self.role+'.heartbeat'))
+                    break
+                except OSError as exc:
+                    if getattr(exc,'winerror',None) not in (5,32,33) or attempt==5:raise
+                    time.sleep(0.05*(attempt+1))
+            self._last_beat=time.monotonic()
+
+    def release_lifecycle(self):
+        lock=getattr(self,'_lifecycle',None)
+        if lock:
+            self._lifecycle=None
+            lock.__exit__(None,None,None)
+
+    def __del__(self):
+        self.release_lifecycle()
 
     def service_status(self) -> dict:
         """只读查询角色实际就绪；不启动 worker、不探测外部服务、不领取任务。"""
@@ -139,17 +196,27 @@ class RuntimeGuard:
                 identity_match = token is not None and token == record.get("process_start_token")
                 state["ready"] = identity_match and all(state[key] for key in
                     ("code_match", "schema_match", "data_dir_match"))
+                if state['ready']:
+                    state['ready']=False
+                    heartbeat=json.loads((self.data_dir/'.local-service'/(role+'.heartbeat')).read_text(encoding='utf-8'))
+                    age=(datetime.now(timezone.utc)-datetime.fromisoformat(heartbeat['checked_at'])).total_seconds()
+                    healthy=(heartbeat.get('pid')==record.get('pid') and heartbeat.get('role')==role and
+                        heartbeat.get('data_dir')==str(self.data_dir) and heartbeat.get('process_start_token')==record.get('process_start_token') and
+                        heartbeat.get('code_fingerprint')==self.fingerprint and -30<=age<=heartbeat.get('grace_seconds',30))
+                    state['ready']=healthy;state['heartbeat_age_seconds']=round(age,2)
+                    if not healthy:state['detail']='worker仍存活但进展心跳已过期，请检查卡死或超时'
                 if state["ready"]:
                     state["detail"] = "worker 已就绪"
                 elif not state["running"]:
                     state["detail"] = "worker 已退出，请启动对应 worker"
                 elif not identity_match:
                     state["detail"] = "进程身份无法确认，请重新启动对应 worker"
-                else:
+                elif state.get('heartbeat_age_seconds') is None:
                     state["detail"] = "代码、数据库或目录不匹配，请整体重启三个角色"
             except FileNotFoundError:
-                pass
-            except (OSError, ValueError, TypeError):
+                state['ready']=False;state['detail']='未找到有效进展心跳，请检查并重启对应worker'
+            except (OSError, ValueError, TypeError,KeyError):
+                state['ready']=False
                 state["detail"] = "就绪记录不可读取，请检查并重新启动对应 worker"
             workers.append(state)
         return {"web": web, "workers": workers, "schema_version": current["schema_version"],

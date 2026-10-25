@@ -301,6 +301,14 @@ class Repository:
                     active = self._bind_parse_key(db, active, task.idempotency_key,
                                                   (task.request_summary or {}).get("fingerprint"))
                 return self._task_from_row(active)
+            from app.resource_governance import admit
+            from app.product_access import actor_context
+            actor=actor_context.get();owner=actor['id'] if actor else None
+            ingestion_id=(task.request_summary or {}).get('ingestion_id')
+            if ingestion_id:
+                ingestion=db.execute('SELECT owner_user_id FROM ingestion_jobs WHERE id=?',(ingestion_id,)).fetchone()
+                if ingestion:owner=ingestion['owner_user_id']
+            admit(db,self,owner,ingestion_id=ingestion_id)
             db.execute(
                 """INSERT INTO parse_tasks
                    (id, document_id, status, stage, idempotency_key, request_fingerprint,
@@ -312,6 +320,7 @@ class Repository:
                  task.upstream_task_id, task.attempt_count, task.max_attempts,
                  task.created_at, task.updated_at),
             )
+            db.execute('UPDATE parse_tasks SET owner_user_id=? WHERE id=?',(owner,task.id))
         return self.get_task(task.id)
 
     def get_task(self, task_id: str) -> ParseTask | None:
@@ -402,14 +411,8 @@ class Repository:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             self._recover_expired_leases(db)
-            if task_id:
-                row = db.execute(
-                    "SELECT * FROM parse_tasks WHERE id=? AND status='queued' AND cancel_requested=0",
-                    (task_id,)).fetchone()
-            else:
-                row = db.execute(
-                    "SELECT * FROM parse_tasks WHERE status='queued' AND cancel_requested=0"
-                    " ORDER BY created_at LIMIT 1").fetchone()
+            from app.resource_governance import choose
+            row=choose(db,self,'parse_tasks',task_id)
             if row is None:
                 return None
             if not attachment_available(db, row['document_id']):
@@ -463,7 +466,8 @@ class Repository:
             return result.rowcount == 1
 
     def task_token_valid(self, db: sqlite3.Connection, task_id: str, token: str) -> bool:
-        row = db.execute("SELECT document_id, lease_token, status, lease_expires_at,request_summary FROM parse_tasks WHERE id=?", (task_id,)).fetchone()
+        row = db.execute("SELECT document_id, lease_token, status, lease_expires_at,request_summary,owner_user_id FROM parse_tasks WHERE id=?", (task_id,)).fetchone()
+        if row and row['owner_user_id'] and not db.execute('SELECT 1 FROM product_users WHERE id=? AND active=1',(row['owner_user_id'],)).fetchone():return False
         ingestion_id=json.loads(row['request_summary'] or '{}').get('ingestion_id') if row else None
         if ingestion_id:
             from app.knowledge_scope import base_allowed
@@ -1214,8 +1218,9 @@ class Repository:
         return [self._analysis_job_from_row(row) for row in rows]
 
     def _analysis_job_token_valid(self, db: sqlite3.Connection, job_id: str, token: str) -> bool:
-        row = db.execute("SELECT lease_token, status, lease_expires_at FROM analysis_jobs WHERE id=?",
+        row = db.execute("SELECT lease_token, status, lease_expires_at,owner_user_id FROM analysis_jobs WHERE id=?",
                          (job_id,)).fetchone()
+        if row and row['owner_user_id'] and not db.execute('SELECT 1 FROM product_users WHERE id=? AND active=1',(row['owner_user_id'],)).fetchone():return False
         return bool(row and row["status"] == "running" and row["lease_token"] == token
                     and row["lease_expires_at"] and row["lease_expires_at"] > now_iso())
 
@@ -1362,20 +1367,25 @@ class Repository:
                 return None
             db.execute("UPDATE analysis_jobs SET requests_used=?, updated_at=? WHERE id=?",
                        (next_used, now, job_id))
+            sequence = db.execute('SELECT COALESCE(MAX(sequence_no),0)+1 FROM analysis_calls WHERE job_id=?',(job_id,)).fetchone()[0]
             db.execute(
-                """INSERT INTO analysis_calls(id, job_id, step_id, role, sequence_no, status, started_at)
-                   VALUES (?,?,?,?,?,?,?)""",
-                (f"acall-{job_id}-{next_used}", job_id, step_id, role, next_used, "intent", now))
-            return next_used
+                """INSERT INTO analysis_calls(id, job_id, step_id, role, sequence_no, status, started_at,delivery_status)
+                   VALUES (?,?,?,?,?,?,?,'reserved')""",
+                (f"acall-{job_id}-{sequence}", job_id, step_id, role, sequence, "intent", now))
+            return sequence
 
     def settle_analysis_call(self, job_id: str, sequence_no: int, *, status: str,
-                             error_code: str | None = None, elapsed_ms: int | None = None) -> bool:
+                             error_code: str | None = None, elapsed_ms: int | None = None, not_sent=False) -> bool:
         """结算一次调用：只允许把 intent 行改为终态，避免重复结算掩盖问题。"""
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not_sent:
+                from app.call_accounting import settle_not_sent
+                return settle_not_sent(db,'analysis_calls',job_id,sequence_no)
             result = db.execute(
-                "UPDATE analysis_calls SET status=?, error_code=?, settled_at=?, elapsed_ms=?"
+                "UPDATE analysis_calls SET status=?, delivery_status=?, error_code=?, settled_at=?, elapsed_ms=?"
                 " WHERE job_id=? AND sequence_no=? AND status='intent'",
-                (status, error_code, now_iso(), elapsed_ms, job_id, sequence_no))
+                (status, 'uncertain' if status=='uncertain' else 'sent', error_code, now_iso(), elapsed_ms, job_id, sequence_no))
             return result.rowcount == 1
 
     def analysis_calls(self, job_id: str) -> list[AnalysisCallEntry]:
@@ -1391,7 +1401,7 @@ class Repository:
     def analysis_calls_used(self, job_id: str) -> int:
         """已占用预算次数：包含失败与不确定调用（intent／uncertain 也算已发出）。"""
         with self.connect() as db:
-            return db.execute("SELECT COUNT(*) FROM analysis_calls WHERE job_id=?", (job_id,)).fetchone()[0]
+            return db.execute("SELECT COUNT(*) FROM analysis_calls WHERE job_id=? AND delivery_status!='not_sent'", (job_id,)).fetchone()[0]
 
     def has_uncertain_analysis_call(self, job_id: str) -> bool:
         with self.connect() as db:
@@ -1604,6 +1614,8 @@ class Repository:
             if db.execute("SELECT 1 FROM analysis_jobs WHERE document_id=? AND kind=?"
                           " AND status IN ('queued','running')", (job["document_id"], job["kind"])).fetchone():
                 return False
+            from app.resource_governance import admit
+            admit(db,self,job['owner_user_id'])
             result = db.execute(
                 "UPDATE analysis_jobs SET status='queued', cancel_requested=0, error_code=NULL,"
                 " error_message=NULL, finished_at=NULL, updated_at=?, retry_of=COALESCE(retry_of, id)"

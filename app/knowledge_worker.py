@@ -61,6 +61,9 @@ class KnowledgeWorker:
             if not ingest or not base or ingest['configuration']!=ingestion_configuration(self.settings,base):raise TaskStopped('configuration_changed','上传处理配置已变化，未继续外部调用')
 
     def index(self,job,payload,parent):
+        if payload.get('operation')=='intent_examples':
+            from app.semantic_intents import SemanticIntents
+            return SemanticIntents(self.repository).execute(self,job,payload)
         chunks=self.repository.chunks(job['document_id'],payload['version_id'])
         if evidence_signature(chunks)!=payload['evidence_signature']:raise TaskStopped('source_changed','分块内容已变化，索引未执行')
         worker=self
@@ -102,7 +105,8 @@ class KnowledgeWorker:
         from app.intent_management import IntentManagement
         self.tasks.stage(job['id'],job['lease_token'],'routing')
         with self.tasks.span(job,'意图识别','INTENT',parent):
-            resolution=IntentManagement(self.repository).evaluate(payload['question'],job['base_id']);route=resolution['route']
+            context=payload.get('conversation_context',{}).get('entity_context',{})
+            resolution=IntentManagement(self.repository).evaluate(payload['question'],job['base_id'],context=context,provider_signature=self.embedding.signature);route=resolution['route']
             if route!=payload.get('route') or (payload.get('intent_decision') and resolution['decision']!=payload['intent_decision']):raise TaskStopped('intent_changed','意图配置已变化，请在当前会话重新提交')
         from app.query_planning import execution_budget
         with self.tasks.span(job,'查询任务与证据需求规划','QUERY_PLAN',parent):
@@ -112,7 +116,8 @@ class KnowledgeWorker:
                 raise TaskStopped('query_plan_changed','查询计划或证据预算已变化，请重新提交')
         if route['kind']=='SYSTEM':
             return {'response_kind':'system','answer':route['response_text'],'status':'answered','citations':[],'conclusion':[],
-                'explanation':[],'limitations':[],'route':route['code'],'prompt_version':'system-intent-v1'}
+                'explanation':[],'limitations':[],'route':route['code'],'prompt_version':'system-intent-v1',
+                **({'clarification':{'id':'clarify-'+job['id'],**resolution['understanding']['clarification']}} if route['code']=='clarification-needed' else {})}
         if route['kind']=='MCP':
             from app.knowledge_tools import execute_tool
             return execute_tool(self,job,payload,route,parent)
@@ -159,7 +164,16 @@ class KnowledgeWorker:
                     db.execute('INSERT OR IGNORE INTO kb_task_checkpoints VALUES (?,?,?,?)',
                         (job['id'],'query_understanding',dump(extra),__import__('app.repository',fromlist=['now_iso']).now_iso()))
             search_question+='\n检索子问：'+'；'.join(extra['search_terms']+extra['subquestions'])
+            if 'task_type' in extra:
+                # 模型只能在已冻结预算内调整执行重点；全部原有证据需求继续保留。
+                from app.query_understanding import apply_plan
+                plan=apply_plan(plan,extra)
+                for binding in extra['bindings']:search_question=search_question.replace(binding['reference'],binding['name'])
+                self.tasks.save_local_resolution(job,{'understanding':payload['understanding'],'model_plan':extra,'query_plan':plan},name='resolved_query_plan')
         self.tasks.stage(job['id'],job['lease_token'],'retrieving')
+        self.tasks.save_local_resolution(job,{'search_question':search_question,
+            'query_plan':plan,'provider_signature':self.embedding.signature,
+            'planning_question':payload.get('understanding',{}).get('resolved_question',payload['question'])},name='query_input')
         with self.tasks.span(job,'查询向量','EMBEDDING',parent):
             def query():
                 result=self.embedding.embed([search_question])
@@ -169,6 +183,22 @@ class KnowledgeWorker:
                 if not isinstance(value,list) or len(value)!=1:raise ValueError('query_shape')
                 return [normalize_vector(value[0])]
             vector=self.tasks.call(job,'query_embedding',query,checkpoint='query_vector',validate=validate_query)[0]
+        if payload.get('semantic_pending'):
+            resolved=IntentManagement(self.repository).evaluate(payload['question'],job['base_id'],context=context,
+                query_vector=vector,provider_signature=self.embedding.signature)
+            from app.query_understanding import apply_plan
+            resolved['query_plan']=apply_plan(resolved['query_plan'],self.tasks.checkpoint(job['id'],'query_understanding') or {})
+            self.tasks.save_local_resolution(job,resolved)
+            if resolved['route']['kind']=='MCP':
+                from app.knowledge_tools import ToolRegistry
+                tool=ToolRegistry(self.repository).get(resolved['route'].get('tool_id'))
+                if not tool or payload.get('semantic_tool_revisions',{}).get(tool['id'])!=tool['revision']:
+                    raise TaskStopped('tool_changed','工具未在提交时获准或配置已变化，未执行')
+                from app.knowledge_tools import execute_tool
+                return execute_tool(self,job,{**payload,'route':resolved['route'],'tool_revision':tool['revision']},resolved['route'],parent)
+            plan=resolved['query_plan']
+            resolved_limits=execution_budget(plan,self.settings,resolved['route'])
+            limits={k:min(v,resolved_limits[k]) for k,v in limits.items()}
         worker=self
         class QueryEmbedding:
             signature=worker.embedding.signature
@@ -180,7 +210,9 @@ class KnowledgeWorker:
             try:
                 pack, diagnostics=knowledge_context(index,self.repository,payload['documents'],payload['question'],
                     search_question,self.settings,RetrievalBudget(**{**limits,'context_chars':budget}),
-                    query_plan=plan,check=lambda:self.check(job),observe=lambda name,kind:self.tasks.span(job,name,kind,parent))
+                    query_plan=plan,check=lambda:self.check(job),observe=lambda name,kind:self.tasks.span(job,name,kind,parent),
+                    reranker_expected_hash=payload.get('understanding_policy',{}).get('reranker_replay_hash'),
+                    planning_question=payload.get('understanding',{}).get('resolved_question',payload['question']))
             except PipelineError as exc:
                 if str(exc)=='source_quality_invalid':raise TaskStopped('source_quality_invalid','解析质量无效，请先修复来源') from None
                 raise TaskStopped('source_scope_invalid','证据来源范围无效') from None

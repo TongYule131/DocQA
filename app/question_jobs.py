@@ -271,10 +271,10 @@ class QuestionJobStore:
             pending = db.execute("SELECT 1 FROM question_calls WHERE job_id=? AND status='intent'", (job_id,)).fetchone()
             if pending:
                 return None
-            number, stamp = row["requests_used"] + 1, now_iso()
-            db.execute("UPDATE question_jobs SET requests_used=?,updated_at=? WHERE id=?", (number, stamp, job_id))
-            db.execute("INSERT INTO question_calls(id,job_id,sequence_no,role,lease_token,status,started_at)"
-                       " VALUES (?,?,?,?,?,'intent',?)", (f"qcall-{uuid4().hex}", job_id, number, role, token, stamp))
+            number, stamp = db.execute('SELECT COALESCE(MAX(sequence_no),0)+1 FROM question_calls WHERE job_id=?',(job_id,)).fetchone()[0], now_iso()
+            db.execute("UPDATE question_jobs SET requests_used=requests_used+1,updated_at=? WHERE id=?", (stamp, job_id))
+            db.execute("INSERT INTO question_calls(id,job_id,sequence_no,role,lease_token,status,started_at,delivery_status)"
+                       " VALUES (?,?,?,?,?,'intent',?,'reserved')", (f"qcall-{uuid4().hex}", job_id, number, role, token, stamp))
         return number
 
     def checkpoint(self, job_id: str, role: str) -> dict | None:
@@ -317,24 +317,28 @@ class QuestionJobStore:
                            " ON CONFLICT(job_id,role) DO UPDATE SET payload_json=excluded.payload_json",
                            (job_id, _dump(diagnostics), stamp))
             if sequence_no is not None:
-                db.execute("UPDATE question_calls SET status='succeeded',settled_at=?,elapsed_ms=?,provider_usage_json=?"
+                db.execute("UPDATE question_calls SET status='succeeded',delivery_status='sent',settled_at=?,elapsed_ms=?,provider_usage_json=?"
                            " WHERE job_id=? AND sequence_no=? AND lease_token=? AND status='intent'",
                            (stamp, max(0, elapsed_ms), _dump(_usage_metadata(provider_usage)), job_id, sequence_no, token))
         return True
 
     def finish(self, job_id: str, token: str, *, status: str, code: str, message: str,
-               call_status: str = "failed", elapsed_ms: int | None = None, provider_usage=None) -> bool:
+               call_status: str = "failed", elapsed_ms: int | None = None, provider_usage=None, not_sent=False) -> bool:
         stamp = now_iso()
         with self.repository.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             if not self._valid(db, job_id, token):
                 return False
             row = db.execute("SELECT cancel_requested FROM question_jobs WHERE id=?", (job_id,)).fetchone()
+            if not_sent:
+                from app.call_accounting import settle_not_sent
+                for call in db.execute("SELECT sequence_no FROM question_calls WHERE job_id=? AND lease_token=? AND status='intent'",(job_id,token)).fetchall():
+                    settle_not_sent(db,'question_calls',job_id,call['sequence_no'])
             if row[0]:
                 status, code, message = "cancelled", "cancelled", "已取消后续处理；在途请求可能继续计费"
-            db.execute("UPDATE question_calls SET status=?,error_code=?,settled_at=?,elapsed_ms=?,provider_usage_json=?"
+            db.execute("UPDATE question_calls SET status=?,delivery_status=?,error_code=?,settled_at=?,elapsed_ms=?,provider_usage_json=?"
                        " WHERE job_id=? AND lease_token=? AND status='intent'",
-                       (call_status, code, stamp, elapsed_ms, _dump(_usage_metadata(provider_usage)), job_id, token))
+                       (call_status, 'uncertain' if call_status=='uncertain' else 'sent', code, stamp, elapsed_ms, _dump(_usage_metadata(provider_usage)), job_id, token))
             db.execute("UPDATE question_jobs SET status=?,error_code=?,error_message=?,finished_at=?,updated_at=?,"
                        "lease_token=NULL,lease_expires_at=NULL WHERE id=?", (status, code, message, stamp, stamp, job_id))
             self._close_attempt(db, job_id, token, status, stamp, code)
@@ -686,6 +690,8 @@ class QuestionJobService:
             if key:
                 db.execute("INSERT INTO question_request_keys VALUES (?,?,?,?,?,?)",
                            (job["document_id"], key, job_id, "retry", fingerprint, stamp))
+            from app.resource_governance import admit
+            admit(db,self.repository,row['owner_user_id'])
             db.execute("UPDATE question_calls SET error_code='retry_acknowledged_uncertain'"
                        " WHERE job_id=? AND status='uncertain'", (job_id,))
             db.execute("UPDATE question_jobs SET status='queued',stage='queued',stage_detail='明确重试，复用已有检查点',"

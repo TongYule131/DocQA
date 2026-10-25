@@ -1,6 +1,8 @@
 # ragent 代码对比与 DocQA 提升方案
 
-> 本轮S2→S3→S4→S5隔离候选已完成四阶段代码、92项集成定向检查、稳定启停复测及合成浏览器检查；整包提交临时分支codex/rag-s2-s5-ci后运行GitHub全量CI，提交时CI结论待返回。尚未部署正式库。候选schema15／hybrid-context-v10／pipeline-v5，正式仍v60／schema14。范围、配置、迁移和未验证出口见[完整链路实施说明](../S2-S5完整链路实施说明.md)。本轮真实调用0，账本285/288；不将代码完成当作全部语义验收通过。
+> 最新实施（2026-10-25，整包CI前）：候选schema16工程补齐已完成本轮代码和定向核验，正式仍v60／schema14、未部署。60题标注已由用户确认封存；检索保留集完整可见22/24，业务语义意图合成未见表达22/24未达95%，相关可选功能保持关闭。C02失败不重发；Windows跨登录、人工全程试点及独立回答语义认证仍开放。唯一账本318/328、余10（本轮HTTP33），290风险确认和292完成解释附原账本保留。本地全量未执行，新整包GitHub full待执行；不能以旧CI当本轮结论。38项状态、容量／恢复证据和限定范围见[最新任务书](../下一阶段任务书-S2-S5闭环补齐与试点验收.md)。以下旧日期／版本／数字保留为历史记录，以上方矩阵为准。
+
+> 2026-10-25完整性复核：6d7dd06的GitHub full CI通过记录保留；S2～S5均有未闭环内容，本次隔离复现9项缺陷，列出38项未完成工作及6项保留待办。当前候选不宜直接部署，先修计费／配额、熔断、备份恢复和隐私生命周期问题，再按S2→S3→S4→S5补齐。具体任务、证据和出口见[下一阶段任务书](../下一阶段任务书-S2-S5闭环补齐与试点验收.md)。正式v60／schema14未改，285/288、余3；本轮真实调用0、本地全量未执行。
 
 
 版本：路线与实施记录 v1.2；2026-10-24（同步当前状态与下一批范围）。本文包含初始对比设计、前三批交付和后续规划；当前实施／发布状态见第9节，不能把全部规划当作已完成。
@@ -338,3 +340,13 @@ QueryPlan 建议包含 `task_type`、原问题、检索改写、实体及其来�
 | R12 | [CitationContextEnricher](https://github.com/nageoffer/ragent/blob/ff93871ab88fff24a5dac7feee7ea342359a3439/rag/src/main/java/com/nageoffer/ai/ragent/rag/core/source/CitationContextEnricher.java)、[GroundingChunksAssembler](https://github.com/nageoffer/ragent/blob/ff93871ab88fff24a5dac7feee7ea342359a3439/rag/src/main/java/com/nageoffer/ai/ragent/rag/core/source/GroundingChunksAssembler.java)、[引用提示](https://github.com/nageoffer/ragent/blob/ff93871ab88fff24a5dac7feee7ea342359a3439/rag/src/main/resources/prompt/answer-citation-rules.st) | 请求内编号、文档级归并及引用格式；后者的 grounding 用于推荐问题，不是逐事实校验器 |
 | R13 | [RoutingLLMService](https://github.com/nageoffer/ragent/blob/ff93871ab88fff24a5dac7feee7ea342359a3439/infra-ai/src/main/java/com/nageoffer/ai/ragent/infra/chat/RoutingLLMService.java)、[ChatQueueLimiter](https://github.com/nageoffer/ragent/blob/ff93871ab88fff24a5dac7feee7ea342359a3439/rag/src/main/java/com/nageoffer/ai/ragent/rag/service/ratelimit/ChatQueueLimiter.java)、[FairDistributedRateLimiter](https://github.com/nageoffer/ragent/blob/ff93871ab88fff24a5dac7feee7ea342359a3439/rag/src/main/java/com/nageoffer/ai/ragent/rag/service/ratelimit/FairDistributedRateLimiter.java) | 首包／健康／候选降级、公平队列、许可释放与取消 |
 | R14 | [MessageFeedbackServiceImpl](https://github.com/nageoffer/ragent/blob/ff93871ab88fff24a5dac7feee7ea342359a3439/rag/src/main/java/com/nageoffer/ai/ragent/rag/service/impl/MessageFeedbackServiceImpl.java) | 消息归属、投票、原因、评论和异步反馈 |
+
+## 9.6 S2～S5基础候选工程交付与后续复核（2026-10-25）
+
+四阶段基础链路已串联并通过工程CI；随后完整性复核确认S2冻结指标、S3理解执行、S4复验证据、S5准入／恢复等均未完全闭环，另复现9项缺陷，以上方任务书为准。S2交付多通道身份／原分／名次、融合和淘汰归因、冻结候选复放及默认关闭的精排回放；S3交付受控术语、100轮内有来源实体、旧会话桥接、用户编辑／清除及默认关闭的一次查询规划；S4保留语言与逐论断闸门并交付用户反馈、主动分享／撤回及复现到关闭工作流；S5交付用户／全局排队、活跃及日配额、供应商熔断、只读向量缓存、显式驻留安装和备份恢复工具。
+
+这批是候选工程交付，正式实例仍v60／schema14。最终full CI对应6d7dd06／运行40112513853，1867项Python零失败／错误／跳过、12项网页及全部离线关卡通过；此前1865项4失败原报告保留并已集中修复。正式库只读副本的迁移／恢复保全通过，不等于正式发布或生产驻留已验收。后续先修已复现缺陷、补齐各阶段实现闭环，再做人工冻结语料、真实语义／容量与发布验收；沿用已有基础，也不把可选组件默认关闭当作已验证真实收益。细节见本轮完整链路实施说明。
+
+### S3意图范围复核（2026-10-25）
+
+第9.6节的工程交付不等于S3全部设计已实现：现有业务意图仍为intent-rules-v2，规则之外回退当前库KB。实体记忆和受控术语尚未反馈到IntentManagement.evaluate；模型查询规划仅追加检索词及子问，未合并意图／任务类型／指代。歧义标记未被执行路径消费，缺少主动澄清闭环；语义候选及校准、未知表达人工集和真实MCP业务验收仍待完成。当前S3应标为部分完成，不据CI全过或基础节点配置声称意图功能完善。

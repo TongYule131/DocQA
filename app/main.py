@@ -73,6 +73,8 @@ _SNIFF_BYTES = 1024 * 1024
 def create_app(settings: Settings | None = None) -> FastAPI:
     # 应用工厂支持注入配置，测试可使用独立临时目录而不污染实际资料。
     settings = settings or Settings.from_env()
+    from app.role_logging import configure
+    configure(settings.data_dir,'web')
     runtime = RuntimeGuard(settings.data_dir, "web")
     model = DeepSeekModel(settings)
     repository = Repository(settings.data_dir / "docqa.db")
@@ -103,7 +105,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if summary.get("applied"):
             logger.info("数据库迁移完成：%s（备份 %s）", summary["applied"], summary.get("backup"))
         runtime.mark_ready()
-        yield
+        import asyncio
+        async def heartbeat():
+            while True:
+                await asyncio.sleep(5)
+                try:runtime.check()
+                except RuntimeMismatch:return
+        heartbeat_task=asyncio.create_task(heartbeat())
+        try:yield
+        finally:
+            heartbeat_task.cancel()
+            try:await heartbeat_task
+            except asyncio.CancelledError:pass
+            runtime.release_lifecycle()
 
     app = FastAPI(title="智能文档分析与知识问答系统", version="0.2.0", lifespan=lifespan)
     app.state.runtime_guard = runtime

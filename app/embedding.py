@@ -8,7 +8,7 @@ from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError
 
 from app.config import Settings
 from app.provider_usage import response_metadata
-from app.resource_governance import provider_guard
+from app.resource_governance import provider_guard, mark_provider_sent, mark_provider_completed, record_provider_usage
 
 
 class EmbeddingError(Exception):
@@ -65,9 +65,12 @@ class APIEmbedding:
                         timeout=self.settings.embedding_timeout_seconds, max_retries=0) as client:
                 for offset in range(0, len(texts), self.settings.embedding_batch_size):
                     batch = texts[offset:offset + self.settings.embedding_batch_size]
-                    with provider_guard(self.settings, 'embedding', EmbeddingError):
+                    with provider_guard(self.settings, 'embedding', EmbeddingError, delivery_tracked=True):
+                        mark_provider_sent()
                         response = client.embeddings.create(
                             model=self.settings.embedding_model, input=batch, encoding_format="float")
+                        mark_provider_completed()
+                        record_provider_usage(response_metadata(response))
                     call_metadata.append(response_metadata(response))
                     self._call_metadata.set({"calls": list(call_metadata)})
                     # 按响应 index 恢复输入顺序，不能依赖服务商返回数组的排列。
@@ -88,7 +91,9 @@ class APIEmbedding:
         except APITimeoutError:
             raise EmbeddingError(504, "Embedding 网关响应超时，请稍后重试或调整超时配置") from None
         except APIConnectionError:
-            raise EmbeddingError(502, "无法连接 Embedding 网关，请检查网络和基础地址") from None
+            error=EmbeddingError(502,"无法连接 Embedding 网关，请检查网络和基础地址；请求是否到达上游不确定")
+            error.uncertain=True
+            raise error from None
         except APIStatusError as exc:
             messages = {401: "Embedding 密钥无效，请检查网关 API Key",
                         402: "Embedding 网关账户余额不足",

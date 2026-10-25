@@ -100,6 +100,12 @@ class KnowledgeTraces:
             if payload.get('query_plan'):
                 from app.query_planning import describe_plan
                 query_plan=describe_plan(payload['query_plan'])
+            if record['source']=='knowledge':
+                with self.repository.connect() as db:
+                    resolved=db.execute("SELECT payload_json FROM kb_task_checkpoints WHERE task_id=? AND name='resolved_intent'",(identifier,)).fetchone()
+                if resolved:
+                    from app.intent_routing import public_decision
+                    value=json.loads(resolved[0]);intent=public_decision(value['decision'])
         for span in spans:span['offset_ms']=milliseconds(record['started_at'],span['started_at'])
         return {**record,'spans':spans,'calls':calls,'children':children,'intent':intent,'query_plan':query_plan,'diagnostics':diagnostics,'content_policy':'仅含运行元数据；不展示用户问题、提示词、文档正文或原始响应。',
                 'timing_note':'旧任务只展示实际记录的外调节点；未记录的阶段不补造耗时。'}

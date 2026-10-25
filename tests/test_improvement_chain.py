@@ -127,10 +127,8 @@ def test_feedback_privacy_idempotency_workflow_and_revocation(tmp_path):
     with pytest.raises(HTTPException):feedback.review(saved['id'],Review(expected_revision=1,status='closed'))
     with pytest.raises(HTTPException):feedback.review(saved['id'],Review(expected_revision=1,status='reproduced'))
     row=feedback.review(saved['id'],Review(expected_revision=1,status='reproduced',root_cause='presentation'))
-    row=feedback.review(saved['id'],Review(expected_revision=row['revision'],status='fixed',regression_case='synthetic-case-1'))
-    with pytest.raises(HTTPException):feedback.review(saved['id'],Review(expected_revision=row['revision'],status='verified',original_retest='run-1'))
-    row=feedback.review(saved['id'],Review(expected_revision=row['revision'],status='verified',original_retest='run-1',negative_retest='negative-run-2'))
-    assert feedback.review(saved['id'],Review(expected_revision=row['revision'],status='closed'))['status']=='closed'
+    # 新闭环不再接受任意文本凭据；真实登记报告的正向流程由专门用例覆盖。
+    with pytest.raises(HTTPException):feedback.review(saved['id'],Review(expected_revision=row['revision'],status='fixed',regression_case='synthetic-case-1'))
     assert not env.model.calls and not env.embedding.calls
 
 

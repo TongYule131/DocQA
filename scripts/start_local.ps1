@@ -121,6 +121,7 @@ function Start-Role([string]$role, [string[]]$arguments, [int]$rolePort) {
     $env:DOCQA_DATA_DIR = $resolvedDataDir
     $env:DOCQA_EXPECTED_CODE_FINGERPRINT = $runtimeInfo.code_fingerprint
     $env:DOCQA_ALLOW_DATABASE_UPGRADE = if ($AllowDatabaseUpgrade) { '1' } else { '0' }
+    $env:DOCQA_MANAGED_LOGGING = '1'
     $stdout = Join-Path $logDir "$role.out.log"
     $stderr = Join-Path $logDir "$role.err.log"
     $process = Start-Process -FilePath $python -ArgumentList $arguments -WorkingDirectory $projectRoot `
@@ -163,7 +164,7 @@ function Start-Role([string]$role, [string[]]$arguments, [int]$rolePort) {
 
 # 启动顺序：Web 先启动（迁移由 Web 完成），再启动两个 worker。
 $launchAttempted = $true
-Start-Role "web" @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "$Port") $Port | Out-Null
+Start-Role "web" @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "$Port", "--no-access-log") $Port | Out-Null
 # 不能靠固定 600ms 假定迁移成功；Web 就绪后才启动会读取任务的 worker。
 $ready = $false
 for ($attempt = 0; $attempt -lt 30; $attempt++) {

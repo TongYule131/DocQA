@@ -2,7 +2,9 @@
 from collections import OrderedDict
 from hashlib import sha256
 import json
+import sys
 from threading import RLock
+from types import MappingProxyType
 
 from app.embedding import normalize_vector
 
@@ -23,8 +25,8 @@ class VectorCache:
                 _, (_, size) = self.entries.popitem(last=False)
                 self.size -= size
             if max_bytes and key in self.entries:
-                value, _ = self.entries.pop(key)
-                self.entries[key] = (value, sum(len(v) * 32 + 128 for v in value.values()))
+                value, size = self.entries.pop(key)
+                self.entries[key] = (value, size)
                 return value, True
         value = {}
         for identifier, raw in rows:
@@ -32,7 +34,9 @@ class VectorCache:
             if len(vector) != dimension:
                 raise ValueError('dimension_mismatch')
             value[identifier] = vector
-        size = sum(len(v) * 32 + 128 for v in value.values())
+        size = (sys.getsizeof(value)+sys.getsizeof(key)+sum(sys.getsizeof(k) for k in key)
+            +sum(sys.getsizeof(i)+sys.getsizeof(v)+sum(sys.getsizeof(n) for n in v) for i,v in value.items()))
+        value = MappingProxyType(value)
         if 0 < size <= max_bytes:
             with self.lock:
                 while self.entries and self.size + size > max_bytes:

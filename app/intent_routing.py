@@ -4,7 +4,7 @@ import json
 import re
 import unicodedata
 
-ROUTING_VERSION = 'intent-rules-v2'
+ROUTING_VERSION = 'intent-context-semantic-v3'
 INTENT_SCHEMA = """
 ALTER TABLE intent_nodes ADD COLUMN match_mode TEXT NOT NULL DEFAULT 'exact'
  CHECK(match_mode IN ('exact','interaction','keywords'));
@@ -29,17 +29,14 @@ def normalized(text):
 def public_decision(decision):
     """可进入管理链路的元数据，不含客户问题、匹配原句或系统回复正文。"""
     return {k: decision[k] for k in ('version', 'configuration', 'scope', 'code', 'name', 'kind',
-            'method', 'reason', 'candidates') if k in decision}
+            'method', 'reason', 'candidates','semantic_candidates') if k in decision}
 
 
-def decide(question, base_id, rows, scope='knowledge'):
+def eligible_rows(rows, base_id, scope='knowledge'):
     if scope not in ('knowledge', 'document'):
         raise ValueError('invalid_intent_scope')
     by_id = {r['id']: r for r in rows}
     parents = {r['parent_id'] for r in rows if r['parent_id']}
-    query = normalized(question)
-    signature = hashlib.sha256(json.dumps([ROUTING_VERSION, rows], ensure_ascii=False,
-        sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     eligible = []
     for row in rows:
         current, seen, allowed = row, set(), True
@@ -54,6 +51,15 @@ def decide(question, base_id, rows, scope='knowledge'):
         if (allowed and row['id'] not in parents and (scope == 'knowledge' or row['kind'] == 'SYSTEM')
                 and (row['kind'] != 'SYSTEM' or row['response_text'].strip())):
             eligible.append(row)
+    return eligible
+
+
+def decide(question, base_id, rows, scope='knowledge', *, contextual_question=None, semantic_candidates=(), semantic_policy=None):
+    query = normalized(question)
+    contextual = normalized(contextual_question or question)
+    signature = hashlib.sha256(json.dumps([ROUTING_VERSION, rows,semantic_policy], ensure_ascii=False,
+        sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    eligible = eligible_rows(rows,base_id,scope)
     family = next((key for key, pattern in PATTERNS.items() if re.fullmatch(pattern, query)), None)
     groups = [[], [], []]
     for row in eligible:
@@ -65,24 +71,30 @@ def decide(question, base_id, rows, scope='knowledge'):
             method, score = 'interaction', 1.0
         elif row.get('match_mode') == 'keywords' and row['kind'] == 'KB':
             words = [normalized(w) for w in row.get('keywords', [])]
-            hits = sum(bool(w) and w in query for w in words)
+            hits = sum(bool(w) and w in contextual for w in words)
             if hits:
                 method, score = 'keywords', round(hits / len(words), 3)
         if method:
             groups[{'exact': 0, 'interaction': 1, 'keywords': 2}[method]].append((row, method, score))
     matches = next((g for g in groups if g), [])
+    if not matches and semantic_candidates and semantic_policy:
+        accepted={r['id']:r for r in eligible}
+        ranked=[c for c in semantic_candidates if c['node_id'] in accepted and c['kind']!='SYSTEM']
+        if (ranked and ranked[0]['score']>=semantic_policy['threshold'] and
+            (len(ranked)<2 or ranked[0]['score']-ranked[1]['score']>=semantic_policy['margin'])):
+            matches=[(accepted[ranked[0]['node_id']],'semantic',ranked[0]['score'])]
     candidates = [{'code': r['code'], 'name': r['name'], 'kind': r['kind'], 'method': m,
                    'score': s} for r, m, s in matches]
     if len(matches) == 1:
         route, method, _ = matches[0]
         reason = {'exact': '命中完整示例', 'interaction': '命中限定的纯交互表达',
-                  'keywords': '命中当前知识库的业务关键词'}[method]
+                  'keywords': '命中当前知识库的业务关键词','semantic':'命中经校准的语义候选门槛及间隔'}[method]
     else:
         route = {'kind': 'KB', 'code': 'knowledge-default', 'base_id': base_id, 'top_k': None}
         method, reason = 'fallback', '多个节点同时命中，保留知识检索' if matches else '未命中受控规则，保留知识检索'
     decision = dict(version=ROUTING_VERSION, configuration=signature, scope=scope, code=route['code'],
                     name=route.get('name', '知识检索'), kind=route['kind'], method=method,
-                    reason=reason, candidates=candidates, score_note='规则命中强度，不是语义概率')
+                    reason=reason, candidates=candidates, semantic_candidates=list(semantic_candidates),score_note='规则或语义排序分，不是正确概率')
     return route, decision
 
 

@@ -146,7 +146,7 @@ def _plan_retrieval_v1(question: str, vector_result: dict, chunks: list, *, max_
     return result
 
 
-RETRIEVAL_STRATEGY_VERSION = "hybrid-context-v10"
+RETRIEVAL_STRATEGY_VERSION = "hybrid-context-v12"
 
 
 def _search_text(text: str) -> str:
@@ -249,7 +249,7 @@ def _definition_and_section_anchors(question: str, pool: list[dict], texts: list
 
 def _plan_retrieval_current(question: str, vector_result: dict, chunks: list, *, max_candidates: int = 40,
                    fulltext_budget: int | None = None, max_items: int = 20, payload_transform=None,
-                   query_plan: dict | None = None) -> dict:
+                   query_plan: dict | None = None, channels=None) -> dict:
     """本地覆盖重排：先保留各子问和结构解释，再有限扩展并动态停止。
 
     保留真实余弦分值供阈值检查；融合和规则分数只决定顺序，不是置信度。
@@ -282,25 +282,20 @@ def _plan_retrieval_current(question: str, vector_result: dict, chunks: list, *,
                     from app.rag_math_evidence import math_evidence
                     old['planning']['math_evidence']=math_evidence(old['results'],question)
             return {**old,"strategy":RETRIEVAL_STRATEGY_VERSION}
-    hits = {h["chunk_id"]: h for h in vector_result.get("results", [])}
-    cosines = vector_result.get("candidate_scores", {})
-    pool = []
-    for c in sorted(chunks, key=lambda c: (c.order_index if c.order_index is not None else 1 << 30, c.id)):
-        pool.append(dict(hits.get(c.id) or dict(chunk_id=c.id, document_id=c.document_id,
-            parse_version_id=c.parse_version_id, page=c.page, text=c.text,
-            score=cosines.get(c.id, 0.0), chunk_type=c.chunk_type, heading_path=c.heading_path,
-            order_index=c.order_index, block_id=c.block_id, sources=[s.model_dump() for s in c.sources])))
+    from app.retrieval_channels import collect_channels, scores, structural_hit
+    channels = channels or collect_channels(question,vector_result,chunks)
+    pool = channels['pool']
     texts = [_search_text(h["text"]) for h in pool]
-    headings,derived_heading_count = _heading_views(pool)
+    headings,derived_heading_count = channels['headings'],channels['derived_heading_count']
     labels = [_is_label(h) for h in pool]
-    aspects = retrieval_aspects(_search_text(question))
-    global_lex = dict(_bm25(_search_text(question), texts))
+    aspects = channels['aspects']
+    global_lex = scores(channels,'lexical','original')
     top_global = max(global_lex.values(), default=1.0)
     vector_rank = {h["chunk_id"]: i for i,h in enumerate(vector_result.get("results", []))}
     ranks, values = [], []
     for aspect in aspects:
-        lexical = dict(_bm25(aspect["query"], texts))
-        heading_scores = dict(_bm25(aspect["query"], headings))
+        lexical = scores(channels,'lexical',aspect['id'])
+        heading_scores = scores(channels,'structural','heading:'+aspect['id'])
         top = max(lexical.values(), default=1.0)
         top_heading = max(heading_scores.values(), default=1.0)
         scored = []
@@ -324,13 +319,15 @@ def _plan_retrieval_current(question: str, vector_result: dict, chunks: list, *,
         ranks.append(sorted(range(len(pool)), key=lambda i: (-scored[i], i)))
     selected, reasons = [], {}
     def add(i, reason):
+        if 0 <= i < len(pool) and reason not in ('coverage_rerank','vector_candidate_floor'):
+            structural_hit(channels,pool[i]['chunk_id'],reason)
         if 0 <= i < len(pool) and i not in selected and len(selected) < max_candidates:
             selected.append(i)
             reasons[pool[i]["chunk_id"]] = reason
 
     # 课时/步骤的编号常嵌在PDF正文中，不能仅靠不完整的标题父链。
     stage_ranges = []
-    if any(a["kind"] == "stages" for a in aspects):
+    if any(a["kind"] == "stages" for a in aspects) and re.search(r'阶段|课时|步骤|教学',question):
         starts = [i for i,t in enumerate(texts) if re.search(
             r"(?:^|[。！？\n])\s*[1-9][.．]\s*[\u4e00-\u9fff]", t)]
         for n,start in enumerate(starts):
@@ -432,6 +429,9 @@ def _plan_retrieval_current(question: str, vector_result: dict, chunks: list, *,
         add(i,"vector_candidate_floor")
     from app.rag_evidence_slots import evidence_slots, SLOT_PLAN_VERSION
     slots = evidence_slots(question, pool, query_plan=query_plan)
+    for slot in slots:
+        for identifier in slot['candidate_ids']:
+            structural_hit(channels,identifier,'slot:'+slot['kind'])
     from app.rag_math_evidence import math_evidence
     math_plan=math_evidence(pool,question) if 'formula_check' in query_plan['facets'] else {}
     # 为每个实际槽位留出候选空间，不能只保留先前宽泛排名中的候选。
@@ -484,6 +484,7 @@ def input_coverage_hints(planning: dict, selected_ids: set[str]) -> dict:
 
 
 def plan_retrieval(question, vector_result, chunks, *, reranker=None, **kwargs):
-    from app.retrieval_channels import attach_channels
-    result = _plan_retrieval_current(question, vector_result, chunks, **kwargs)
-    return attach_channels(question, vector_result, chunks, result, reranker=reranker) if chunks else result
+    from app.retrieval_channels import attach_channels,collect_channels
+    channels = collect_channels(question,vector_result,chunks) if chunks else None
+    result = _plan_retrieval_current(question, vector_result, chunks, channels=channels, **kwargs)
+    return attach_channels(question, vector_result, chunks, result, reranker=reranker,channels=channels) if chunks else result

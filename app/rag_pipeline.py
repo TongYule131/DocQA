@@ -16,7 +16,7 @@ from app.rag_source_diagnostics import source_diagnostics
 from app.rag_math_evidence import admission_partners,group_hints
 from app.rag_slot_ranges import visible_ranges
 
-PIPELINE_VERSION = 'grounded-retrieval-pipeline-v5'
+PIPELINE_VERSION = 'grounded-retrieval-pipeline-v7'
 
 
 @dataclass(frozen=True)
@@ -38,9 +38,11 @@ class PipelineError(ValueError):
 
 
 def knowledge_context(index, repository, documents, question, search_question, settings, budget,
-                      *, query_plan=None, check=lambda: None, observe=lambda *args: nullcontext()):
+                      *, query_plan=None, check=lambda: None, observe=lambda *args: nullcontext(), reranker_expected_hash=None, reranker_adapter=None, planning_question=None):
     """所有通道只读同一冻结版本；观察器只记时，不记录用户正文。"""
     query_plan = query_plan or plan_query(question)
+    planning_question=planning_question or question
+    reranker = reranker_adapter or configured_reranker(settings,reranker_expected_hash)
     packs, diagnostics, slots_by_key = [], [], {}
     for doc in documents:
         check()
@@ -54,9 +56,9 @@ def knowledge_context(index, repository, documents, question, search_question, s
             quality = source_diagnostics(chunks, version,blocks=blocks)
             if quality['quality_status'] == 'invalid': raise PipelineError('source_quality_invalid')
         with observe('关键词、结构线索与融合重排', 'RETRIEVE_FUSION'):
-            planned = plan_retrieval(question, found, chunks, max_candidates=budget.candidate_limit,
+            planned = plan_retrieval(planning_question, found, chunks, max_candidates=budget.candidate_limit,
                 fulltext_budget=budget.context_chars, max_items=budget.context_limit,
-                payload_transform=task_segment_payload, query_plan=query_plan, reranker=configured_reranker(settings))
+                payload_transform=task_segment_payload, query_plan=query_plan, reranker=reranker)
             for slot in planned.get('planning', {}).get('evidence_slots', []):
                 key = ('global',slot['key']) if slot.get('scope') == 'global' else (doc['document_id'],slot['id'])
                 combined = slots_by_key.setdefault(key, dict(slot, id=f'global-slot-{len(slots_by_key)+1}',candidate_ids=[],candidate_ranges={}))
@@ -66,7 +68,7 @@ def knowledge_context(index, repository, documents, question, search_question, s
             built = build_evidence(planned, settings, expected_document_id=doc['document_id'],
                 max_items=budget.context_limit, context_max_chars=budget.context_chars,
                 payload_transform=task_segment_payload,
-                table_blocks=blocks, extractive_question=question)
+                table_blocks=blocks, extractive_question=planning_question)
             if built.fatal_reason: raise PipelineError('source_scope_invalid')
         packs.append(built.pack)
         diagnostics.append(dict(document_id=doc['document_id'],parse_version_id=doc['snapshot']['parse_version_id'],

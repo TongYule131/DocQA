@@ -167,6 +167,7 @@ class UnifiedChat:
             memory_change=body.clear_memory or body.memory_enabled is not None or body.memory_notes is not None
             if memory_change and db.execute("SELECT 1 FROM kb_conversation_turns t JOIN kb_tasks j ON j.id=t.task_id WHERE t.conversation_id=? AND j.status IN ('queued','running')",(canonical_id,)).fetchone():raise HTTPException(409,'请先停止本轮再修改记忆')
             if memory_change or body.archived or body.deleted:
+                db.execute("UPDATE conversation_clarifications SET state='cancelled',updated_at=? WHERE conversation_id=? AND state IN ('awaiting','resolving')",(now_iso(),canonical_id))
                 db.execute("UPDATE chat_submissions SET status='cancelled',error_message='会话或记忆已变化，请重新提交',updated_at=? WHERE conversation_id=? AND status='waiting'",(now_iso(),canonical_id))
             if body.archived or body.deleted:
                 db.execute("UPDATE kb_tasks SET cancel_requested=1,status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END WHERE id IN (SELECT task_id FROM kb_conversation_turns WHERE conversation_id=?) AND status IN ('queued','running')",(canonical_id,))
@@ -181,7 +182,7 @@ class UnifiedChat:
                 db.execute('UPDATE conversations SET archived=?,deleted_at=? WHERE id=?',(int(body.archived) if body.archived is not None else before['archived'],now_iso() if body.deleted else None,identifier[2:]))
         return {'deleted':True} if body.deleted else self.detail(identifier)
 
-    def submit(self,identifier,question,key,document_ids=None):
+    def submit(self,identifier,question,key,document_ids=None,*,clarification_id=None):
         source,original=self.original(identifier)
         with self.repository.connect() as db:
             if source=='d' and db.execute("SELECT 1 FROM question_jobs WHERE conversation_id=? AND status IN ('queued','running')",(original['id'],)).fetchone() or source=='q' and original['status'] in ('queued','running'):raise HTTPException(409,'原会话仍有活动任务，请等待完成或停止')
@@ -197,6 +198,11 @@ class UnifiedChat:
         self.validate_filter(conv['base_id'],ids)
         with self.repository.connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            if clarification_id:
+                confirmation=db.execute('SELECT * FROM conversation_clarifications WHERE id=? AND conversation_id=? AND owner_user_id IS ?',
+                    (clarification_id,canonical_id,self.owner)).fetchone()
+                if (not confirmation or confirmation['state'] not in ('resolving','resolved') or confirmation['epoch']!=conv['memory_epoch']
+                    or key!='clarify/'+confirmation['resolve_key']):raise HTTPException(409,'澄清已取消或失效')
             prior=db.execute('SELECT * FROM chat_submissions WHERE conversation_id=? AND request_key=?',(canonical_id,key)).fetchone()
             if prior:
                 if prior['fingerprint']!=signature:raise HTTPException(409,'请求键已用于不同问题或范围')
@@ -215,6 +221,8 @@ class UnifiedChat:
             submission='submission-'+uuid4().hex;stamp=now_iso()
             db.execute('INSERT INTO chat_submissions(id,conversation_id,owner_user_id,request_key,fingerprint,question,document_ids_json,waiting_jobs_json,memory_epoch,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
                 (submission,canonical_id,self.owner,key,signature,question,dump(ids),dump(waits),conv['memory_epoch'],stamp,stamp))
+            if clarification_id:
+                db.execute("UPDATE conversation_clarifications SET state='resolved',resolved_submission_id=?,updated_at=? WHERE id=?",(submission,stamp,clarification_id))
             db.execute("UPDATE kb_conversations SET title=CASE WHEN title='新会话' THEN ? ELSE title END,updated_at=? WHERE id=?",(question[:60],stamp,canonical_id))
         # 仅创建/衔接本地持久化任务；所有供应商调用仍由worker执行。
         ChatSubmissionCoordinator(self.access.settings,self.repository,knowledge=self.knowledge).run_once(submission)

@@ -59,6 +59,11 @@ def cancel_user_jobs(db, user_id: str, base_id: str | None = None):
                    "error_message='资料权限已撤销，停止后续处理；在途请求可能继续计费',finished_at=?,updated_at=?,"
                    "lease_token=NULL,lease_expires_at=NULL WHERE id=?", (stamp, stamp, row[0]))
         db.execute("UPDATE question_attempts SET status='cancelled',finished_at=?,error_code='access_revoked' WHERE job_id=? AND status='running'", (stamp, row[0]))
+    if base_id is None:
+        stamp=now_iso()
+        db.execute("UPDATE analysis_calls SET status='uncertain',error_code='access_revoked',settled_at=? WHERE status='intent' AND job_id IN (SELECT id FROM analysis_jobs WHERE owner_user_id=?)",(stamp,user_id))
+        db.execute("UPDATE analysis_jobs SET status='cancelled',cancel_requested=1,lease_token=NULL,lease_expires_at=NULL,error_code='access_revoked',error_message='账号已停用，停止后续处理',updated_at=? WHERE owner_user_id=? AND status IN ('queued','running')",(stamp,user_id))
+        db.execute("UPDATE parse_tasks SET status='needs_attention',cancel_requested=1,lease_token=NULL,lease_expires_at=NULL,error_code='access_revoked',error_message='账号已停用，请人工核对解析状态',updated_at=? WHERE owner_user_id=? AND status IN ('queued','running')",(stamp,user_id))
 
 
 class ProductAccess:

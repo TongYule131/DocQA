@@ -54,7 +54,20 @@ class IntentBody(StrictBody):
 class IntentTestBody(StrictBody):
     questions:list[str]=Field(min_length=1,max_length=100)
     scope:Literal['document','knowledge']='document'
+    context:dict|None=None
     base_id:str|None=Field(default=None,max_length=100)
+
+
+class SemanticPrepareBody(StrictBody):
+    max_requests:int=Field(default=4,ge=1,le=20)
+    request_key:str=Field(min_length=1,max_length=100)
+    acknowledge_uncertain:bool=False
+
+
+class SemanticCalibrationBody(StrictBody):
+    cases:list[dict]=Field(min_length=6,max_length=200)
+    threshold:float=Field(ge=0,le=1)
+    margin:float=Field(ge=0,le=1)
 
 
 class ConversationBody(StrictBody):
@@ -150,6 +163,8 @@ def install_knowledge_routes(app,access,rag):
                 conv=db.execute('SELECT memory_epoch FROM kb_conversations WHERE id=?',(payload['conversation_id'],)).fetchone()
                 if not conv or conv[0]!=payload['memory_epoch']:raise HTTPException(409,'记忆版本已变化，请提交新问题')
             if payload.get('conversation_id') and db.execute("SELECT 1 FROM kb_conversation_turns t JOIN kb_tasks j ON j.id=t.task_id WHERE t.conversation_id=? AND j.status IN ('queued','running')",(payload['conversation_id'],)).fetchone():raise HTTPException(409,'会话已有活动任务')
+            from app.resource_governance import admit
+            admit(db,access.repository,row['owner_user_id'])
             db.execute("UPDATE kb_tasks SET status='queued',cancel_requested=0,lease_token=NULL,lease_expires_at=NULL,error_code=NULL,error_message=NULL,updated_at=?,finished_at=NULL WHERE id=?",(now_iso(),identifier))
         return questions.present(pipeline.tasks.row(identifier))
 
@@ -177,10 +192,43 @@ def install_knowledge_routes(app,access,rag):
     @router.get('/api/admin/intents')
     def list_intents():admin();return intents.list()
 
+    @router.get('/api/admin/intents/semantic/status')
+    def semantic_status():
+        admin()
+        from app.semantic_intents import SemanticIntents
+        policy=SemanticIntents(access.repository).policy(intents.list(),access.index.embedding.signature)
+        return {'enabled':access.settings.semantic_intent_enabled,'calibrated':bool(policy),
+                'threshold':policy['threshold'] if policy else None,'margin':policy['margin'] if policy else None,'provider_calls':0}
+
+    @router.post('/api/admin/intents/semantic/prepare')
+    def prepare_semantic(body:SemanticPrepareBody):
+        admin()
+        from app.semantic_intents import SemanticIntents
+        from app.knowledge_tasks import configuration,KnowledgeTasks
+        planned=SemanticIntents(access.repository).plan(intents.list(),access.index.embedding,max_requests=body.max_requests)
+        with access.repository.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            unresolved=db.execute("SELECT c.id FROM kb_task_calls c JOIN kb_tasks t ON t.id=c.task_id WHERE json_extract(t.input_json,'$.operation')='intent_examples' AND json_extract(t.input_json,'$.semantic_configuration')=? AND c.status IN ('intent','uncertain') AND COALESCE(c.error_code,'')!='retry_acknowledged'",(planned['semantic_configuration'],)).fetchall()
+            if unresolved and not body.acknowledge_uncertain:raise HTTPException(409,'存在未确认的示例准备调用，核实可能重复计费后才能明确重试')
+            for call in unresolved:db.execute("UPDATE kb_task_calls SET error_code='retry_acknowledged' WHERE id=?",(call['id'],))
+        payload={'operation':'intent_examples','configuration':configuration(access.settings,access.index.embedding),
+            'semantic_work':planned['work'],'semantic_configuration':planned['semantic_configuration']}
+        task=KnowledgeTasks(access.repository).create('index',payload,'semantic/'+body.request_key,
+            owner=access.actor['id'] if access.actor else None,max_requests=max(1,planned['expected_requests']))
+        return {'task_id':task['id'],'status':task['status'],'expected_http_requests':planned['expected_requests'],'provider_calls':0}
+
+    @router.post('/api/admin/intents/semantic/calibrate')
+    def calibrate_semantic(body:SemanticCalibrationBody):
+        admin()
+        from app.semantic_intents import SemanticIntents
+        return SemanticIntents(access.repository).calibrate(intents.list(),access.index.embedding.signature,body.cases,threshold=body.threshold,margin=body.margin)
+
     @router.post('/api/admin/intents/test')
     def test_intents(body:IntentTestBody):
         admin()
         if any(not q.strip() or len(q)>500 for q in body.questions):raise HTTPException(422,'每个测试问题须为1～500字符')
+        from app.conversation_memory import valid_entity_context
+        if not valid_entity_context(body.context):raise HTTPException(422,'用户上下文格式或范围无效')
         if body.base_id:access.base(body.base_id)
         rows=intents.list()
         from app.intent_routing import decide
@@ -189,8 +237,8 @@ def install_knowledge_routes(app,access,rag):
         tools={t['id']:t for t in ToolRegistry(access.repository).list()}
         results=[]
         for question in body.questions:
-            route,decision=decide(question,body.base_id,rows,body.scope)
-            plan=plan_query(question,route)
+            resolution=intents.evaluate(question,body.base_id,body.scope,context=body.context,provider_signature=access.index.embedding.signature)
+            route,decision,plan=resolution['route'],resolution['decision'],resolution['query_plan']
             availability={'ready':True,'reason':'执行时仍核对授权、固定快照与来源；测试不执行问答'}
             if route['kind']=='MCP':
                 tool=tools.get(route.get('tool_id'))
@@ -200,7 +248,7 @@ def install_knowledge_routes(app,access,rag):
                 if not body.base_id:availability={'ready':False,'reason':'请先选择获授权的知识库'}
                 elif not access.base(body.base_id)['active_snapshot_id']:
                     availability={'ready':False,'reason':'当前知识库没有可用发布快照，尚不能检索'}
-            results.append({'question':question,'decision':decision,'query_plan':describe_plan(plan),
+            results.append({'question':question,'decision':decision,'query_plan':describe_plan(plan),'understanding':resolution['understanding'],'semantic_pending':resolution.get('semantic_pending',False),
                 'retrieval_budget':execution_budget(plan,access.settings,route),'availability':availability,
                 'response_preview':route.get('response_text') if route['kind']=='SYSTEM' else None,'top_k':route.get('top_k')})
         return {'results':results,'supplier_calls':0,'persisted':False,'note':'与会话使用同一规则；测试不创建问答任务，不执行检索、模型或工具'}

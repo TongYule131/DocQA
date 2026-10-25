@@ -80,6 +80,8 @@ class Ingestion:
             if ingestion_configuration(self.settings,current)!=config:raise HTTPException(409,'知识库处理配置已变化，请重新提交')
             prior=db.execute('SELECT id FROM ingestion_jobs WHERE base_id=? AND source_hash=? AND configuration=? AND replacement_key=?',(base_id,source_hash,config,replacement)).fetchone()
             if prior:raise ExistingIngestion(prior[0])
+            from app.resource_governance import admit
+            admit(db,self.repository,self.owner)
             db.execute('INSERT INTO knowledge_base_documents VALUES (?,?,?)',(base_id,document.id,now_iso()))
             db.execute('INSERT INTO ingestion_jobs(id,base_id,document_id,owner_user_id,source_hash,configuration,replacement_key,replace_document_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
                 (identifier,base_id,document.id,self.owner,source_hash,config,replacement,replace_document_id,now_iso(),now_iso()))
@@ -110,9 +112,13 @@ class Ingestion:
                 uncertain=db.execute("SELECT 1 FROM kb_task_calls WHERE task_id=? AND status IN ('intent','uncertain') AND COALESCE(error_code,'')!='retry_acknowledged'",(task['id'],)).fetchone()
                 if uncertain and not acknowledge:raise HTTPException(409,'存在未确认调用，核实后明确确认可能重复计费')
                 if task['requests_used']>=task['max_requests']:raise HTTPException(409,'原任务累计请求上限已用完，未自动追加额度')
+                from app.resource_governance import admit
+                admit(db,self.repository,task['owner_user_id'])
                 db.execute("UPDATE kb_task_calls SET status='uncertain',error_code='retry_acknowledged',finished_at=COALESCE(finished_at,?) WHERE task_id=? AND status IN ('intent','uncertain')",(now_iso(),task['id']))
                 db.execute("UPDATE kb_tasks SET status='queued',cancel_requested=0,lease_token=NULL,lease_expires_at=NULL,error_code=NULL,error_message=NULL,finished_at=NULL WHERE id=?",(task['id'],))
             else:
+                from app.resource_governance import admit
+                admit(db,self.repository,row['owner_user_id'])
                 parse=db.execute('SELECT status,upstream_task_id FROM parse_tasks WHERE id=?',(row['parse_task_id'],)).fetchone() if row['parse_task_id'] else None
                 if parse and parse['status']=='needs_attention' and not acknowledge:raise HTTPException(409,'解析提交结果不确定，请核实后明确重试')
                 # 不再复用已失败解析的请求键；旧上游任务与失败记录保留。
@@ -173,7 +179,11 @@ class IngestionCoordinator:
         for value in rows:
             row=dict(value)
             try:self.step(row);changed=True
-            except HTTPException as exc:self.fail(row,'failed','preparation_failed',str(exc.detail))
+            except HTTPException as exc:
+                if exc.status_code==429:
+                    # 临时准入拥塞保留原请求与阶段，不创建新的子任务或伪报永久失败。
+                    with self.repository.connect() as db:db.execute("UPDATE ingestion_jobs SET error_code='queue_backpressure',error_message='等待执行配额，稍后继续准备' WHERE id=? AND status IN ('queued','running')",(row['id'],))
+                else:self.fail(row,'failed','preparation_failed',str(exc.detail))
             except Exception:self.fail(row,'failed','preparation_failed','资料准备失败，原有可用版本保持；请查看处理详情')
         return changed
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from app.rag_validation import ModelOutputError
 
-PRESENTATION_VERSION = 'grounded-paragraphs-v2'
+PRESENTATION_VERSION = 'grounded-paragraphs-v3'
 ROLES = {'conclusion','mechanism','comparison','definition','procedure','boundary','conflict','evidence'}
 
 
@@ -11,7 +11,7 @@ def context_covered(context,text):
     # 仅比较展示串中的中文排版空白；不合并英文词或数字，不修改原引文和偏移。
     def layout(value):
         value=re.sub(r'\s+',' ',value)
-        return re.sub(r'(?<=[\u3400-\u9fff，。；：（）]) +| +(?=[\u3400-\u9fff，。；：（）])','',value)
+        return re.sub(r'(?<=[\u3400-\u9fff，。；：（）]) +| +(?=[\u3400-\u9fff，。；：（）])','',value).strip()
     return layout(context) in layout(text)
 
 

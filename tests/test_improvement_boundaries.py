@@ -184,7 +184,7 @@ def test_v15_failure_rolls_back_and_retry_preserves_v14_rows(tmp_path):
         assert migrations.detect_version(db)==14
         assert {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}==tables
         assert migrations.validate_schema(db,version=14)==14
-        assert migrations.run_migrations(db)['applied']==[15]
+        assert migrations.run_migrations(db)['applied']==list(range(15,migrations.SCHEMA_VERSION+1))
         assert migrations.run_migrations(db)['applied']==[]
         assert db.execute('PRAGMA foreign_key_check').fetchone() is None
 
@@ -194,7 +194,11 @@ def frozen_case(env,access,base):
     task=service.submit(conv['id'],'退货包装有什么要求','question')
     payload=json.loads(service.tasks.row(task['id'])['input_json']);documents=[]
     for doc in payload['documents']:
+        version=env.repository.get_parse_version(doc['snapshot']['parse_version_id'])
+        with env.repository.connect() as db:
+            vectors=[{'chunk_id':r['chunk_id'],'vector':json.loads(r['vector'])} for r in db.execute('SELECT chunk_id,vector FROM embedding_vectors_v2 WHERE index_id=?',(doc['snapshot']['index_id'],))]
         documents.append({**doc,'chunks':[c.model_dump() for c in env.repository.chunks(doc['document_id'],doc['snapshot']['parse_version_id'])],
+            'vectors':vectors,'quality':{'quality_status':version.quality_status,'warnings':[w.model_dump() for w in version.warnings]},
             'vector_result':env.rag.index.search_snapshot(doc['document_id'],'退货包装有什么要求',8,snapshot=doc['snapshot'],include_scores=True)})
     return {'id':'synthetic-multi-doc','annotation_status':'synthetic','document_group':'synthetic-group-1',
             'question':'退货包装有什么要求','query_vector':[1,0], 'documents':documents,

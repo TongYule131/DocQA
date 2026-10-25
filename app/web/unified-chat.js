@@ -3,6 +3,7 @@ import {node,renderAnswer,sourceLocationsText,answerTextForDisplay} from './answ
 import {createAnswerStream} from './answer-stream.js';
 import {createUnifiedClient} from './unified-client.js';
 import {feedbackButton,showMyFeedback} from './feedback-ui.js';
+import {clarificationForm} from './clarification-ui.js';
 
 const api=createApiClient(),$=id=>document.getElementById(id),json=(method,body)=>({method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
 const active=t=>['queued','running'].includes(t.status),labels={queued:'等待处理',running:'正在准备',parsing:'解析文档',indexing:'建立问答索引',review:'等待管理员审核',ready:'资料可用',failed:'准备失败',needs_attention:'需要确认',cancelled:'已停止',uploaded:'已保存原件',retrieving:'查找原文',planning:'选择证据与组织回答',generating:'生成回答',validating:'核对引用'};
@@ -33,6 +34,7 @@ function renderTurns(){
     if(task.result){const body=node('div','','answer-body');renderAnswer(body,task.result,source);answer.append(body);const actions=node('div','','row');actions.append(button('复制回答',async()=>{await navigator.clipboard.writeText(answerTextForDisplay(task.result));notice('已复制回答');}));if(task.export_url){const a=node('a','导出结果','button secondary');a.href=task.export_url;actions.append(a);}actions.append(feedbackButton(task,{api,run,notice}));answer.append(actions);}
     else{streams[task.source].render(answer,task,source);answer.append(node('p',task.error_message||labels[task.stage]||labels[task.status]||task.status));if(active(task))answer.append(button(task.cancel_requested?'正在停止':'停止生成',async()=>{await api(`/api/${task.source==='knowledge'?'kb-tasks':'question-jobs'}/${encoded(task.id)}/cancel`,{method:'POST'});await refresh();}));}
     if(!task.result&&task.source==='knowledge'&&['failed','needs_attention'].includes(task.status))answer.append(button('复用检查点重试',async()=>{const ack=task.calls?.some(c=>c.status==='uncertain');if(ack&&!confirm('有未确认调用，可能已计费。核实后是否重试？'))return;await api(`/api/kb-tasks/${encoded(task.id)}/retry`,json('POST',{acknowledge_uncertain:Boolean(ack)}));await refresh();}));
+    const clarify=clarificationForm(task,{conversationId:current.id,api,run,refresh});if(clarify)answer.append(clarify);
     turn.append(answer);container.append(turn);
   }
   for(const submission of current?.submissions||[]){if(submission.status==='submitted')continue;const block=node('section','','kb-chat-turn');block.append(node('p',submission.question,'kb-user-message'));const card=node('div','','waiting-card');card.append(node('p',submission.status==='waiting'?'等待所选资料就绪，完成后会自动回答。':submission.error_message||'本次等待已停止'));if(submission.status==='waiting')card.append(button('取消等待',async()=>{await api(`/api/chat/conversations/${encoded(current.id)}/submissions/${encoded(submission.id)}/cancel`,{method:'POST'});await refresh();}));block.append(card);container.append(block);}
@@ -56,6 +58,8 @@ function render(){
       details.append(summary,input,node('p',state.entities.map(e=>`${e.name}：用户轮次 ${e.source_turn}`).join('；'),'muted'));
       if(state.summary)details.append(node('p',`较早问题摘要 · 来源轮次 ${state.summary.source_turns.join('、')}`),node('p',state.summary.text));
       details.append(button('保存实体',async()=>{current=await api('/api/chat/conversations/'+encoded(current.id)+'/entities',json('PATCH',{expected_revision:current.revision,names:input.value.split('\n').map(s=>s.trim()).filter(Boolean)}));await refresh();}));tools.append(details);
+      details.append(button('恢复自动提取',async()=>{current=await api('/api/chat/conversations/'+encoded(current.id)+'/entities',json('PATCH',{expected_revision:current.revision,names:[],mode:'auto'}));await refresh();}));
+      if(state.conditions?.length)details.append(node('p',state.conditions.map(c=>`${c.text}（用户轮次 ${c.source_turn}）`).join('；')));
     }
   }
   $('chat-name').value=current?.title||'';$('memory-notes').value=current?.memory_notes||'';$('archive-chat').textContent=current?.archived?'恢复会话':'归档会话';

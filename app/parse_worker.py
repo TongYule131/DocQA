@@ -72,7 +72,9 @@ class ParseWorker:
                  sleep=time.sleep):
         self.settings = settings
         self.runtime = RuntimeGuard(settings.data_dir, "parse-worker")
+        self.runtime.health_grace_seconds=settings.docling_total_timeout_seconds+120
         self.repository = repository or Repository(settings.data_dir / "docqa.db")
+        self.repository.settings=settings
         self.client = client or DoclingClient(settings)
         self.worker_id = worker_id or f"{os.getpid()}-{int(time.time())}"
         self.sleep = sleep
@@ -624,6 +626,8 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s")
     settings = Settings.from_env()
+    from app.role_logging import configure
+    configure(settings.data_dir,'parse-worker')
     worker = ParseWorker(settings)
     signal.signal(signal.SIGINT, worker.request_stop)
     if hasattr(signal, "SIGTERM"):

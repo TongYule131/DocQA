@@ -6,6 +6,8 @@ class Element{
   set textContent(value){this.text=String(value);this.children=[];}
   get textContent(){return (this.text||'')+this.children.map(c=>c.textContent).join('');}
   append(...items){this.children.push(...items);}
+  replaceChildren(...items){this.children=[];this.append(...items);}
+  insertBefore(item,before){const index=this.children.indexOf(before);this.children.splice(index<0?this.children.length:index,0,item);}
   setAttribute(key,value){this.attributes[key]=value;}
   showModal(){this.open=true;}
   close(){this.open=false;}

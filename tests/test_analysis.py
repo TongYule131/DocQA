@@ -307,6 +307,8 @@ def test_migration_v3_creates_analysis_tables_and_backs_up(tmp_path):
     connection.execute("PRAGMA foreign_keys=OFF")
     connection.execute("DELETE FROM schema_migrations WHERE version>=3")
     # 降版夹具同时移除v15新增状态；否则只是篡改登记，并非要验证的旧库场景。
+    from tests.schema_fixtures import remove_v16
+    remove_v16(connection)
     for table in ("feedback_events", "answer_feedback", "conversation_entity_memory",
                   "provider_guard_calls", "provider_circuits", "dispatch_fairness",
                   "question_results", "question_stage_events", "question_checkpoints", "question_calls",
