@@ -47,6 +47,11 @@ export function installIntentTest() {
         if(row.availability&&!row.availability.ready)route.append(node('p',row.availability.reason,'form-error'));
         if(row.understanding){route.append(node('p','理解后问题：'+row.understanding.resolved_question));if(row.understanding.clarification)route.append(node('p',row.understanding.clarification.question,'form-error'));}
         if(row.semantic_pending)route.append(node('p','语义候选待实际执行时复用查询向量；此处未发向量请求。'));
+        if(row.execution){
+          route.append(node('p','执行动作：'+row.execution.name));
+          if(row.execution.resources.tool_id)route.append(node('p','工具：'+row.execution.resources.tool_id));
+          if(row.execution.requires_retrieval)route.append(node('small','范围：当前授权发布快照；文档筛选继续生效'));
+        }
         const strategy=node('td'),plan=row.query_plan,budget=row.retrieval_budget;
         if(plan){
           strategy.append(node('strong',plan.name));
@@ -55,7 +60,8 @@ export function installIntentTest() {
           if(budget?.candidate_limit)strategy.append(node('small',`召回 ${budget.recall_limit} / 候选 ${budget.candidate_limit} / 最终最多 ${budget.context_limit} 块 · ${budget.context_chars} 字符硬上限`));
         }
         const reason=node('td');reason.append(node('p',methods[d.method]||d.method),node('p',d.reason,'muted-detail'));
-        tr.append(route,strategy,reason,node('td',d.candidates.map(c=>`${c.name} · ${methods[c.method]||c.method}`).join('；')||'自动任务策略'),node('td',prior||'首次测试'));
+        const candidates=[...d.candidates,...(d.semantic_candidates||[])];
+        tr.append(route,strategy,reason,node('td',candidates.map(c=>`${c.name||c.code||c.node_id} · ${methods[c.method]||c.method||'语义候选'}${Number.isFinite(c.score)?' · '+c.score.toFixed(3):''}`).join('；')||'自动任务策略'),node('td',prior||'首次测试'));
         body.append(tr);previous.set(key,signature);
       }
       table.append(body);const scroll=node('div','','table-scroll intent-test-table');scroll.append(table);output.append(scroll);

@@ -18,10 +18,16 @@ def require(chat,identifier,clarification):
 
 def resolve(chat,identifier,clarification,names,key):
     conv,row=require(chat,identifier,clarification)
+    with chat.repository.connect() as db:
+        task=db.execute('SELECT input_json,result_json FROM kb_tasks WHERE id=?',(row['task_id'],)).fetchone()
+    original=json.loads(task['input_json'])
+    detail=(json.loads(task['result_json']).get('clarification',{}) if task['result_json'] else {})
+    tool=detail.get('kind')=='tool_parameters'
     if not isinstance(names,list) or any(not isinstance(n,str) for n in names):raise HTTPException(422,'请填写对象名称')
     names=[n.strip() for n in names]
-    if (len(names)!=row['needed_count'] or any(not isinstance(n,str) or not 1<=len(n.strip())<=60 for n in names)
-        or len(set(names))!=len(names)):raise HTTPException(422,'请按要求确认一至两个不同对象，每个不超过60字')
+    if (len(names)!=row['needed_count'] or any(not 1<=len(n)<= (600 if tool else 60) for n in names)
+        or (not tool and len(set(names))!=len(names)) or sum(map(len,names))>2000):
+        raise HTTPException(422,'请填写所需信息；对象名称不超过60字，参数每项不超过600字、合计不超过2000字')
     identity=fingerprint(names)
     if row['state'] in ('resolving','resolved') and (row['resolve_key']!=key or row['resolve_hash']!=identity):raise HTTPException(409,'该澄清已有其他确认')
     if row['state'] not in ('awaiting','resolving','resolved'):raise HTTPException(409,'澄清已取消')
@@ -32,9 +38,10 @@ def resolve(chat,identifier,clarification,names,key):
         current=db.execute('SELECT * FROM conversation_clarifications WHERE id=?',(clarification,)).fetchone()
         if current['state'] not in ('resolving','resolved'):raise HTTPException(409,'澄清已取消')
         if not changed and (current['resolve_key']!=key or current['resolve_hash']!=identity):raise HTTPException(409,'澄清已变化')
-        task=db.execute('SELECT input_json FROM kb_tasks WHERE id=?',(row['task_id'],)).fetchone()
-    original=json.loads(task['input_json'])
-    question=original['question']+'\n用户确认对象：'+'、'.join('“'+n.strip()+'”' for n in names)
+    if tool:
+        from app.tool_clarifications import question_with_values
+        question=question_with_values(original['question'],detail['fields'],names)
+    else:question=original['question']+'\n用户确认对象：'+'、'.join('“'+n.strip()+'”' for n in names)
     result=chat.submit(identifier,question,'clarify/'+key,original.get('document_filter'),clarification_id=clarification)
     with chat.repository.connect() as db:
         db.execute("UPDATE conversation_clarifications SET state='resolved',resolved_submission_id=?,updated_at=? WHERE id=? AND resolve_key=?",

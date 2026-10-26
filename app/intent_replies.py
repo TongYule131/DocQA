@@ -15,7 +15,9 @@ def interaction_answer(job, snapshot, elapsed_ms=0):
     route, decision = value['route'], value['decision']
     if route['kind'] != 'SYSTEM' or decision['version'] != ROUTING_VERSION:
         raise ValueError('invalid_system_route')
-    return InteractionAnswer(answer_id='interaction-' + job['id'], status='answered',
+    action=route.get('execution_action')
+    return InteractionAnswer(answer_id='interaction-' + job['id'],
+        status='insufficient_evidence' if action=='source_unavailable' else 'clarification_needed' if action=='split_request' else 'answered',
         answer=route['response_text'], document_id=job['document_id'], index_id=job['index_id'],
         parse_version_id=job['parse_version_id'], prompt_version='system-interaction-v2',
         retrieval=dict(candidate_count=0, selected_count=0, context_chars=0, truncated=False),

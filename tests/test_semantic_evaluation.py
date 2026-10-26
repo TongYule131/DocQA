@@ -25,6 +25,17 @@ def inputs():
 def suite():return freeze_suite(*inputs(),'synthetic-2d')
 
 
+def test_expected_source_unavailability_is_not_a_successful_live_answer_or_smalltalk():
+    rows,cache,cases=inputs()
+    for split in ('calibration','holdout'):
+        target=next(c for c in cases if c['split']==split)
+        target.update(question=('请' if split=='calibration' else '麻烦')+'查询今天仓库库存',
+                      expected_code='live-source-unavailable',expected_kind='SYSTEM',tag='mixed_business',query_vector=None)
+    frozen=freeze_suite(rows,cache,cases,'synthetic-2d');policy=select_policy(frozen)
+    report=evaluate_holdout(frozen,policy)
+    assert report['holdout']['correct']==6 and report['holdout']['safety']['business_diverted_to_system']==0
+
+
 def test_selection_reads_only_calibration_and_never_writes_business_policy(monkeypatch):
     import app.semantic_evaluation as module
     frozen=suite();original=module._evaluate;seen=[]

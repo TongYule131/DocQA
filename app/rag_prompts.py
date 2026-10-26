@@ -137,7 +137,7 @@ def build_system_prompt() -> str:
     return SYSTEM_PROMPT
 
 
-TASK_PROMPT_VERSION = "rag-task-v60"
+TASK_PROMPT_VERSION = "rag-task-v61"
 
 TABLE_STRUCTURE_INSTRUCTIONS = """
 

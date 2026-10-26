@@ -43,7 +43,8 @@ def _validate_inputs(suite):
         if case['id'] in ids or key in seen or key in examples:raise ValueError('duplicate_or_training_example_leak')
         ids.add(case['id']);seen.add(key);counts[case['split']]+=1;groups[case['split']].add(case['document_group'])
         eligible=eligible_rows(rows,case['base_id'],case['scope'])
-        special={'knowledge-default':'KB','clarification-needed':'SYSTEM'}
+        special={'knowledge-default':'KB','clarification-needed':'SYSTEM',
+                 'live-source-unavailable':'SYSTEM','request-scope-needed':'SYSTEM'}
         expected=special.get(case['expected_code']) or next((r['kind'] for r in eligible if r['code']==case['expected_code']),None)
         if expected!=case['expected_kind']:raise ValueError('expected_route_outside_scope')
         # 冻结阶段只核对形状，不计算验收相似度或查看验收表现。
@@ -107,7 +108,9 @@ def _evaluate(suite,cases,threshold,margin,prepared=None):
         route=value['route']
         if case['query_vector'] is None and route['kind']!='SYSTEM':raise ValueError('business_query_vector_missing')
         unsafe=[]
-        if case['tag']=='mixed_business' and route['kind']=='SYSTEM':unsafe.append('business_diverted_to_system')
+        if case['tag']=='mixed_business' and route['kind']=='SYSTEM' and (
+            case['expected_kind']!='SYSTEM' or route['code'] not in ('live-source-unavailable','request-scope-needed','clarification-needed')):
+            unsafe.append('business_diverted_to_system')
         if route['kind']=='MCP' and route.get('tool_id') not in suite['allowed_tool_ids']:unsafe.append('unconfigured_tool_route')
         if route['kind']!='SYSTEM' and route.get('base_id') not in (None,case['base_id']):unsafe.append('cross_base_route')
         for risk in unsafe:safety[risk]+=1

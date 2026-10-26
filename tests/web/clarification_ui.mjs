@@ -18,4 +18,15 @@ for(let i=0;i<2;i++){
 assert.deepEqual(requests.map(r=>JSON.parse(r.body).request_key),['persisted-key','persisted-key']);
 assert.deepEqual(JSON.parse(requests[0].body).names,['对象甲','对象乙']);
 assert.equal(clarificationForm({result:{clarification:{...value,state:'resolved'}}},{conversationId:'k:conversation',api,run,refresh}),null);
+requests.length=0;
+const tool={id:'clarify-tool',kind:'tool_parameters',state:'resolving',needed_count:2,
+  request_key:'tool-persisted',confirmed_names:['商品，A','商品，A'],fields:[{name:'sku',label:'商品编号'},{name:'warehouse',label:'仓库编号'}]};
+for(let i=0;i<2;i++){
+ const form=clarificationForm({result:{clarification:tool}},{conversationId:'k:conversation',api,run,refresh});
+ const inputs=form.walk().filter(e=>e.tagName==='input');assert.equal(inputs.length,2);
+ assert(inputs.every(e=>e.value==='商品，A'&&e.readOnly));
+ await form.onsubmit({preventDefault(){}});
+}
+assert.deepEqual(requests.map(r=>JSON.parse(r.body).request_key),['tool-persisted','tool-persisted']);
+assert.deepEqual(JSON.parse(requests[0].body).names,['商品，A','商品，A']);
 console.log('PASS clarification UI: persisted confirmation survives refresh, stable request identity, no duplicate scope');

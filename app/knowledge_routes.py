@@ -240,6 +240,8 @@ def install_knowledge_routes(app,access,rag):
             resolution=intents.evaluate(question,body.base_id,body.scope,context=body.context,provider_signature=access.index.embedding.signature)
             route,decision,plan=resolution['route'],resolution['decision'],resolution['query_plan']
             availability={'ready':True,'reason':'执行时仍核对授权、固定快照与来源；测试不执行问答'}
+            if resolution['execution']['action'] in ('source_unavailable','split_request'):
+                availability={'ready':False,'reason':decision['reason']}
             if route['kind']=='MCP':
                 tool=tools.get(route.get('tool_id'))
                 if not tool or not tool['enabled'] or not tool['read_only'] or not tool['auth_configured']:
@@ -249,6 +251,7 @@ def install_knowledge_routes(app,access,rag):
                 elif not access.base(body.base_id)['active_snapshot_id']:
                     availability={'ready':False,'reason':'当前知识库没有可用发布快照，尚不能检索'}
             results.append({'question':question,'decision':decision,'query_plan':describe_plan(plan),'understanding':resolution['understanding'],'semantic_pending':resolution.get('semantic_pending',False),
+                'execution':resolution['execution'],
                 'retrieval_budget':execution_budget(plan,access.settings,route),'availability':availability,
                 'response_preview':route.get('response_text') if route['kind']=='SYSTEM' else None,'top_k':route.get('top_k')})
         return {'results':results,'supplier_calls':0,'persisted':False,'note':'与会话使用同一规则；测试不创建问答任务，不执行检索、模型或工具'}

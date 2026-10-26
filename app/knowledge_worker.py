@@ -107,7 +107,14 @@ class KnowledgeWorker:
         with self.tasks.span(job,'意图识别','INTENT',parent):
             context=payload.get('conversation_context',{}).get('entity_context',{})
             resolution=IntentManagement(self.repository).evaluate(payload['question'],job['base_id'],context=context,provider_signature=self.embedding.signature);route=resolution['route']
+            if payload.get('tool_continuation'):
+                from app.tool_clarifications import resolve_continuation
+                with self.repository.connect() as db:conversation=dict(db.execute('SELECT * FROM kb_conversations WHERE id=?',(payload['conversation_id'],)).fetchone())
+                resolution=resolve_continuation(IntentManagement(self.repository),payload['question'],job['base_id'],context,
+                                               payload['tool_continuation']['confirmation_id'],conversation)
+                route=resolution['route']
             if route!=payload.get('route') or (payload.get('intent_decision') and resolution['decision']!=payload['intent_decision']):raise TaskStopped('intent_changed','意图配置已变化，请在当前会话重新提交')
+            if payload.get('execution') and resolution['execution']!=payload['execution']:raise TaskStopped('execution_changed','执行动作或资料范围已变化，请重新提交')
         from app.query_planning import execution_budget
         with self.tasks.span(job,'查询任务与证据需求规划','QUERY_PLAN',parent):
             plan=resolution['query_plan']
@@ -115,9 +122,8 @@ class KnowledgeWorker:
             if (payload.get('query_plan',plan)!=plan or payload.get('retrieval_budget',limits)!=limits):
                 raise TaskStopped('query_plan_changed','查询计划或证据预算已变化，请重新提交')
         if route['kind']=='SYSTEM':
-            return {'response_kind':'system','answer':route['response_text'],'status':'answered','citations':[],'conclusion':[],
-                'explanation':[],'limitations':[],'route':route['code'],'prompt_version':'system-intent-v1',
-                **({'clarification':{'id':'clarify-'+job['id'],**resolution['understanding']['clarification']}} if route['code']=='clarification-needed' else {})}
+            from app.intent_execution import local_result
+            return local_result(resolution,job['id'])
         if route['kind']=='MCP':
             from app.knowledge_tools import execute_tool
             return execute_tool(self,job,payload,route,parent)
@@ -169,7 +175,9 @@ class KnowledgeWorker:
                 from app.query_understanding import apply_plan
                 plan=apply_plan(plan,extra)
                 for binding in extra['bindings']:search_question=search_question.replace(binding['reference'],binding['name'])
-                self.tasks.save_local_resolution(job,{'understanding':payload['understanding'],'model_plan':extra,'query_plan':plan},name='resolved_query_plan')
+                from app.intent_execution import execution_contract
+                self.tasks.save_local_resolution(job,{'understanding':payload['understanding'],'model_plan':extra,'query_plan':plan,
+                    'execution':execution_contract(route,payload['understanding'],plan)},name='resolved_query_plan')
         self.tasks.stage(job['id'],job['lease_token'],'retrieving')
         self.tasks.save_local_resolution(job,{'search_question':search_question,
             'query_plan':plan,'provider_signature':self.embedding.signature,
@@ -187,8 +195,13 @@ class KnowledgeWorker:
             resolved=IntentManagement(self.repository).evaluate(payload['question'],job['base_id'],context=context,
                 query_vector=vector,provider_signature=self.embedding.signature)
             from app.query_understanding import apply_plan
-            resolved['query_plan']=apply_plan(resolved['query_plan'],self.tasks.checkpoint(job['id'],'query_understanding') or {})
+            if resolved['route']['kind']=='KB':resolved['query_plan']=apply_plan(resolved['query_plan'],self.tasks.checkpoint(job['id'],'query_understanding') or {})
+            from app.intent_execution import execution_contract
+            resolved['execution']=execution_contract(resolved['route'],resolved['understanding'],resolved['query_plan'])
             self.tasks.save_local_resolution(job,resolved)
+            if resolved['route']['kind']=='SYSTEM':
+                from app.intent_execution import local_result
+                return local_result(resolved,job['id'])
             if resolved['route']['kind']=='MCP':
                 from app.knowledge_tools import ToolRegistry
                 tool=ToolRegistry(self.repository).get(resolved['route'].get('tool_id'))
@@ -196,7 +209,7 @@ class KnowledgeWorker:
                     raise TaskStopped('tool_changed','工具未在提交时获准或配置已变化，未执行')
                 from app.knowledge_tools import execute_tool
                 return execute_tool(self,job,{**payload,'route':resolved['route'],'tool_revision':tool['revision']},resolved['route'],parent)
-            plan=resolved['query_plan']
+            route=resolved['route'];plan=resolved['query_plan']
             resolved_limits=execution_budget(plan,self.settings,resolved['route'])
             limits={k:min(v,resolved_limits[k]) for k,v in limits.items()}
         worker=self
@@ -294,6 +307,7 @@ class KnowledgeWorker:
             def fact(f):return dict(text=f.text,refs=f.refs,context=[c.model_dump() if hasattr(c,'model_dump') else c for c in f.context],claim_type=f.claim_type,support_review=f.support_review,evidence_ids=[ids[r] for r in f.refs])
             facts=[fact(f) for f in checked.conclusion];explanation=[fact(f) for f in checked.explanation]
             from app.rag_presentation import render_answer
+            from app.intent_execution import execution_contract
             answer=render_answer(checked)
             if checked.status=='insufficient_evidence':answer=INSUFFICIENT_EVIDENCE_TEXT
             return dict(answer_id='kanswer-'+job['id'],answer=answer,status=checked.status,conclusion=facts,explanation=explanation,presentation=checked.presentation,
@@ -302,4 +316,5 @@ class KnowledgeWorker:
                 limitations=['只依据本轮入选资料作答，来源匹配不等于全部语义已自动认证']+(['上下文预算限制了入选证据范围'] if pack.truncated else [])+
                     ([f"有{pack.slot_hints['unfilled_count']}个证据需求未装入支持片段，不能据此声称问题已完整覆盖"] if pack.slot_hints.get('unfilled_count') else []),
                 retrieval={'candidate_count':len(pack.candidates),'selected_count':len(items),'context_chars':pack.context_chars,
-                    'truncated':pack.truncated,'slots':pack.slot_hints,'math_evidence':pack.math_hints,'coverage':diagnostics['coverage']},route=route['code'],snapshot_id=payload['snapshot_id'])
+                    'truncated':pack.truncated,'slots':pack.slot_hints,'math_evidence':pack.math_hints,'coverage':diagnostics['coverage']},route=route['code'],snapshot_id=payload['snapshot_id'],
+                execution=execution_contract(route,payload['understanding'],plan))

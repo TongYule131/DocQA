@@ -65,7 +65,7 @@ class KnowledgeTraces:
             if detail:
                 spans.extend({**s,'id':child+'/'+s['id'],'parent_id':child+'/'+s['parent_id'] if s.get('parent_id') else None} for s in detail['spans'])
                 calls.extend({**c,'task_id':child} for c in detail['calls'])
-        intent=None;query_plan=None;diagnostics=[]
+        intent=None;query_plan=None;execution=None;diagnostics=[]
         if record['source']=='knowledge':
             with self.repository.connect() as db:
                 rows=db.execute("SELECT name,payload_json FROM kb_task_checkpoints WHERE task_id=? AND name LIKE 'diagnostic_%' ORDER BY created_at",(identifier,)).fetchall()
@@ -93,6 +93,7 @@ class KnowledgeTraces:
             with self.repository.connect() as db:
                 source=db.execute('SELECT '+('input_json FROM kb_tasks' if record['source']=='knowledge' else 'snapshot_json FROM question_jobs')+' WHERE id=?',(identifier,)).fetchone()
             payload=json.loads(source[0])
+            execution=payload.get('execution') if record['source']=='knowledge' else payload.get('intent_resolution',{}).get('execution')
             decision=payload.get('intent_decision') if record['source']=='knowledge' else payload.get('intent_resolution',{}).get('decision')
             if decision:
                 from app.intent_routing import public_decision
@@ -103,9 +104,13 @@ class KnowledgeTraces:
             if record['source']=='knowledge':
                 with self.repository.connect() as db:
                     resolved=db.execute("SELECT payload_json FROM kb_task_checkpoints WHERE task_id=? AND name='resolved_intent'",(identifier,)).fetchone()
+                    planned=db.execute("SELECT payload_json FROM kb_task_checkpoints WHERE task_id=? AND name='resolved_query_plan'",(identifier,)).fetchone()
+                if planned:
+                    value=json.loads(planned[0]);query_plan=describe_plan(value['query_plan']);execution=value.get('execution',execution)
                 if resolved:
                     from app.intent_routing import public_decision
                     value=json.loads(resolved[0]);intent=public_decision(value['decision'])
+                    query_plan=describe_plan(value['query_plan']);execution=value.get('execution',execution)
         for span in spans:span['offset_ms']=milliseconds(record['started_at'],span['started_at'])
-        return {**record,'spans':spans,'calls':calls,'children':children,'intent':intent,'query_plan':query_plan,'diagnostics':diagnostics,'content_policy':'仅含运行元数据；不展示用户问题、提示词、文档正文或原始响应。',
+        return {**record,'spans':spans,'calls':calls,'children':children,'intent':intent,'query_plan':query_plan,'execution':execution,'diagnostics':diagnostics,'content_policy':'仅含运行元数据；不展示用户问题、提示词、文档正文或原始响应。',
                 'timing_note':'旧任务只展示实际记录的外调节点；未记录的阶段不补造耗时。'}

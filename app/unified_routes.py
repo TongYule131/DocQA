@@ -34,7 +34,7 @@ class Entities(StrictBody):
 
 
 class Clarify(StrictBody):
-    names:list[str]=Field(min_length=1,max_length=2)
+    names:list[str]=Field(min_length=1,max_length=30)
     request_key:str=Field(min_length=1,max_length=100)
 
 

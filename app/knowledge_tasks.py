@@ -42,7 +42,8 @@ def configuration(settings, embedding):
     from app.rag_answer_strategy import policy_signature
     from app.rag_composition import COMPOSITION_VERSION
     from app.query_understanding import policy
-    return fingerprint([policy(settings),PIPELINE_VERSION,QUERY_PLAN_VERSION,RETRIEVAL_STRATEGY_VERSION,SLOT_PLAN_VERSION,SOURCE_DIAGNOSTIC_VERSION,
+    from app.intent_execution import EXECUTION_VERSION
+    return fingerprint([EXECUTION_VERSION,policy(settings),PIPELINE_VERSION,QUERY_PLAN_VERSION,RETRIEVAL_STRATEGY_VERSION,SLOT_PLAN_VERSION,SOURCE_DIAGNOSTIC_VERSION,
         SELECTION_VERSION,NUMERIC_ROLE_VERSION,MATH_EVIDENCE_VERSION,SLOT_RANGE_VERSION,PAGE_LABEL_VERSION,PRESENTATION_VERSION,ANSWER_CONTRACT_VERSION,policy_signature(),COMPOSITION_VERSION,PHRASE_POLICY_VERSION,embedding.signature, settings.deepseek_base_url, settings.deepseek_model,
         settings.deepseek_thinking, TASK_PROMPT_VERSION, KNOWLEDGE_PROMPT_VERSION, KNOWLEDGE_RULE, settings.question_context_max_chars,
         settings.question_input_max_chars, settings.question_context_k,settings.question_candidate_k,
@@ -296,6 +297,10 @@ class KnowledgeTasks:
             row=db.execute('SELECT * FROM kb_tasks WHERE id=?',(job['id'],)).fetchone()
             if not row or row['lease_token']!=job['lease_token'] or row['status']!='running':return False
             if status=='succeeded' and not self.valid(db,job['id'],job['lease_token']):status,result,code,message='cancelled',None,'task_stopped','资料权限或会话状态已变化，结果未发布'
+            if status=='succeeded' and result and result.get('clarification',{}).get('kind')=='tool_parameters':
+                payload=json.loads(row['input_json']);clar=result['clarification'];stamp=now_iso()
+                db.execute('INSERT INTO conversation_clarifications(id,task_id,conversation_id,owner_user_id,epoch,needed_count,choices_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
+                    (clar['id'],row['id'],payload['conversation_id'],row['owner_user_id'],payload['memory_epoch'],clar['needed_count'],'[]',stamp,stamp))
             db.execute('UPDATE kb_tasks SET status=?,stage=?,result_json=?,error_code=?,error_message=?,finished_at=?,updated_at=?,lease_token=NULL,lease_expires_at=NULL WHERE id=?',
                 (status,'done' if status=='succeeded' else row['stage'],dump(result) if result is not None else None,code,message,now_iso(),now_iso(),job['id']))
         return status=='succeeded'

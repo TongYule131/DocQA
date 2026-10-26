@@ -89,7 +89,8 @@ class IntentManagement:
             index=SemanticIntents(self.repository);semantic_policy=index.policy(rows,provider_signature)
             if query_vector is not None:semantic=index.candidates(eligible_rows(rows,base_id,scope),query_vector,provider_signature)
         from app.intent_routing import resolve_understood_route
-        result=resolve_understood_route(question,base_id,rows,scope,understanding,semantic_candidates=semantic,semantic_policy=semantic_policy)
+        deferred=bool(query_vector is None and semantic_policy and any(r['kind']=='MCP' for r in eligible_rows(rows,base_id,scope)))
+        result=resolve_understood_route(question,base_id,rows,scope,understanding,semantic_candidates=semantic,semantic_policy=semantic_policy,semantic_deferred=deferred)
         result['semantic_pending']=bool(getattr(settings,'semantic_intent_enabled',False) and query_vector is None and result['route']['kind']=='KB')
         return result
 

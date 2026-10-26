@@ -268,6 +268,9 @@ class ChatSubmissionCoordinator:
                 from app.knowledge_questions import KnowledgeQuestions
                 index=DocumentIndex(self.repository,APIEmbedding(self.settings));access=ProductAccess(self.repository,self.settings,index)
                 knowledge=KnowledgeQuestions(access,RagService(self.settings,self.repository,index,DeepSeekModel(self.settings)))
-            task=knowledge.submit(row['conversation_id'],row['question'],'submission/'+row['id'],document_ids=json.loads(row['document_ids_json']),submission_id=row['id'])
+            with self.repository.connect() as db:
+                confirmation=db.execute('SELECT id FROM conversation_clarifications WHERE resolved_submission_id=?',(row['id'],)).fetchone()
+            task=knowledge.submit(row['conversation_id'],row['question'],'submission/'+row['id'],document_ids=json.loads(row['document_ids_json']),submission_id=row['id'],
+                                  confirmation_id=confirmation[0] if confirmation else None)
             self.finish(row,'submitted',None,None,task['id'])
         finally:actor_context.reset(token)

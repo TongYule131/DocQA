@@ -98,7 +98,7 @@ class KnowledgeQuestions:
         conv['entity_memory']['material_scope']=[{'document_id':d['document_id'],'name':d['filename']} for d in documents if not json.loads(conv['document_filter_json']) or d['document_id'] in json.loads(conv['document_filter_json'])]
         return conv
 
-    def submit(self, identifier, question, key, *, document_ids=None, submission_id=None):
+    def submit(self, identifier, question, key, *, document_ids=None, submission_id=None, confirmation_id=None):
         conv=self.require(identifier)
         if conv['archived']:raise HTTPException(409,'会话已归档，请恢复或新建会话')
         document_ids=json.loads(conv['document_filter_json']) if document_ids is None else document_ids
@@ -124,6 +124,14 @@ class KnowledgeQuestions:
         base=self.access.base(conv['base_id'])
         from app.intent_management import IntentManagement
         resolution=IntentManagement(self.repository).evaluate(question,base['id'],context=entity_context,provider_signature=self.access.index.embedding.signature);route=resolution['route']
+        if confirmation_id:
+            with self.repository.connect() as db:
+                confirmation=db.execute('SELECT task_id FROM conversation_clarifications WHERE id=?',(confirmation_id,)).fetchone()
+                previous=db.execute('SELECT result_json FROM kb_tasks WHERE id=?',(confirmation[0],)).fetchone() if confirmation else None
+            if previous and json.loads(previous[0]).get('clarification',{}).get('kind')=='tool_parameters':
+                from app.tool_clarifications import resolve_continuation
+                resolution=resolve_continuation(IntentManagement(self.repository),question,base['id'],entity_context,confirmation_id,conv)
+                route=resolution['route']
         understanding=resolution['understanding']
         docs=[] if route['kind']=='SYSTEM' else self.base_scope(conv['base_id'],document_ids)[1]
         frozen=[]
@@ -138,6 +146,8 @@ class KnowledgeQuestions:
                  'document_filter':document_ids,'route':route,'intent_decision':resolution['decision'],
                  'query_plan':resolution['query_plan'],'understanding':understanding,'conversation_context':memory,
                  'semantic_pending':resolution['semantic_pending']}
+        payload['execution']=resolution['execution']
+        if resolution.get('tool_continuation'):payload['tool_continuation']=resolution['tool_continuation']
         from app.query_planning import execution_budget
         payload['retrieval_budget']=execution_budget(resolution['query_plan'],self.access.settings,route)
         payload['retrieval_question']=retrieval_question(understanding['search_question'],memory)
