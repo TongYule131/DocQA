@@ -17,15 +17,38 @@ $logDir = Join-Path $resolvedDataDir '.local-service'
 
 $records = @()
 if (Test-Path $logDir) {
-    foreach ($file in Get-ChildItem -Path $logDir -Filter "*.json" -File) {
-        $record = Get-Content -Path $file.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
-        $readiness = Get-RoleReadiness $record $runtimeInfo
-        $identities = if ($record.processes) { @($record.processes) } else { @($record) }
-        $processStates = @($identities | ForEach-Object {
-            [ordered]@{ pid = $_.pid; running = [bool](Get-Process -Id $_.pid -ErrorAction SilentlyContinue)
-                        identity_match = (Test-RoleProcess $_) }
-        })
-        $process = Get-Process -Id $record.pid -ErrorAction SilentlyContinue
+    # 目录同时保存备份、重启窗口和监管器状态；只读取三个确定的角色记录。
+    foreach ($role in @('web', 'parse-worker', 'analysis-worker')) {
+        $recordPath = Join-Path $logDir ($role + '.json')
+        if (-not (Test-Path -LiteralPath $recordPath -PathType Leaf)) { continue }
+        $record = $null
+        $recordError = $null
+        try {
+            $record = Get-Content -LiteralPath $recordPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($null -eq $record) { $recordError = 'record_unreadable' }
+        } catch { $recordError = 'record_unreadable' }
+        if (-not $recordError) {
+            if ($record.role -isnot [string] -or $record.role -ne $role) { $recordError = 'role_mismatch' }
+            elseif ($record.data_dir -isnot [string]) { $recordError = 'invalid_data_dir' }
+            elseif (-not (Get-RoleProcessId $record)) { $recordError = 'invalid_pid' }
+        }
+        $processStates = @()
+        if (-not $recordError) {
+            $identities = @(if ($record.processes) { $record.processes } else { $record })
+            foreach ($identity in $identities) {
+                $childProcessId = Get-RoleProcessId $identity
+                if (-not $childProcessId) { $recordError = 'invalid_process_record' }
+                $running = $false
+                if ($childProcessId) { $running = [bool](Get-Process -Id $childProcessId -ErrorAction SilentlyContinue) }
+                $processStates += [ordered]@{pid=$childProcessId; running=$running;
+                    identity_match=(Test-RoleProcess $identity)}
+            }
+        }
+        $readiness = if (-not $recordError) { Get-RoleReadiness $record $runtimeInfo } else {
+            @{ready=$false;code_match=$false;schema_match=$false}
+        }
+        $process = $null
+        if (-not $recordError) { $process = Get-Process -Id (Get-RoleProcessId $record) -ErrorAction SilentlyContinue }
         $matchesProject = $false
         $path = $null
         $startTime = $null
@@ -40,8 +63,9 @@ if (Test-Path $logDir) {
             }
         }
         $records += [ordered]@{
-            role            = $record.role
-            pid             = $record.pid
+            role            = $role
+            pid             = (Get-RoleProcessId $record)
+            record_error    = $recordError
             running         = @($processStates | Where-Object { $_.running }).Count -gt 0
             identity_match  = @($processStates | Where-Object { $_.identity_match }).Count -gt 0
             processes       = $processStates
@@ -51,7 +75,7 @@ if (Test-Path $logDir) {
             actual_start    = $startTime
             executable      = $record.executable
             log             = $record.stdout_log
-            data_dir_match  = ($record.data_dir -eq $resolvedDataDir)
+            data_dir_match  = ($record.data_dir -is [string] -and $record.data_dir -eq $resolvedDataDir)
             ready           = $readiness.ready
             code_match      = $readiness.code_match
             schema_match    = $readiness.schema_match
@@ -75,7 +99,8 @@ if (-not $records.Count) {
     exit 0
 }
 foreach ($item in $records) {
-    $status = if ($item.running -and $item.identity_match -and $item.ready) { "运行中且就绪" } `
+    $status = if ($item.record_error) { "角色记录无效，无法确认就绪：$($item.record_error)" } `
+              elseif ($item.running -and $item.identity_match -and $item.ready) { "运行中且就绪" } `
               elseif ($item.running -and $item.identity_match) { "运行中但未就绪或版本不一致，请重启三个角色" } `
               elseif ($item.running) { "运行中但身份不匹配（不会停止）" } else { "已退出" }
     $color = if ($item.running -and $item.identity_match) { "Green" } else { "Yellow" }

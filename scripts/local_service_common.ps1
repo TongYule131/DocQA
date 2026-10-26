@@ -1,7 +1,20 @@
 ﻿# 进程身份同时核对路径和创建时间；PID 被复用时绝不误停其他 Python。
+function Get-RoleProcessId($identity) {
+    # 记录可能尚未写完或损坏；无效PID不得交给原生命令，也不得被转换成当前进程。
+    if (-not $identity) { return $null }
+    $value = $identity.pid
+    if ($value -isnot [int] -and $value -isnot [long] -and $value -isnot [string]) { return $null }
+    [int]$roleProcessId = 0
+    if ([int]::TryParse([string]$value, [ref]$roleProcessId) -and $roleProcessId -gt 0) {
+        return $roleProcessId
+    }
+    return $null
+}
+
 function Test-RoleProcess($identity) {
-    if (-not $identity -or -not $identity.start_time) { return $false }
-    $current = Get-Process -Id $identity.pid -ErrorAction SilentlyContinue
+    $roleProcessId = Get-RoleProcessId $identity
+    if (-not $roleProcessId -or -not $identity.start_time) { return $false }
+    $current = Get-Process -Id $roleProcessId -ErrorAction SilentlyContinue
     if (-not $current) { return $false }
     try {
         return ($current.Path -eq $identity.executable -and
@@ -58,6 +71,9 @@ function Get-LocalRuntimeInfo([string]$ProjectRoot, [string]$DataDir) {
 function Get-RoleReadiness($Record, $RuntimeInfo) {
     $state = [ordered]@{ready=$false; code_match=$false; schema_match=$false;
         data_dir_match=$false; process_match=$false; schema_version=$null}
+    if ($Record.role -isnot [string] -or $Record.role -notin @('web', 'parse-worker', 'analysis-worker') -or
+        $Record.data_dir -isnot [string] -or $Record.data_dir -ne $RuntimeInfo.data_dir -or
+        -not (Get-RoleProcessId $Record)) { return $state }
     $readyPath = Join-Path (Join-Path $RuntimeInfo.data_dir '.local-service') ($Record.role + '.ready')
     if (-not (Test-Path -LiteralPath $readyPath)) { return $state }
     try {
