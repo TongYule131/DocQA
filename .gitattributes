@@ -6,3 +6,6 @@
 # Frozen historical plans are checked against their original SHA-256 hashes.
 docs/archive/2026-10-20/OCR*.md -text
 docs/archive/2026-10-20/RAG*.md -text
+
+# Consolidated historical snapshots retain their original bytes.
+docs/archive/2026-10-26-consolidation/** -text
