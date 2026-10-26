@@ -29,7 +29,7 @@
 | 项目包 | `0.2.0` |
 | 数据库 schema | `16` |
 | 新解析规范化结构 | `docqa-normalized-9`（旧版本继续可读） |
-| 任务式问答 Prompt | `rag-task-v61` |
+| 任务式问答 Prompt | `rag-task-v62` |
 | 检索策略 | `hybrid-context-v12` |
 | 事实引用协议 | `fact-context-parts-v8` |
 | 意图路由 | `intent-execution-v4` |

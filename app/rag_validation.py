@@ -64,6 +64,7 @@ REASON_CODE_NAMES = {
     "page_locator_not_supported",
     "statement_locator_not_supported",
     "locator_not_supported",
+    "technical_literal_not_supported",
     "unsupported_requirement", "coverage_status_conflict",
     "claim_evidence_invalid", "claim_type_missing_or_invalid", "context_not_in_claim_evidence",
     'quote_not_in_admitted_input','incomplete_quote_sentence','continuation_not_bound_to_claim','inference_label_required',
@@ -412,7 +413,7 @@ def validate_user_condition_boundary(output: ValidatedOutput, evidence: Evidence
         for match in quoted_user_text.finditer(fact.text):
             quoted = next(value for value in match.groups() if value is not None)
             if quoted in normalized_question and not any(source_phrase_match(quoted, text) for text in cited_texts):
-                if is_question_framing_term(quoted,fact):
+                if is_question_framing_term(quoted,fact,cited_texts):
                     continue
                 raise ModelOutputError("mixed_user_source",
                     "文档事实条目混入仅由用户问题提供的原句",

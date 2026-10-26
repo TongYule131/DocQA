@@ -16,7 +16,7 @@ _TABLE_TYPES = {"table_rows", "document_index", "long_line"}
 def table_structure_signature(blocks: list[Block]) -> str:
     # 表格正文未变时，单元格、表头标志、脚注或来源变化也必须使任务快照失效。
     payload = [block.model_dump(mode="json") for block in blocks
-               if block.block_type in {"table", "document_index"}]
+               if block.block_type in {"table", "document_index", "markdown_table"}]
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
@@ -33,6 +33,9 @@ def table_projection(chunk, block: Block | None) -> dict | None:
     if ((block.document_id, block.parse_version_id, block.id) !=
             (chunk.document_id, chunk.parse_version_id, chunk.block_id)):
         return unavailable("table_scope_mismatch")
+    if block.block_type == "markdown_table":
+        # 原始管道表按完整行展示，不能假装已有PDF／XLSX单元格坐标投影。
+        return unavailable("markdown_raw_rows")
     if block.block_type not in {"table", "document_index"} or chunk.chunk_type == "long_line":
         return unavailable("incomplete_table_rows")
     try:

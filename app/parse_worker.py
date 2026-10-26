@@ -18,6 +18,7 @@
 import argparse
 import hashlib
 import json
+import re
 import logging
 import os
 import shutil
@@ -331,9 +332,11 @@ class ParseWorker:
         if document.format=='md':
             # 标题独立为结构节点；代码围栏内部的 # 保持原文，不当标题。
             from app.markdown_document import markdown_spans
-            spans = [(a,b) for a,b,_ in markdown_spans(text)]
-            labels = [label for _,_,label in markdown_spans(text)]
-        else:labels=['text']*len(spans)
+            structure=markdown_spans(text)
+            spans = [(a,b) for a,b,_ in structure]
+            kinds = [label for _,_,label in structure]
+            labels = ['text' if kind=='markdown_table' else kind for kind in kinds]
+        else:labels=kinds=['text']*len(spans)
         nodes = [{"self_ref": f"#/texts/{index}", "label": labels[index], "text": text[start:end],
                   "parent": {"$ref": "#/body"},
                   "prov": [{"page_no": 1, "charspan": [start, end]}]}
@@ -347,19 +350,33 @@ class ParseWorker:
             "pages": {"1": {"page_no": 1}},
         }
         self.repository.update_task_progress(task.id, token, stage="normalizing")
+        parser_version='local-markdown-3' if document.format=='md' else 'local-text-2'
         normalized = normalize_docling_result(document.id, payload, document.format or "txt",
-                                             parser_version="local-text-2")
+                                             parser_version=parser_version)
         # 补充 TXT 的行范围来源，并说明其页码不是物理 PDF 页码。
         lines = text.splitlines()
-        for block, (start, end) in zip(normalized.blocks, spans, strict=True):
+        headings=[]
+        for block, (start, end),kind in zip(normalized.blocks, spans,kinds, strict=True):
+            if document.format=='md':
+                block.text=text[start:end];block.char_count=len(block.text)
+                if kind=='section_header':
+                    match=re.match(r'^ {0,3}(#{1,6})\s+(.+)',text[start:end].strip())
+                    level=len(match[1]);headings=[h for h in headings if h[0]<level];headings.append((level,match[2].rstrip(' #\r\n')))
+                block.heading_path=' / '.join(h[1] for h in headings) or None
+                if kind=='markdown_table':block.block_type='markdown_table'
             for source in block.sources:
+                if document.format=='md':
+                    source.section_path=block.heading_path;source.char_start=start;source.char_end=end
                 source.line_start = len(text[:start].splitlines()) + 1
                 source.line_end = max(source.line_start, len(text[:end].rstrip('\r\n').splitlines()))
-                source.note = "TXT 逻辑页，不是物理 PDF 页码；行范围和字符范围对应原文段落"
-        normalized.warnings.append(
-            _txt_warning(len(lines)))
+                source.note = ("Markdown原文行／字符范围，代码仅作为资料" if document.format=='md' else "TXT 逻辑页，不是物理 PDF 页码；行范围和字符范围对应原文段落")
+        if document.format=='md':
+            from app.schemas import QualityWarning
+            normalized.warnings.append(QualityWarning(code='markdown_source_lines',severity='info',scope='document',
+                message=f'Markdown共{len(lines)}行，保留标题、表格行与代码；行号对应原文，页码为逻辑页'))
+        else:normalized.warnings.append(_txt_warning(len(lines)))
         self._publish(task, token, document, payload, text, origin_hash=origin_hash,
-                      parser_version="local-text-2", source="local",
+                      parser_version=parser_version, source="local",
                       normalized=normalized)
 
     # ------------------------------------------------------------------

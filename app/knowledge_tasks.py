@@ -280,6 +280,7 @@ class KnowledgeTasks:
                 'output_presentation_reference_invalid': '正文组织引用了不存在的事实，未发布完整结果',
                 'output_presentation_coverage_mismatch': '正文组织存在事实遗漏或重复，未发布完整结果',
                 'output_numeric_context_missing': '回答中的数值缺少适用限定，未发布完整结果；请查看链路详情',
+                'output_technical_literal_not_supported': '回答中的协议标识或状态码缺少本条原文支持，未发布完整结果；请核对技术标识',
                 'output_mixed_user_source': '回答将题干中的表述作为原文引用，但本条证据未支持；请查看链路中的失败论断位置',
                 'output_number_not_in_quote': '回答中的数值未在本条引用原文中找到，未发布完整结果；请核对数字及其适用对象',
                 'output_number_unit_mismatch': '回答中的数值单位与本条引用原文不一致，未发布完整结果',

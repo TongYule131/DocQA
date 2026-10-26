@@ -402,7 +402,7 @@ function renderLegacyChunks(chunks) {
 
 function blockTypeLabel(type) {
   const labels = {
-    title: '标题', section_header: '章节标题', paragraph: '正文', list_item: '列表项',
+    title: '标题', section_header: '章节标题', paragraph: '正文', list_item: '列表项', markdown_table: 'Markdown表格',
     table: '表格', document_index: '目录（识别为表格）', caption: '图表标题', footnote: '脚注',
     formula: '公式', code: '代码', reference: '引用', picture: '图片',
     page_header: '页眉', page_footer: '页脚',

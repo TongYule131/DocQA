@@ -1,10 +1,11 @@
 """先核验文内地址，再核验业务数值；只生成校验视图，不修改事实或引文。"""
 from dataclasses import dataclass
+from http import HTTPStatus
 import re
 
 from app.rag_validation import ModelOutputError
 
-NUMERIC_ROLE_VERSION = 'grounded-number-roles-v4'
+NUMERIC_ROLE_VERSION = 'grounded-number-roles-v5'
 _TRANSLATE = str.maketrans('０１２３４５６７８９．，：（）－', '0123456789.,:()-')
 _CN = '零〇一二三四五六七八九十百千万两'
 _ID = rf'(?:[0-9]{{1,4}}(?:\.[0-9]{{1,3}}){{0,4}}|[{_CN}]{{1,8}})'
@@ -95,7 +96,23 @@ _PATTERNS=[
     ('section',r'(?:推出|对应|配对|小节为|章节为)\s*(?P<ids>\d+(?:\.\d+)+(?:\s*[、,，]\s*\d+(?:\.\d+)+)*)(?=(?:与|和|及)(?:另|其他)[^。；，]{0,16}(?:层面|机制|章节|小节))'),
     ('section',rf'(?:原文|论文)在[“"‘](?P<ids>{_ID})\s+(?=[^”"’]{{2,80}}[”"’](?:开篇|中|部分))'),
 ]
-_COMPILED=[(kind,re.compile(pattern,re.I)) for kind,pattern in _PATTERNS]
+_HTTP_STATUS='|'.join(re.escape(str(status.value))+r'[ \t]+'+re.escape(status.phrase).replace(r'\ ',r'[ \t]+') for status in HTTPStatus)
+_PROTOCOL_PATTERNS=[
+    ('http_version',r'(?<![A-Za-z0-9_])(?P<ids>HTTP/[0-9]+(?:\.[0-9]+)*)(?![A-Za-z0-9_.])'),
+    ('http_status',rf'(?<![A-Za-z0-9_])(?P<ids>{_HTTP_STATUS})(?![A-Za-z0-9_])'),
+    ('http_status_code',r'(?<![A-Za-z0-9_])HTTP(?:[ \t]+|[ \t]*(?:响应[ \t]*)?(?:状态码|状态|响应码|status[ \t]*code)[ \t]*[:：=]?[ \t]*)(?P<ids>[1-5][0-9]{2})(?![0-9A-Za-z_])'),
+]
+_COMPILED=[(kind,re.compile(pattern,re.I)) for kind,pattern in _PROTOCOL_PATTERNS+_PATTERNS]
+_MEASUREMENT_WORDS=r'金额|费用|价格|成本|支付|收入|支出|人数|数量|时长|耗时|温度|重量|长度|测量|额度|预算'
+_MEASUREMENT_UNITS=r'元|万元|亿元|美元|欧元|人|件|秒|分钟|小时|天|年|月|日|公斤|千克|米|℃|[%％]|(?:USD|EUR|ms|seconds?|milliseconds?|kWh|MB|GB|KB)(?![A-Za-z])'
+
+
+def _is_measurement_use(text,start,end):
+    # 反引号不是数值豁免；“费用为`200 OK`元”等仍交给原数值守卫。
+    left=text[max(0,start-25):start].rstrip(' `*_')
+    right=text[end:].lstrip(' `*_')
+    return bool(re.search(r'(?:'+_MEASUREMENT_WORDS+r')\s*(?:为|是|[:：=])?\s*$',left)
+                or re.match(_MEASUREMENT_UNITS,right,re.I))
 
 
 def locate(text):
@@ -104,7 +121,10 @@ def locate(text):
     for kind,pattern in _COMPILED:
         for match in pattern.finditer(normalized):
             if any(match.start()<p.end and match.end()>p.start for p in found):continue
-            if kind in {'printed_label','pdf_label'}:
+            if kind.startswith('http_'):
+                if _is_measurement_use(normalized,match.start(),match.end()):continue
+                actual=kind;values=(re.sub(r'[ \t]+',' ',match['ids']).casefold(),);nested=False
+            elif kind in {'printed_label','pdf_label'}:
                 actual='printed_page' if kind=='printed_label' else 'pdf_label'
                 values=(match['ids'].casefold(),);nested=False
             elif kind=='formula_symbol':
@@ -155,6 +175,8 @@ def _source_addresses(sources):
                     values=(str(int(joined[1][:-1])),)
                     for kind in ['项','条','款','点']:addresses.setdefault(kind,set()).add(joined[1][-1])
             addresses.setdefault(locator.kind,set()).update(values)
+            if locator.kind=='http_status':
+                addresses.setdefault('http_status_code',set()).add(values[0].split(' ',1)[0])
         for match in re.finditer(rf'(?:^|[；;。\n])\s*[（(]?\s*([0-9]{{1,3}}|[{_CN}]{{1,6}})\s*(?:[)）、]|\.(?!\d))',normalized):
             number=_canonical(match[1])
             for kind in ['项','条','款','点']:addresses.setdefault(kind,set()).add(number)
@@ -201,6 +223,7 @@ def numeric_view(text,items,sources):
         supported=bool(locator.values) and (locator.kind=='answer_order' or set(locator.values)<=allowed.get(locator.kind,set()))
         if locator.nested:supported=supported and locator.values[1].startswith(locator.values[0]+'.')
         if not supported:
+            if locator.kind.startswith('http_'):raise ModelOutputError('technical_literal_not_supported')
             code=('page_locator_not_supported' if locator.kind in {'page','physical_page','printed_page','pdf_label'} else
                   'statement_locator_not_supported' if locator.kind in {'命题','推论','定理','引理','项','条','款','点'} else 'locator_not_supported')
             raise ModelOutputError(code)

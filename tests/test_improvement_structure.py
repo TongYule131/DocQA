@@ -224,7 +224,7 @@ def test_old_normalized_blocks_are_not_recovered_or_rewritten_when_only_chunked(
     assert all(chunk.heading_path == "原有路径" for chunk in chunks)
     assert any(chunk.text == "认 知 正 文" for chunk in chunks)
     assert RESULT_SCHEMA_VERSION == "docqa-normalized-9"
-    assert CHUNKING_ALGO == "structured-heading-table-v5"
+    assert CHUNKING_ALGO == "structured-heading-table-v6"
 
 
 @pytest.mark.parametrize("top,sub,task", [

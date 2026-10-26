@@ -113,4 +113,4 @@ def test_markdown_local_parse_preserves_code_fences_and_heading_sources(tmp_path
     spans=markdown_spans(text)
     assert detect_format('policy.md',text.encode()).format=='md'
     assert sum(label=='section_header' for _,_,label in spans)==2
-    assert any('# 不应成为标题' in text[a:b] and label=='text' for a,b,label in spans)
+    assert any('# 不应成为标题' in text[a:b] and label=='code' for a,b,label in spans)

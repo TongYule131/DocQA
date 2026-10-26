@@ -22,7 +22,7 @@ from app.schemas import Block, Chunk, SourceLocation
 logger = logging.getLogger(__name__)
 
 # 分块算法标识：写入索引记录，便于判断旧索引由哪种规则生成。
-CHUNKING_ALGO = "structured-heading-table-v5"
+CHUNKING_ALGO = "structured-heading-table-v6"
 
 # 分块类型：正文 / 表格行组 / 目录 / 公式占位 / 单行超长续切。
 CHUNK_TYPE_TEXT = "text"
@@ -30,6 +30,7 @@ CHUNK_TYPE_TABLE = "table_rows"
 CHUNK_TYPE_INDEX = "document_index"
 CHUNK_TYPE_FORMULA = "formula_placeholder"
 CHUNK_TYPE_OVERFLOW = "long_line"
+CHUNK_TYPE_CODE = "code"
 
 # caption 与相邻同章节正文进入同一流，不把标题前缀写进原文引述；
 # 章节恢复与可疑上游标题降级从 normalized-5 引入，旧解析版本不会在分块时重写。
@@ -206,8 +207,8 @@ def chunk_document(document: NormalizedDocument, config: ChunkingConfig) -> list
     def add(block: Block, text: str, chunk_type: str, page: int | None,
             sources: list[SourceLocation], heading_path: str | None, note: str | None = None) -> None:
         nonlocal order
-        payload = text.strip()
-        if not payload:
+        payload = text if chunk_type==CHUNK_TYPE_CODE else text.strip()
+        if not payload.strip():
             return
         if len(payload) > config.max_chars:
             # 标题/公式等特殊节点也必须遵守长度上限，不能只限制普通正文。
@@ -268,6 +269,12 @@ def chunk_document(document: NormalizedDocument, config: ChunkingConfig) -> list
         flow_blocks.clear()
 
     for block in document.blocks:
+        if document.format=='md' and block.block_type=='markdown_table':
+            flush_flow();_chunk_markdown_table(block,config,add);continue
+        if document.format=='md' and block.block_type=='code':
+            flush_flow();_chunk_markdown_code(block,config,add);continue
+        if document.format=='md' and re.fullmatch(r'\s*(?:-{3,}|\*{3,}|_{3,})\s*',block.text):
+            flush_flow();continue  # 分隔线仍在原块中，单独不构成检索证据。
         if block.block_type in _FLOW_TYPES:
             # 标题变化时先落盘上一组，保证标题路径与分块内容一致。
             if flow_blocks and block.heading_path != flow_blocks[0].heading_path:
@@ -305,6 +312,54 @@ def _first_page(sources: list[SourceLocation]) -> int | None:
         if source.page:
             return source.page
     return None
+
+
+def _markdown_sources(block,start,end,note):
+    sources=_source_summary(block.sources)
+    for source in sources:
+        if source.char_start is not None:
+            source.char_end=source.char_start+end;source.char_start+=start
+        if source.line_start is not None:
+            base=source.line_start
+            source.line_start=base+block.text[:start].count('\n')
+            source.line_end=base+block.text[:end].rstrip('\r\n').count('\n')
+        source.note=note
+    return sources
+
+
+def _chunk_markdown_table(block,config,add):
+    # 一行语义单元保留全部单元格与原始表头，不在长表中间切断函数调用或问题／后果／修正关系。
+    lines=block.text.splitlines(keepends=True);header=''.join(lines[:2]);offset=len(header)
+    if len(lines)<3:
+        if len(block.text.strip())>config.max_chars:
+            raise ValueError('Markdown表格表头超过分块上限；请提高分块长度，未裁切原文')
+        add(block,block.text,CHUNK_TYPE_TABLE,_first_page(block.sources),block.sources,block.heading_path);return
+    for row in lines[2:]:
+        text=header+row
+        if len(text.strip())>config.max_chars:
+            raise ValueError('Markdown表格单行连同表头超过分块上限；请提高分块长度或拆分该行，未裁切原文')
+        sources=_markdown_sources(block,0,len(header),'Markdown原始表头；与本块数据行组合展示')
+        sources+=_markdown_sources(block,offset,offset+len(row),'Markdown完整数据行；表头与行分别保留原文位置')
+        add(block,text,CHUNK_TYPE_TABLE,_first_page(sources),sources,block.heading_path)
+        offset+=len(row)
+
+
+def _chunk_markdown_code(block,config,add):
+    if len(block.text)<=config.max_chars:
+        add(block,block.text,CHUNK_TYPE_CODE,_first_page(block.sources),block.sources,block.heading_path);return
+    # 长代码按完整物理行续分，不混入前后说明；续片有共同block_id和明确来源说明。
+    start=0;buffer=''
+    for line in block.text.splitlines(keepends=True):
+        if len(line)>config.max_chars:
+            raise ValueError('Markdown代码单行超过分块上限；请提高分块长度，未从代码行中间截断')
+        if buffer and len(buffer)+len(line)>config.max_chars:
+            sources=_markdown_sources(block,start,start+len(buffer),'Markdown代码续片，需结合原代码块；未声明为独立完整程序')
+            add(block,buffer,CHUNK_TYPE_CODE,_first_page(sources),sources,block.heading_path)
+            start+=len(buffer);buffer=''
+        buffer+=line
+    if buffer:
+        sources=_markdown_sources(block,start,start+len(buffer),'Markdown代码续片，需结合原代码块；未声明为独立完整程序')
+        add(block,buffer,CHUNK_TYPE_CODE,_first_page(sources),sources,block.heading_path)
 
 
 def _chunk_table(block: Block, config: ChunkingConfig, add, document: NormalizedDocument) -> None:
