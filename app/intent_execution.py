@@ -53,7 +53,7 @@ def execution_contract(route, understanding, plan):
                                  if isinstance(d, dict) and 'document_id' in d] if action == 'retrieve' else []},
             'constraints': {'top_k': route.get('top_k'), 'read_only': True},
             'requires_retrieval': action == 'retrieve', 'requires_tool': action == 'query_tool',
-            'can_answer_requested_data': action not in ('source_unavailable', 'split_request', 'clarify')}
+            'requires_answer_evidence': action in ('retrieve', 'query_tool')}
 
 
 def local_result(resolution, task_id):
