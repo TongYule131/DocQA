@@ -99,13 +99,13 @@ def contained(root: Path, relative: str) -> Path:
     return path
 
 
-def resolve_archived_document(root: Path, original: str) -> Path:
+def resolve_archived_document(root: Path, original: str, expected_digest: str | None = None) -> Path:
     """旧冻结清单继续使用原路径；归档仅改存放位置，哈希保持不变。"""
     path = contained(root, original)
-    if path.exists():
+    if path.exists() and (expected_digest is None or hashlib.sha256(path.read_bytes()).hexdigest()==expected_digest):
         return path
     for record in archive_records(root):
-        if record['original'] == original.replace('\\', '/'):
+        if record['original'] == original.replace('\\', '/') and (expected_digest is None or record['sha256']==expected_digest):
             return contained(root, record['archived'])
     return path
 
@@ -114,14 +114,20 @@ def check(root: Path, freezes: list[Path] | None = None) -> dict:
     root = root.resolve()
     issues, deferred = [], []
     archived_count = 0
+    snapshots=set()
     for record in archive_records(root):
         path = contained(root, record['archived'])
         if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != record['sha256']:
             issues.append({'kind':'archive_hash_mismatch','path':record['archived']})
         archived_count += 1
+        if record.get('role')=='historical_status_snapshot':
+            if not path.is_relative_to(root/'docs/archive'):raise ValueError('Historical snapshots must be in docs/archive')
+            snapshots.add(path)
     paths = project_documents(root)
     links = 0
     for path in paths:
+        # 状态整合前快照保持原字节及当时目录语义；当前文档链接仍全部检查。
+        if path in snapshots:continue
         text = path.read_text(encoding='utf-8-sig')
         # 代码示例里的占位Markdown不作为文档导航链接。
         text = re.sub(r'```.*?```', '', text, flags=re.S)
@@ -150,7 +156,7 @@ def check(root: Path, freezes: list[Path] | None = None) -> dict:
             relative = relative.replace('\\', '/')
             if not relative.startswith('docs/'):
                 continue
-            path = resolve_archived_document(root, relative)
+            path = resolve_archived_document(root, relative, digest)
             frozen_refs += 1
             if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
                 issues.append({'kind':'frozen_document_mismatch','freeze':str(freeze),'path':relative})
@@ -159,7 +165,7 @@ def check(root: Path, freezes: list[Path] | None = None) -> dict:
     return {'passed':not issues,'documents':len(paths),'links_checked':links,'archives_verified':archived_count,
             'source_versions_checked':version_count, 'config_defaults_checked':config_count,
             'frozen_document_refs_verified':frozen_refs,'issues':issues,'deferred_local_evidence':deferred,
-            'provider_calls':0}
+            'snapshot_links_preserved':len(snapshots),'provider_calls':0}
 
 
 def main():

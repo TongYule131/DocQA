@@ -16,3 +16,7 @@
 `manifest.json`保存原路径、新路径及SHA-256。冻结清单中的旧docs路径可用 `scripts/check_docs.py --freeze <freeze.json>`只读核验；它按映射找到原字节，不修改原冻结清单。旧私有推理脚本若直接读取旧路径，需先按原版本恢复归档及源码快照，不可拿当前修复代码伪装成旧版本重跑。
 
 本次整理前全部17份docs及项目README另保存在 `data/review-docs-20261020/originals/`、documents-before.zip和documents-before.json；2026-10-13的更早归档仍保留。历史原始证据/业务原件/账本未移动。
+
+## 当前说明整合前快照
+
+[2026-10-26整合快照](2026-10-26-consolidation/index.md)保存18份README、领域／状态和产品设计原文。它们不是新的冻结语义样本，既有8份冻结计划未改。当前导航统一在[文档索引](../README.md)，版本／余额统一在[接力说明](../稳定试用版接力说明.md)。

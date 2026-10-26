@@ -10,6 +10,20 @@ from app.repository import Repository, now_iso
 from app.runtime import process_start_token
 
 
+def _clear_feedback_content(db,source,task_query,args):
+    """task_query仅由本模块固定SQL提供，标识和费用保留，私有分享正文不保留。"""
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE name='answer_feedback'").fetchone():return
+    predicate=f'source=? AND task_id IN ({task_query})';parameters=(source,*args)
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='feedback_cases'").fetchone():
+        db.execute(f'UPDATE feedback_cases SET payload_json=NULL WHERE feedback_id IN (SELECT id FROM answer_feedback WHERE {predicate})',parameters)
+    db.execute(f"UPDATE answer_feedback SET share_context=0,context_json=NULL,comment='',client_reply=NULL,revision=revision+1 WHERE {predicate}",parameters)
+
+
+def _clear_question_auxiliary(db,document_id):
+    db.execute('DELETE FROM answer_stream_events WHERE question_job_id IN (SELECT id FROM question_jobs WHERE document_id=?)',(document_id,))
+    _clear_feedback_content(db,'question','SELECT id FROM question_jobs WHERE document_id=?',(document_id,))
+
+
 def require_stopped(data):
     # 不杀进程；任一角色仍存活或记录损坏时拒绝物理清理。
     for path in (data / '.local-service').glob('*.ready'):
@@ -18,7 +32,19 @@ def require_stopped(data):
             raise RuntimeError('请先停止该数据目录的Web及全部worker，再执行附件清理')
 
 
+def _cleanup_directory(data):
+    data=Path(data).resolve()
+    if not (data/'docqa.db').is_file():raise RuntimeError('未找到已初始化的数据库，未执行清理')
+    # 不能只检查最终文件：Windows目录联接也能让uploads／parse-results越出数据目录。
+    for name in ('docqa.db','uploads','parse-results','.local-service'):
+        path=data/name
+        if path.is_symlink() or path.resolve()!=path or not path.resolve().is_relative_to(data):
+            raise RuntimeError('清理目录存在链接或越界，未执行清理')
+    return data
+
+
 def purge_expired(data):
+    data=_cleanup_directory(data)
     from app.maintenance import maintenance
     with maintenance(data,'temporary_purge'):
         return _purge_expired(data)
@@ -29,6 +55,8 @@ def _purge_expired(data):
     require_stopped(data)
     repository = Repository(data / 'docqa.db')
     with repository.connect() as db:
+        from app.migrations import validate_schema
+        validate_schema(db)  # 必须在任何文件删除之前拒绝旧库、未来库或损坏结构。
         rows = db.execute('SELECT * FROM conversation_attachments WHERE purged_at IS NULL '
                           'AND (expires_at<=? OR revoked_at IS NOT NULL)', (now_iso(),)).fetchall()
     purged = []
@@ -52,7 +80,7 @@ def _purge_expired(data):
             resolved = target.resolve()
             allowed = (resolved.parent == (data / 'uploads').resolve() and resolved.name == doc) or (
                 resolved.parent == results.resolve() and resolved.name not in ('.', '..'))
-            if not allowed or target.is_symlink():
+            if not allowed or not resolved.is_relative_to(data) or target.is_symlink():
                 raise RuntimeError('清理路径越界，停止操作')
         # 文件删除可能被Windows占用阻止；保留未清理状态，下次明确维护时可继续。
         for target in set(targets):
@@ -63,6 +91,9 @@ def _purge_expired(data):
         with repository.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             stop_conversation_jobs(db, conv)
+            _clear_question_auxiliary(db,doc)
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='conversation_entity_memory'").fetchone():
+                db.execute('DELETE FROM conversation_entity_memory WHERE conversation_id=?',(conv,))
             for table in ('question_results', 'question_checkpoints'):
                 db.execute(f'DELETE FROM {table} WHERE job_id IN (SELECT id FROM question_jobs WHERE document_id=?)', (doc,))
             db.execute("UPDATE question_jobs SET snapshot_json='{}',question='[临时资料已清理]',result_id=NULL,stage_detail=NULL,error_message=NULL WHERE document_id=?", (doc,))
@@ -71,7 +102,7 @@ def _purge_expired(data):
             for table in ('embedding_vectors', 'embedding_vectors_v2', 'quality_warnings', 'chunks', 'sources', 'blocks'):
                 db.execute(f'DELETE FROM {table} WHERE document_id=?', (doc,))
             db.execute("UPDATE parse_tasks SET status=CASE WHEN status IN ('queued','running') THEN 'cancelled' ELSE status END,"
-                       "cancel_requested=1,lease_token=NULL,lease_expires_at=NULL,error_message=NULL WHERE document_id=?", (doc,))
+                       "cancel_requested=1,lease_token=NULL,lease_expires_at=NULL,request_summary='{}',error_message=NULL WHERE document_id=?", (doc,))
             db.execute("UPDATE parse_attempts SET detail=NULL,error_message=NULL WHERE task_id IN (SELECT id FROM parse_tasks WHERE document_id=?)", (doc,))
             db.execute("UPDATE parse_versions SET result_json_path=NULL,markdown_path=NULL,quality_summary=NULL WHERE document_id=?", (doc,))
             db.execute("UPDATE documents SET filename='已清理临时资料',error=NULL,chunk_count=0,active_parse_version_id=NULL,active_index_id=NULL WHERE id=?", (doc,))
@@ -86,9 +117,14 @@ def _purge_expired(data):
 
 
 def purge_temporary_bases(data,repository):
+    data=_cleanup_directory(data)
+    if repository.path.resolve()!=data/'docqa.db' or not (data/'docqa.db').is_file():
+        raise RuntimeError('清理目录与数据库不匹配，未执行清理')
     from app.maintenance import maintenance
     with maintenance(data,'temporary_purge'):
         require_stopped(Path(data))
+        from app.migrations import validate_schema
+        with repository.connect() as db:validate_schema(db)
         return _purge_temporary_bases(Path(data),repository)
 
 
@@ -110,7 +146,7 @@ def _purge_temporary_bases(data,repository):
                 targets.extend((data/'parse-results').glob('v-'+doc[:12]+'-*'));targets.extend((data/'parse-results').glob('.v-'+doc[:12]+'-*'))
         for target in set(targets):
             resolved=target.resolve()
-            if target.is_symlink() or resolved.parent not in ((data/'uploads').resolve(),(data/'parse-results').resolve()):raise RuntimeError('临时库清理路径越界')
+            if target.is_symlink() or not resolved.is_relative_to(data) or resolved.parent not in ((data/'uploads').resolve(),(data/'parse-results').resolve()):raise RuntimeError('临时库清理路径越界')
         for target in set(targets):
             if target.is_dir():shutil.rmtree(target)
             else:target.unlink(missing_ok=True)
@@ -119,10 +155,9 @@ def _purge_temporary_bases(data,repository):
             # 外部在途请求的账本不删除，也不把它误记为未收费。
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='conversation_entity_memory'").fetchone():
                 db.execute('DELETE FROM conversation_entity_memory WHERE conversation_id IN (SELECT id FROM kb_conversations WHERE base_id=?)',(base_id,))
-            if db.execute("SELECT 1 FROM sqlite_master WHERE name='answer_feedback'").fetchone():
-                if db.execute("SELECT 1 FROM sqlite_master WHERE name='feedback_cases'").fetchone():
-                    db.execute("UPDATE feedback_cases SET payload_json=NULL WHERE feedback_id IN (SELECT id FROM answer_feedback WHERE source='knowledge' AND task_id IN (SELECT id FROM kb_tasks WHERE base_id=?))",(base_id,))
-                db.execute("UPDATE answer_feedback SET share_context=0,context_json=NULL,comment='',revision=revision+1 WHERE source='knowledge' AND task_id IN (SELECT id FROM kb_tasks WHERE base_id=?)",(base_id,))
+            _clear_feedback_content(db,'knowledge','SELECT id FROM kb_tasks WHERE base_id=?',(base_id,))
+            # 已确认对象及工具参数是用户私有内容；保留确认键／哈希墓碑阻止复活与重放。
+            db.execute("UPDATE conversation_clarifications SET choices_json='[]',state='cancelled',updated_at=? WHERE conversation_id IN (SELECT id FROM kb_conversations WHERE base_id=?)",(now_iso(),base_id))
             db.execute("UPDATE kb_task_calls SET status='uncertain',error_code='temporary_purged',finished_at=? WHERE task_id IN (SELECT id FROM kb_tasks WHERE base_id=?) AND status='intent'",(now_iso(),base_id))
             db.execute('DELETE FROM answer_stream_events WHERE kb_task_id IN (SELECT id FROM kb_tasks WHERE base_id=?)',(base_id,))
             db.execute('DELETE FROM kb_task_checkpoints WHERE task_id IN (SELECT id FROM kb_tasks WHERE base_id=?)',(base_id,))
@@ -132,7 +167,7 @@ def _purge_temporary_bases(data,repository):
             db.execute("UPDATE ingestion_jobs SET status=CASE WHEN status IN ('queued','running','review') THEN 'cancelled' ELSE status END,error_message=NULL WHERE base_id=?",(base_id,))
             for doc in docs:
                 # 历史附件迁移形成的新库也要清除其原入口的正文。
-                db.execute('DELETE FROM answer_stream_events WHERE question_job_id IN (SELECT id FROM question_jobs WHERE document_id=?)',(doc,))
+                _clear_question_auxiliary(db,doc)
                 for table in ('question_results','question_checkpoints'):db.execute(f'DELETE FROM {table} WHERE job_id IN (SELECT id FROM question_jobs WHERE document_id=?)',(doc,))
                 db.execute("UPDATE question_jobs SET snapshot_json='{}',question='[临时资料已清理]',result_id=NULL WHERE document_id=?",(doc,))
                 for table in ('embedding_vectors','embedding_vectors_v2','quality_warnings','chunks','sources','blocks'):db.execute(f'DELETE FROM {table} WHERE document_id=?',(doc,))

@@ -102,3 +102,32 @@ def test_dependency_documents_are_pruned_but_project_fixture_docs_are_checked(tm
     assert result['passed'] and result['documents']==3
     (own/'README.md').write_text('[missing](missing.md)', encoding='utf8')
     assert not check(tmp_path)['passed']
+
+
+def test_frozen_revision_resolves_archive_when_current_document_was_rewritten(tmp_path):
+    old,digest=fixture(tmp_path)
+    (tmp_path/'docs/old.md').write_text('# Current guide\n',encoding='utf-8')
+    freeze=tmp_path/'freeze.json'
+    freeze.write_text(json.dumps({'hashes':{'docs/old.md':digest}}),encoding='utf-8')
+    assert check(tmp_path,[freeze])['passed']
+
+
+def test_immutable_status_snapshot_is_hashed_without_reinterpreting_old_links(tmp_path):
+    old,_=fixture(tmp_path);old.write_text('[old context](../removed-then.md)\n',encoding='utf-8')
+    manifest=tmp_path/'docs/archive/manifest.json';data=json.loads(manifest.read_text())
+    data['files'][0].update(role='historical_status_snapshot',sha256=hashlib.sha256(old.read_bytes()).hexdigest())
+    manifest.write_text(json.dumps(data),encoding='utf-8')
+    result=check(tmp_path)
+    assert result['passed'] and result['snapshot_links_preserved']==1
+    (tmp_path/'docs/README.md').write_text('[bad](missing.md)',encoding='utf-8')
+    assert not check(tmp_path)['passed']
+
+
+def test_snapshot_marker_cannot_disable_current_document_link_checks(tmp_path):
+    fixture(tmp_path)
+    active=tmp_path/'README.md';active.write_text('[broken](missing.md)',encoding='utf-8')
+    manifest=tmp_path/'docs/archive/manifest.json';data=json.loads(manifest.read_text())
+    data['files'].append({'original':'README.md','archived':'README.md','role':'historical_status_snapshot',
+                         'sha256':hashlib.sha256(active.read_bytes()).hexdigest()})
+    manifest.write_text(json.dumps(data),encoding='utf-8')
+    with pytest.raises(ValueError,match='docs/archive'):check(tmp_path)

@@ -49,6 +49,115 @@
       "archived": "docs/archive/2026-10-20/RAG质量闭环与本轮计划.md",
       "sha256": "002703490c4f079f81c0361c3c9bb6408ec8992e94ea04efd297c8267646da9c",
       "role": "historical_frozen_plan_or_erratum_not_current_status"
+    },
+    {
+      "original": "README.md",
+      "archived": "docs/archive/2026-10-26-consolidation/README.md",
+      "sha256": "871070779a8430d68acef8b3ac9483beaf3700de2158a9e7b59807973cc936a2",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/README.md",
+      "archived": "docs/archive/2026-10-26-consolidation/docs/README.md",
+      "sha256": "bca13aa75b86933cafc2f6ade754d9e1f306d56457a9b8127efbff0e83d35997",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/S2-S5完整链路实施说明.md",
+      "archived": "docs/archive/2026-10-26-consolidation/docs/S2-S5完整链路实施说明.md",
+      "sha256": "b0f7750cdda6348cc74b7500dba667c2d59c17218069a404cba7bc7d2eba42f2",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/下一阶段任务书-S2-S5闭环补齐与试点验收.md",
+      "archived": "docs/archive/2026-10-26-consolidation/docs/下一阶段任务书-S2-S5闭环补齐与试点验收.md",
+      "sha256": "b64bc254d0bacb31684cfbb672f29e5230e3ae77a9a3e3ed66c926738a2cc828",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/技术文档RAG与Markdown结构修复记录.md",
+      "archived": "docs/archive/2026-10-26-consolidation/docs/技术文档RAG与Markdown结构修复记录.md",
+      "sha256": "8139c51d1aa39e1542954d278dbe36783869533dff0b8d6f47a1c382b09556a9",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/整体能力提升方案.md",
+      "archived": "docs/archive/2026-10-26-consolidation/docs/整体能力提升方案.md",
+      "sha256": "e35bf88add764c3fe5cda8b43ca9960c79c74d9254856b4fdf9523dc2b7b5536",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/新对话续作指引.md",
+      "archived": "docs/archive/2026-10-26-consolidation/docs/新对话续作指引.md",
+      "sha256": "e66b669b7a55cb711e048d69a73bdf5e1d1f33ff8550aac0b76b6b528d73a4e5",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/稳定试用版接力说明.md",
+      "archived": "docs/archive/2026-10-26-consolidation/docs/稳定试用版接力说明.md",
+      "sha256": "513d9f63bf1fdf9f0480a31b1ccebcc7855086b92b4947fbbfb0f2350c95268b",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/阶段01-文档解析与OCR.md",
+      "archived": "docs/archive/2026-10-26-consolidation/docs/阶段01-文档解析与OCR.md",
+      "sha256": "8ba94d5bb53fbbdd600b5c6d27437632049b7ce2d245e9674d806c2914418cb6",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/阶段02-检索与问答.md",
+      "archived": "docs/archive/2026-10-26-consolidation/docs/阶段02-检索与问答.md",
+      "sha256": "8b68d4ef029b83049da2fadeb5663a9c10441af1075e764af036a54713690a32",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/阶段03-稳定版工程与恢复.md",
+      "archived": "docs/archive/2026-10-26-consolidation/docs/阶段03-稳定版工程与恢复.md",
+      "sha256": "336a0f0205710031912c9c26d558577695c461e95beb87ab5d9145541882298f",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/阶段04-真实语义验收与提取改进.md",
+      "archived": "docs/archive/2026-10-26-consolidation/docs/阶段04-真实语义验收与提取改进.md",
+      "sha256": "3af281e58e43a1443b6e98d41d667e3fd8bc4db557b987a4eca49ac09ab07e6c",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/阶段05-代码审查与加固.md",
+      "archived": "docs/archive/2026-10-26-consolidation/docs/阶段05-代码审查与加固.md",
+      "sha256": "2e629669b3aaa6e1238054f5289d180e1be4e52a943785196f889eedcd45cec5",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/product/ragent代码对比与提升方案.md",
+      "archived": "docs/archive/2026-10-26-consolidation/docs/product/ragent代码对比与提升方案.md",
+      "sha256": "a860dbb0ea1e0badb2a81bf741b25691164a3e9dc51308dc6a12d28b180ea110",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/product/RAG语言组织与逻辑增强方案.md",
+      "archived": "docs/archive/2026-10-26-consolidation/docs/product/RAG语言组织与逻辑增强方案.md",
+      "sha256": "50dbd86ddde4286f03f2206a4f5757dd3369cab27f547f28b6124b189e72dcb3",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/product/RAG链路升级方案.md",
+      "archived": "docs/archive/2026-10-26-consolidation/docs/product/RAG链路升级方案.md",
+      "sha256": "6b9582f2115b6681d06decfdfd02645541cb30d0dda040340b16cc91e6b7eab7",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/product/下一阶段优化计划书.md",
+      "archived": "docs/archive/2026-10-26-consolidation/docs/product/下一阶段优化计划书.md",
+      "sha256": "77b50d4db9185d8fad46c15429f578e81ef3a19acaeb83555d4610b7edd8ad67",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/product/产品化升级计划书.md",
+      "archived": "docs/archive/2026-10-26-consolidation/docs/product/产品化升级计划书.md",
+      "sha256": "042ed2b36cb8fdf640fb9a076c07ef28dc452921423734e2f18c747a8bab0177",
+      "role": "historical_status_snapshot"
     }
-  ]
+  ],
+  "status_snapshots_added_at": "2026-10-26T15:03:20.152592+00:00"
 }

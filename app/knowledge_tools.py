@@ -12,6 +12,15 @@ from app.knowledge_tasks import dump,TaskStopped
 from app.repository import now_iso
 
 
+def _enum_equal(left,right):
+    # JSON布尔值与数值不同；Python的True == 1不能用于工具约束。
+    if type(left) in (int,float) and type(right) in (int,float):return left==right
+    if type(left) is not type(right):return False
+    if isinstance(left,list):return len(left)==len(right) and all(_enum_equal(a,b) for a,b in zip(left,right))
+    if isinstance(left,dict):return left.keys()==right.keys() and all(_enum_equal(left[k],right[k]) for k in left)
+    return left==right
+
+
 def validate_schema(schema,depth=0):
     if depth>4 or not isinstance(schema,dict) or schema.get('type') not in ('object','array','string','integer','number','boolean'):
         raise HTTPException(422,'参数Schema仅支持四层以内的基础JSON类型')
@@ -22,8 +31,10 @@ def validate_schema(schema,depth=0):
         if any(type(schema[k]) is not int or schema[k]<0 for k in (low,high) if k in schema) or schema.get(low,0)>schema.get(high,100000):raise HTTPException(422,'Schema长度范围无效')
     for k in ['minimum','maximum']:
         import math
-        if k in schema and (type(schema[k]) not in (int,float) or not math.isfinite(schema[k])):raise HTTPException(422,'Schema数值范围无效')
+        if k in schema and (type(schema[k]) not in (int,float) or type(schema[k]) is float and not math.isfinite(schema[k])):raise HTTPException(422,'Schema数值范围无效')
     if schema.get('minimum',float('-inf'))>schema.get('maximum',float('inf')):raise HTTPException(422,'Schema数值范围无效')
+    if schema['type']=='string' and schema.get('minLength',0)>2000 or schema['type']=='array' and schema.get('minItems',0)>100:
+        raise HTTPException(422,'Schema最小长度超过工具参数硬上限')
     if schema['type']=='object':
         props=schema.get('properties',{})
         if not isinstance(props,dict) or len(props)>30 or any(not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,63}',k) for k in props):raise HTTPException(422,'参数字段无效')
@@ -32,6 +43,11 @@ def validate_schema(schema,depth=0):
         if schema.get('additionalProperties',False) is not False:raise HTTPException(422,'首版不允许额外参数字段')
         for child in props.values():validate_schema(child,depth+1)
     if schema['type']=='array':validate_schema(schema.get('items',{}),depth+1)
+    if 'enum' in schema:
+        constraint={k:v for k,v in schema.items() if k not in ('enum','default')}
+        try:
+            for option in schema['enum']:validate_arguments(option,constraint)
+        except ValueError:raise HTTPException(422,'Schema枚举值不满足参数类型或约束') from None
     if 'default' in schema:
         try:validate_arguments(schema['default'],schema)
         except ValueError:raise HTTPException(422,'Schema默认值不满足参数约束') from None
@@ -42,7 +58,7 @@ def validate_arguments(value,schema):
     valid={'object':isinstance(value,dict),'array':isinstance(value,list),'string':isinstance(value,str),
            'integer':type(value) is int,'number':type(value) in (int,float),'boolean':type(value) is bool}[kind]
     if not valid:raise ValueError('parameter_type_mismatch')
-    if 'enum' in schema and value not in schema['enum']:raise ValueError('parameter_enum_mismatch')
+    if 'enum' in schema and not any(_enum_equal(value,v) for v in schema['enum']):raise ValueError('parameter_enum_mismatch')
     if kind=='object':
         props=schema.get('properties',{})
         if not set(value)<=set(props) or not set(schema.get('required',[]))<=set(value):raise ValueError('parameter_fields_mismatch')
@@ -53,7 +69,7 @@ def validate_arguments(value,schema):
     if kind=='string' and not schema.get('minLength',0)<=len(value)<=min(2000,schema.get('maxLength',2000)):raise ValueError('parameter_string_limit')
     if kind in ('integer','number'):
         import math
-        if not math.isfinite(value) or value<schema.get('minimum',float('-inf')) or value>schema.get('maximum',float('inf')):raise ValueError('parameter_number_range')
+        if type(value) is float and not math.isfinite(value) or value<schema.get('minimum',float('-inf')) or value>schema.get('maximum',float('inf')):raise ValueError('parameter_number_range')
     return value
 
 
@@ -72,7 +88,10 @@ class ToolRegistry:
         return rows
 
     def save(self,value):
-        url=urlsplit(value['endpoint'])
+        try:
+            url=urlsplit(value['endpoint']);port=url.port
+            if port is not None and not 1<=port<=65535:raise ValueError('invalid_port')
+        except ValueError:raise HTTPException(422,'MCP地址或端口无效') from None
         if url.scheme not in ('http','https') or not url.hostname or url.username or url.password or url.query or url.fragment:raise HTTPException(422,'MCP地址须为不含凭证和查询参数的HTTP(S)地址')
         try:
             address=ipaddress.ip_address(url.hostname)
