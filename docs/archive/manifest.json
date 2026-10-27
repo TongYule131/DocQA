@@ -157,6 +157,156 @@
       "archived": "docs/archive/2026-10-26-consolidation/docs/product/产品化升级计划书.md",
       "sha256": "042ed2b36cb8fdf640fb9a076c07ef28dc452921423734e2f18c747a8bab0177",
       "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/README.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/docs/README.md",
+      "sha256": "fc9d5a5ed14f76a84fcccaa292a11af1edb58c79d6a564b3b374bf6c01016fce",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/S2-S5完整链路实施说明.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/docs/S2-S5完整链路实施说明.md",
+      "sha256": "101662a3504df0e9d9276e2f2880ca0911a5ea72a6bf45d75694037564047a56",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/下一阶段任务书-S2-S5闭环补齐与试点验收.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/docs/下一阶段任务书-S2-S5闭环补齐与试点验收.md",
+      "sha256": "d45e0dc3d7e1872e5d8876750591a8d587dbf89a2815961aa4630b06e99ea442",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/技术文档RAG与Markdown结构修复记录.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/docs/技术文档RAG与Markdown结构修复记录.md",
+      "sha256": "6ef79ad916af84b404e377d624932e17cfbfdab12a2b7caa8d267fa3e32ee278",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/整体能力提升方案.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/docs/整体能力提升方案.md",
+      "sha256": "42bd9273819c8f538009f5842171adfe8340883fbe1464a9eabcdf4dea4442c4",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/新对话续作指引.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/docs/新对话续作指引.md",
+      "sha256": "844aa26f720790d8c6cb7e4146558aee25b1b417010a1602d3013cfe3db948e5",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/稳定试用版分阶段工程任务书.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/docs/稳定试用版分阶段工程任务书.md",
+      "sha256": "f1412c59fde57948fb16a46e8b9b4c8e427dd3594a2f2ac58534e1d4c72b0f3f",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/稳定试用版接力说明.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/docs/稳定试用版接力说明.md",
+      "sha256": "0887759875edbb9026f2cb2470a9f42bd137cd6793e118131af15f489573f04b",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/阶段01-文档解析与OCR.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/docs/阶段01-文档解析与OCR.md",
+      "sha256": "58bd55ebeb5d53303c30fc77c7efac998fe457a5a7d3067f70a0290d5e0fbe08",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/阶段02-检索与问答.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/docs/阶段02-检索与问答.md",
+      "sha256": "d14bfa6f256b855ad9692868ed6b1a8350baa47871e4de38fe172298d2044fdc",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/阶段03-稳定版工程与恢复.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/docs/阶段03-稳定版工程与恢复.md",
+      "sha256": "88b6ad9e4bf268f4832b85226adae05cc7cc87c3e9ec295452e8982f9829b188",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/阶段04-真实语义验收与提取改进.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/docs/阶段04-真实语义验收与提取改进.md",
+      "sha256": "f2dee9acc8048a5529e085a16b25bb4639ede092ebe087d3755e32849d62ef1a",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/阶段05-代码审查与加固.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/docs/阶段05-代码审查与加固.md",
+      "sha256": "23789f61c452624683d5674a77cdef6d1e2957dd67035f680c4408fb86e9833e",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/product/blue-white-workbench.html",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/docs/product/blue-white-workbench.html",
+      "sha256": "77ccfaf5dfaba63842acaa7ab378de05047a4d3dcd582216c5dfd58e6252a31d",
+      "role": "historical_asset_snapshot"
+    },
+    {
+      "original": "docs/product/ragent代码对比与提升方案.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/docs/product/ragent代码对比与提升方案.md",
+      "sha256": "35e69a13cb427bbc71d600a1be247d36ee2291de2a59f9b48d398ccf70bc8cea",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/product/RAG语言组织与逻辑增强方案.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/docs/product/RAG语言组织与逻辑增强方案.md",
+      "sha256": "5d15548d6b900966af151ef5d6ccc32db5e1f59af9eaa30745ace78025256d64",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/product/RAG链路升级方案.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/docs/product/RAG链路升级方案.md",
+      "sha256": "361d60964a1214624ef390c584eae63c336a396329d8b173872efdda43a8b0d1",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/product/下一阶段优化计划书.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/docs/product/下一阶段优化计划书.md",
+      "sha256": "6cde8340dd3e8b895714285c10c03d25107174ad1133baec90829ba5351614a6",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/product/产品化升级计划书.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/docs/product/产品化升级计划书.md",
+      "sha256": "016559a2eea1c39297e8b1f83bb2981ce5331f34f359d8834d27d61aa37305b1",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "README.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/README.md",
+      "sha256": "b1f51d2b495188faf86e6c4401e5ec000c45ee29be5d9f43625540898d2e889a",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "AGENTS.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/AGENTS.md",
+      "sha256": "216d8b94819fcc0de814aca9b82ecd2a4caa7d973ef2106b967cc8368e3152cf",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "skills/docqa-stable-release/SKILL.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/skills/docqa-stable-release/SKILL.md",
+      "sha256": "563d0add6239e8a1fb12d6e9c80bc8f37f224a112791a88d2585f62baf030b9f",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "docs/archive/2026-10-20/整体能力提升方案.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/docs/archive/2026-10-20/整体能力提升方案.md",
+      "sha256": "1da66d3dd69cfc906976226b5148609f441c27496ad5f3d79381e53835953891",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "智能文档分析与知识问答系统.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/智能文档分析与知识问答系统.md",
+      "sha256": "7ab42626113c060b98f4ea13fcf3e19abc89f7b60e2cd6dfe1d3e855a3032c9a",
+      "role": "historical_status_snapshot"
+    },
+    {
+      "original": "考核节点1.md",
+      "archived": "docs/archive/2026-10-26-consolidation/followup-2026-10-27/考核节点1.md",
+      "sha256": "c494f41296b793d636a206a91f0f57e2333d81768857ae2a5932b9fdc2983893",
+      "role": "historical_status_snapshot"
     }
   ],
   "status_snapshots_added_at": "2026-10-26T15:03:20.152592+00:00"
