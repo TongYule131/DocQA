@@ -11,9 +11,9 @@ if (sidebar) {
   toggle.type = 'button'; toggle.className = 'chat-collapse'; toggle.append(icon('panel'));
   sidebar.id ||= 'workbench-sidebar'; toggle.setAttribute('aria-controls', sidebar.id);
   brand.after(toggle);
-  const key = 'docqa.ui.chatCollapsed';
-  let collapsed = false;
-  try { collapsed = localStorage.getItem(key) === 'true'; } catch { /* 私密模式仍可切换。 */ }
+  const key = window.innerWidth<=800?'docqa.ui.chatCollapsedMobile':'docqa.ui.chatCollapsed';
+  let collapsed = window.innerWidth<=800;
+  try { const saved=localStorage.getItem(key);if(saved!==null)collapsed=saved==='true'; } catch { /* 私密模式仍可切换。 */ }
   function paint() {
     document.body.classList.toggle('chat-nav-collapsed', collapsed);
     toggle.setAttribute('aria-expanded', String(!collapsed));
@@ -31,6 +31,9 @@ if (sidebar) {
   const history = document.createElement('button'); history.className = 'rail-history'; history.type = 'button';
   history.title = '查看会话'; history.setAttribute('aria-label', '展开侧栏查看会话'); history.append(icon('chat'));
   history.onclick = () => { collapsed = false; paint(); try { localStorage.setItem(key, 'false'); } catch {} sidebar.querySelector('#history-search,#kb-picker')?.focus(); };
+  sidebar.querySelector('#kb-history')?.addEventListener('click',event=>{
+    if(window.innerWidth<=800&&event.target.closest('button')){collapsed=true;paint();try{localStorage.setItem(key,'true');}catch{}}
+  });
   if (newChat) newChat.after(history);
 }
 for (const button of document.querySelectorAll('.send-button,#kb-send')) {

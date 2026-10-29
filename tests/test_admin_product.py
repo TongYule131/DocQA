@@ -123,10 +123,15 @@ def test_password_reset_revokes_all_old_sessions_and_hides_password_errors(team)
     path = f'/api/admin/users/{users["alice"]["id"]}/password'
     new_password = 'Changed-synthetic-password-only'
     assert alice.post(path, json={'password': new_password}).status_code == 403
-    response = admin.post(path, json={'password': new_password})
+    assert admin.post(path,json={'password':new_password}).status_code==422
+    response = admin.post(path, json={})
     assert response.status_code == 200 and new_password not in response.text
     assert alice.get('/api/documents').status_code == 401
     assert alice.post('/api/auth/login', json={'username': 'alice', 'password': PASSWORD}).status_code == 401
+    login=alice.post('/api/auth/login',json={'username':'alice','password':'123456'})
+    assert login.status_code==200 and login.json()['user']['must_change_password']
+    alice.headers['X-CSRF-Token']=login.json()['csrf_token']
+    assert alice.post('/api/auth/password',json={'old_password':'123456','new_password':new_password,'confirm_password':new_password}).status_code==200
     assert alice.post('/api/auth/login', json={'username': 'alice', 'password': new_password}).status_code == 200
     response = admin.post(path, json={'password': new_password, 'unexpected': new_password})
     assert response.status_code == 422 and new_password not in response.text

@@ -76,8 +76,9 @@ function openUser(user = null) {
   resettingUser = user; $('user-form').reset(); $('user-error').textContent = '';
   $('user-create-fields').hidden = Boolean(user);
   for (const id of ['new-username', 'new-display', 'new-role']) $(id).disabled = Boolean(user);
+  $('user-password-fields').hidden=Boolean(user);$('new-password').disabled=Boolean(user);$('user-reset-hint').hidden=!user;
   $('user-dialog-title').textContent = user ? `重设密码 · ${user.username}` : '创建账号';
-  $('save-user').textContent = user ? '重设密码' : '创建账号'; $('user-dialog').showModal();
+  $('save-user').textContent = user ? '确认重置为初始密码' : '创建账号'; $('user-dialog').showModal();
 }
 function renderUsers() {
   statCards('user-stats', [['团队成员', users.length, '♙'], ['管理员', users.filter(u => u.role === 'admin').length, '◇'], ['客户账号', users.filter(u => u.role === 'customer').length, '♧'], ['有效账号', users.filter(u => u.active).length, '✓']]);
@@ -87,7 +88,7 @@ function renderUsers() {
   for (const user of filtered) {
     const row = node('tr'), name = cell(row, ''); name.append(node('span', user.display_name.slice(0, 1), 'user-avatar'), node('span', user.display_name));
     cell(row, user.username); cell(row, '').append(pill(user.role === 'admin' ? '管理员' : '客户', user.role === 'admin' ? 'admin' : ''));
-    cell(row, '').append(pill(user.active ? '正常' : '已停用', user.active ? 'active' : '')); cell(row, date(user.created_at));
+    const state=cell(row, '');state.append(pill(user.active ? '正常' : '已停用', user.active ? 'active' : ''));if(user.must_change_password)state.append(pill('须修改初始密码','')); cell(row, date(user.created_at));
     const controls = node('div', '', 'row');
     const toggle = button(user.active ? '停用' : '启用', async () => {
       if (user.active && !confirm(`停用“${user.username}”？该账号的登录会立即撤销。`)) return;
@@ -99,7 +100,13 @@ function renderUsers() {
     controls.append(button('重设密码', async () => openUser(user)), toggle); cell(row, '').append(controls); $('user-rows').append(row);
   }
 }
-async function loadUsers() { users = await api('/api/admin/users'); renderUsers(); }
+async function loadUsers() {
+  users = await api('/api/admin/users'); renderUsers();
+  const events=await api('/api/admin/account-events');$('account-event-rows').replaceChildren();
+  const labels={display_name_changed:'修改显示名称',password_changed:'用户修改密码',password_reset:'管理员重置初始密码'};
+  for(const event of events){const row=node('tr');cell(row,event.target_username);cell(row,labels[event.action]||'账号操作');cell(row,event.actor_username);cell(row,date(event.created_at));$('account-event-rows').append(row);}
+  $('account-events-empty').hidden=events.length>0;
+}
 function config(target, entries) {
   $(target).replaceChildren(...entries.map(([name, value]) => { const row = node('div'); row.append(node('dt', name), node('dd', String(value))); return row; }));
 }
@@ -139,12 +146,12 @@ $('new-user').onclick = () => openUser(); $('user-search').oninput = renderUsers
 $('user-form').onsubmit = event => { event.preventDefault(); run(async () => {
   $('user-error').textContent = ''; const user = resettingUser;
   const path = user ? `/api/admin/users/${encoded(user.id)}/password` : '/api/admin/users';
-  const data = user ? { password: $('new-password').value } : { username: $('new-username').value.trim(), display_name: $('new-display').value.trim(), role: $('new-role').value, password: $('new-password').value };
+  const data = user ? {} : { username: $('new-username').value.trim(), display_name: $('new-display').value.trim(), role: $('new-role').value, password: $('new-password').value };
   try { await api(path, json('POST', data)); }
   finally { $('new-password').value = ''; }
   $('user-dialog').close();
   if (user?.id === window.docqaSession.user?.id) { location.assign('/login'); return; }
-  await loadUsers(); tell(user ? '密码已重设，原登录已全部撤销。' : '账号已创建。请到知识库“发布与访问授权”为客户分配资料。');
+  await loadUsers(); tell(user ? '密码已重置为初始密码，原登录已全部撤销；用户下次登录须先修改密码。' : '账号已创建。请到知识库“发布与访问授权”为客户分配资料。');
 }, $('save-user'), 'user-error'); };
 $('refresh-bases').onclick = () => run(loadBases, $('refresh-bases'));
 $('refresh-users').onclick = () => run(loadUsers, $('refresh-users'));

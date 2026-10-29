@@ -63,7 +63,8 @@ def checks(root: Path, output: Path, python: str) -> list[Check]:
     node = shutil.which('node') or 'node'
     result = [Check('dependencies', [python, '-m', 'pip', 'check']),
               Check('pytest', [python, '-m', 'pytest', '-q', '-ra',
-                               '--junitxml=' + str(output / 'pytest.xml')], timeout=1200)]
+                               # 完整套件在托管Windows上可能超过20分钟；超时仍失败且不自动重试。
+                               '--junitxml=' + str(output / 'pytest.xml')], timeout=2400)]
     # 新增网页回归自动被发现；不得只维护一份容易落后的文件名清单。
     web = sorted((root / 'tests/web').glob('*.mjs'))
     if not web:

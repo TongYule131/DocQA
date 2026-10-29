@@ -58,9 +58,14 @@ def test_setup_creation_reset_and_login_share_password_boundaries(tmp_path, leng
             credentials = {'username': 'customer', 'password': password}
             assert customer_client.post('/api/auth/login', json=credentials).status_code == 200
             new_password = 'b' * length
-            assert client.post(path, json={'password': new_password}).status_code == 200
+            assert client.post(path, json={'password': new_password}).status_code == 422
+            assert client.post(path, json={}).status_code == 200
             assert customer_client.get('/api/documents').status_code == 401
             assert customer_client.post('/api/auth/login', json=credentials).status_code == 401
+            login=customer_client.post('/api/auth/login',json={**credentials,'password':'123456'})
+            assert login.status_code==200 and login.json()['user']['must_change_password']
+            customer_client.headers['X-CSRF-Token']=login.json()['csrf_token']
+            assert customer_client.post('/api/auth/password',json={'old_password':'123456','new_password':new_password,'confirm_password':new_password}).status_code==200
             assert customer_client.post('/api/auth/login', json={**credentials, 'password': new_password}).status_code == 200
 
 

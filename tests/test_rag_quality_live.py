@@ -134,6 +134,37 @@ def test_success_reuse_revalidates_same_input_and_raw_without_new_calls(tmp_path
     assert counts == (len(env.embedding.calls), len(env.model.calls))
 
 
+@pytest.mark.parametrize('tamper',[False,True])
+def test_v9_saved_reuse_keeps_filtered_original_part_ids_without_any_new_provider_call(tmp_path,tamper):
+    from app.rag_context import build_evidence
+    from app.quote_spans import task_segment_payload
+    from app.question_worker import QuestionWorker
+    from tests.test_question_jobs import question_fixture,submit,LocalRuntime,REPLY
+    env=question_fixture(tmp_path);question='您好；全书分为多少个部分？请保留引用。'
+    body=json.loads(REPLY)
+    for fact in body['conclusion']+body['explanation']:fact['part_ids']=['p2']
+    body['answer_parts']=[{'part_id':'p2','state':'answered','missing_detail':''}]
+    raw=json.dumps(body,ensure_ascii=False);env.model.handler=lambda *_:raw
+    job,_=submit(env,question=question)
+    QuestionWorker(env.settings,env.repository,rag=env.rag,runtime=LocalRuntime()).run_job(job['id'])
+    job=env.service.get_job(job['id']);assert job['status']=='succeeded',job
+    result=env.service.get_result(job['result_id']);snapshot=json.loads(env.service.store.row(job['id'])['snapshot_json'])
+    pack=build_evidence(env.service.store.checkpoint(job['id'],'retrieval'),env.settings,expected_document_id='qdoc',
+        payload_transform=task_segment_payload,extractive_question=question,max_items=env.settings.question_context_k,
+        context_max_chars=env.settings.question_context_max_chars,include_qualifier_cues=True,preserve_document_order=True).pack
+    case={'case_id':'v9-p2-reuse','question':question};record={'case_sha256':digest(case),'job':job,'result':result,
+        'selected_chunk_ids':[i.chunk_id for i in pack.items]}
+    request={'system':env.model.calls[0][0],'user':json.loads(env.model.calls[0][1])}
+    assert snapshot['answer_contract_version']=='fact-context-parts-v9'
+    assert [p['part_id'] for p in request['user']['question_parts']]==['p2']
+    if tamper:request['user']['question_parts'][0]['part_id']='p1'
+    counts=len(env.embedding.calls),len(env.model.calls)
+    if tamper:
+        with pytest.raises(EvaluationStopped):live.revalidate_saved_answer(record,request,raw,pack,case=case,snapshot=snapshot,prior_snapshot=copy.deepcopy(snapshot))
+    else:live.revalidate_saved_answer(record,request,raw,pack,case=case,snapshot=snapshot,prior_snapshot=copy.deepcopy(snapshot))
+    assert counts==(len(env.embedding.calls),len(env.model.calls))
+
+
 @pytest.mark.parametrize("change_scope",[False,True])
 def test_v6_targeted_repair_cannot_reset_36_calls_or_expand_four_questions(tmp_path,change_scope,monkeypatch):
     # 历史v6修订范围仍锁在v6，不让当前v7源码取得旧阶段的续费入口。

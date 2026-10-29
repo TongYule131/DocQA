@@ -1,7 +1,16 @@
 """只读取Markdown结构和字符位置；不执行HTML、脚本、外链或代码围栏。"""
 import re
 
-MARKDOWN_STRUCTURE_VERSION='markdown-structure-v2'
+MARKDOWN_STRUCTURE_VERSION='markdown-structure-v3'
+MARKDOWN_PARSER_VERSION='local-markdown-4'
+
+
+def markdown_heading(line):
+    """只去除空白分隔的闭合井号，保留C#、F#及标识尾部字面量。"""
+    match=re.fullmatch(r' {0,3}(#{1,6})[ \t]+(\S[^\r\n]*)',line.rstrip('\r\n'))
+    if not match:return None
+    title=re.sub(r'[ \t]+#+$','',match[2].rstrip(' \t'))
+    return len(match[1]),title
 
 
 def markdown_row(line):
@@ -42,7 +51,7 @@ def markdown_spans(text):
             while end<len(lines) and not closing.fullmatch(lines[end]):end+=1
             if end<len(lines):end+=1
             spans.append((offsets[index],offsets[end],'code'));index=start=end;continue
-        if re.match(r'^ {0,3}#{1,6}\s+\S',line):
+        if markdown_heading(line) is not None:
             flush(index);spans.append((offsets[index],offsets[index+1],'section_header'));index+=1;start=index;continue
         header=markdown_row(line)
         divider=markdown_row(lines[index+1]) if index+1<len(lines) else None

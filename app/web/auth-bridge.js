@@ -24,6 +24,7 @@ window.docqaAuthReady = (async () => {
   });
   document.querySelectorAll('[data-admin-only]').forEach(item => { item.hidden = session.team_mode && session.user?.role !== 'admin'; });
   if (session.team_mode && !session.user && !['/login', '/setup'].includes(location.pathname)) location.replace('/login');
+  if(session.user?.must_change_password&&location.pathname!=='/account/password')location.replace('/account/password');
   document.querySelectorAll('[data-logout]').forEach(button => {
     button.hidden = !session.team_mode;
     button.onclick = async () => {
@@ -42,6 +43,9 @@ window.docqaFetch = async (path, options = {}) => {
   if (!['GET', 'HEAD', 'OPTIONS'].includes((options.method || 'GET').toUpperCase()) && session.csrf_token) headers.set('X-CSRF-Token', session.csrf_token);
   const response = await fetch(path, { ...options, headers, cache: 'no-store' });
   if (response.status === 401 && location.pathname !== '/login') location.assign('/login');
+  if(response.status===403&&location.pathname!=='/account/password') {
+    try{const body=await response.clone().json();if(body?.code==='password_change_required')location.assign('/account/password');}catch{ /* 普通403不触发改密跳转。 */ }
+  }
   return response;
 };
 window.docqaAuthReady.catch(() => {

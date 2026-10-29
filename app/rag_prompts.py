@@ -137,7 +137,7 @@ def build_system_prompt() -> str:
     return SYSTEM_PROMPT
 
 
-TASK_PROMPT_VERSION = "rag-task-v62"
+TASK_PROMPT_VERSION = "rag-task-v63"
 
 TABLE_STRUCTURE_INSTRUCTIONS = """
 
@@ -223,10 +223,12 @@ def build_task_system_prompt(*, include_table_structure: bool = True, question: 
 
 
 def build_task_user_prompt(*, question: str, document_name: str | None, evidence_payload: list[dict[str, Any]]) -> str:
-    from app.rag_answer_contract import question_parts
+    from app.question_obligations import answer_question_parts,question_obligations
     payload = json.loads(build_user_prompt(question=question, document_name=document_name,
                              evidence_payload=task_evidence_payload(evidence_payload)))
-    payload["question_parts"] = question_parts(question)
+    payload["question_parts"] = answer_question_parts(question)
+    payload['question_obligations']=question_obligations(question)
+    payload['obligation_rule']='question_parts仅列需要证据的子问；question_obligations保留完整原片段及礼貌／展示义务。格式要求照办，不为其伪造事实或声明缺证据；原始part_id保持不重排。事实条件和否定不能当格式要求省略。'
     payload["answer_requirements"] = answer_requirements(question)
     from app.query_planning import plan_query, describe_plan
     payload['query_plan'] = describe_plan(plan_query(question))
@@ -235,7 +237,7 @@ def build_task_user_prompt(*, question: str, document_name: str | None, evidence
 
 def answer_requirements(question: str) -> list[dict]:
     """只拆解问题，不读取原文或黄金标签；不能据此声称答案已覆盖。"""
-    from app.rag_answer_contract import question_parts
+    from app.question_obligations import answer_question_parts as question_parts
     result = []
     for part in question_parts(question):
         text, checks = part['text'], []

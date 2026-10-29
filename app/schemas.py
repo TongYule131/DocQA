@@ -466,6 +466,7 @@ class RagAnswer(BaseModel):
     conclusion: list[RagFact] = Field(default_factory=list)
     explanation: list[RagFact] = Field(default_factory=list)
     presentation: dict | None = None
+    quality_review: dict | None = None
     document_id: str
     index_id: str | None = None
     parse_version_id: str | None = None

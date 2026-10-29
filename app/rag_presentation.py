@@ -1,10 +1,26 @@
 """正文编排只组合已校验事实，不产生新的事实、标题或因果连接。"""
 from __future__ import annotations
+import json
 import re
 from app.rag_validation import ModelOutputError
 
-PRESENTATION_VERSION = 'grounded-paragraphs-v3'
+PRESENTATION_VERSION = 'grounded-paragraphs-v4'
 ROLES = {'conclusion','mechanism','comparison','definition','procedure','boundary','conflict','evidence'}
+
+
+def validate_fact_progress(facts):
+    """新生成的整篇答案拒绝完全重复；不改写事实或删除不同主体／条件。"""
+    seen=set()
+    for fact in facts:
+        if not isinstance(fact,dict) or not isinstance(fact.get('text'),str):
+            continue  # 字段形状仍由原协议校验器负责。
+        content={k:v for k,v in fact.items() if k!='part_ids'}
+        for key in ('evidence','context'):
+            if isinstance(content.get(key),list):
+                content[key]=sorted(content[key],key=lambda v:json.dumps(v,sort_keys=True,ensure_ascii=False))
+        identity=json.dumps(content,sort_keys=True,ensure_ascii=False)
+        if identity in seen:raise ModelOutputError('answer_redundant_fact')
+        seen.add(identity)
 
 
 def context_covered(context,text):

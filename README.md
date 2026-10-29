@@ -43,6 +43,8 @@ powershell -NoProfile -File scripts\stop_local.ps1 -DataDir D:\python\DocQA\data
 
 普通工程上传只保存原件；统一知识库入库流程可自动解析和索引，索引可能产生向量请求。手工审查模式须明确生效，不能把上传当成已发布。新分块只作用于新解析版本，旧索引／引用不自动改写。
 
+N04未发布候选补齐个人设置和账号安全：用户及管理员可修改自己的显示名称，从`/account/password`核对原密码后设置不同的新密码（4～32位、两遍确认）；成功后重新登录。管理员重置只使用固定初始密码123456，并强制用户下次登录先改密，安全操作可在用户管理查看。候选schema17保留历史账号和业务归属；正式部署与实际验证状态见阶段05。
+
 ## 实现版本
 
 此表由文档检查器与源码字面量核对；发布提交和验收成绩见阶段05。
@@ -50,11 +52,11 @@ powershell -NoProfile -File scripts\stop_local.ps1 -DataDir D:\python\DocQA\data
 | 项目 | 版本 |
 | --- | --- |
 | 项目包 | `0.2.0` |
-| 数据库 schema | `16` |
-| 任务式问答 Prompt | `rag-task-v62` |
+| 数据库 schema | `17` |
+| 任务式问答 Prompt | `rag-task-v63` |
 | 检索策略 | `hybrid-context-v12` |
-| 事实引用协议 | `fact-context-parts-v8` |
-| 意图路由 | `intent-execution-v4` |
+| 事实引用协议 | `fact-context-parts-v9` |
+| 意图路由 | `intent-execution-v5` |
 | 流式协议 | `validated-fact-stream-v2` |
 | 知识库任务协议 | `knowledge-task-v2` |
 
@@ -63,6 +65,8 @@ powershell -NoProfile -File scripts\stop_local.ps1 -DataDir D:\python\DocQA\data
 所有参数及默认值见[.env.example](.env.example)，由`app/config.py`读取；前端不能覆盖模型、网关或thinking设置。默认分块800字符、重叠120；任务问答最多64候选／32装入，资料24000／总输入32000字符。字符预算不是token窗口或覆盖保证。
 
 每次供应商请求先记账；失败和不确定调用不自动重发。任务的请求上限与工程验收总账、用户／全局日配额是不同口径。纯交互、查看、刷新、本地分析预算预估、事件重放和导出不调用模型；主动连接测试、索引、业务问答及分析可能计费。复杂问答的选材规划与正文写作分别计请求；可选查询理解、精排、问题摘录有独立开关，当前状态见阶段05。
+
+实验性`DOCQA_ANSWER_SEMANTIC_REVIEW_ENABLED=1`在持久化文档／知识库问答中增加一次只读模型复核，单独预扣并保存检查点；默认关闭。启用时任务预算包含该请求，复核拒绝、不确定或无效均不发布正文，不自动改写或重发。检查针对事实、对象、条件、覆盖、推断强度和冗余；本次真实测试仍出现漏条件负例误接受，尚未达到通用语义验收出口，不能据此自动认证答案，详见阶段04／07。
 
 ## 验证与质量边界
 

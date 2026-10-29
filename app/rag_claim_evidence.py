@@ -15,7 +15,7 @@ def _fail(reason="claim_evidence_invalid"):
     raise ModelOutputError(reason)
 
 
-def validate_unit_output(raw,evidence,*,question,declare_parts=False,derive_refs=False):
+def validate_unit_output(raw,evidence,*,question,declare_parts=False,derive_refs=False,expected_parts=None):
     """v5直接选择生成前公布的原句单位；服务器只展开选项，不修复输出。"""
     from app.rag_extract_context import quote_units
     payload=parse_model_output(raw)
@@ -24,7 +24,7 @@ def validate_unit_output(raw,evidence,*,question,declare_parts=False,derive_refs
     selected={};declared=set();part_indices={};fact_index=0
     if declare_parts:
         from app.rag_answer_contract import question_parts
-        part_indices={part['part_id']:[] for part in question_parts(question)}
+        part_indices={part['part_id']:[] for part in (question_parts(question) if expected_parts is None else expected_parts)}
     for name in ('conclusion','explanation'):
         if not isinstance(payload[name],list):_fail()
         for fact in payload[name]:
@@ -69,10 +69,10 @@ def validate_unit_output(raw,evidence,*,question,declare_parts=False,derive_refs
                     or part.get('part_id') not in part_indices):_fail('coverage_mismatch')
             part['fact_indices']=part_indices[part['part_id']]
     return validate_claim_output(json.dumps(payload,ensure_ascii=False),evidence,question=question,
-        max_supports=48 if derive_refs else 24,range_limit=80 if derive_refs else 40)
+        max_supports=48 if derive_refs else 24,range_limit=80 if derive_refs else 40,expected_parts=expected_parts)
 
 
-def validate_claim_output(raw: str, evidence: EvidencePack, *, question: str,max_supports=8,range_limit=40):
+def validate_claim_output(raw: str, evidence: EvidencePack, *, question: str,max_supports=8,range_limit=40,expected_parts=None):
     """v4模型只选择服务器窗口/小段，不自行填写quote、偏移、证据ID或坐标。"""
     from app.rag_answer_contract import validate_task_output
 
@@ -183,7 +183,7 @@ def validate_claim_output(raw: str, evidence: EvidencePack, *, question: str,max
         joined.append([evidence.item_by_ref(ref).text[a:b] for ref,ranges in own.items() for a,b in merge_ranges(ranges)])
     output = validate_task_output(json.dumps(translated, ensure_ascii=False), scoped, question=question,
                                  contract_version="fact-context-parts-v3",_claim_sources=joined,
-                                 _section_headings=[item.heading_path for item in evidence.items])
+                                 _section_headings=[item.heading_path for item in evidence.items],_expected_parts=expected_parts)
     for fact, (entry, _) in zip(output.conclusion + output.explanation, facts):
         fact.claim_type = entry["claim_type"]
     output.citation_bindings = {assigned[key]: value for key, value in bindings.items()}

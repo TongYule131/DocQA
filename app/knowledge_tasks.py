@@ -24,6 +24,7 @@ def fingerprint(value):
 
 
 def configuration(settings, embedding):
+    from app.answer_semantic_review import policy as review_policy
     from app.rag_prompts import TASK_PROMPT_VERSION
     from app.conversation_memory import MEMORY_SIGNATURE
     from app.rag_pipeline import PIPELINE_VERSION
@@ -43,7 +44,7 @@ def configuration(settings, embedding):
     from app.rag_composition import COMPOSITION_VERSION
     from app.query_understanding import policy
     from app.intent_execution import EXECUTION_VERSION
-    return fingerprint([EXECUTION_VERSION,policy(settings),PIPELINE_VERSION,QUERY_PLAN_VERSION,RETRIEVAL_STRATEGY_VERSION,SLOT_PLAN_VERSION,SOURCE_DIAGNOSTIC_VERSION,
+    return fingerprint([EXECUTION_VERSION,policy(settings),review_policy(settings),PIPELINE_VERSION,QUERY_PLAN_VERSION,RETRIEVAL_STRATEGY_VERSION,SLOT_PLAN_VERSION,SOURCE_DIAGNOSTIC_VERSION,
         SELECTION_VERSION,NUMERIC_ROLE_VERSION,MATH_EVIDENCE_VERSION,SLOT_RANGE_VERSION,PAGE_LABEL_VERSION,PRESENTATION_VERSION,ANSWER_CONTRACT_VERSION,policy_signature(),COMPOSITION_VERSION,PHRASE_POLICY_VERSION,embedding.signature, settings.deepseek_base_url, settings.deepseek_model,
         settings.deepseek_thinking, TASK_PROMPT_VERSION, KNOWLEDGE_PROMPT_VERSION, KNOWLEDGE_RULE, settings.question_context_max_chars,
         settings.question_input_max_chars, settings.question_context_k,settings.question_candidate_k,
@@ -298,6 +299,12 @@ class KnowledgeTasks:
             row=db.execute('SELECT * FROM kb_tasks WHERE id=?',(job['id'],)).fetchone()
             if not row or row['lease_token']!=job['lease_token'] or row['status']!='running':return False
             if status=='succeeded' and not self.valid(db,job['id'],job['lease_token']):status,result,code,message='cancelled',None,'task_stopped','资料权限或会话状态已变化，结果未发布'
+            payload=json.loads(row['input_json'])
+            if status=='succeeded' and result and payload.get('semantic_review',{}).get('enabled') and result.get('status') in {'answered','partial'}:
+                from app.answer_semantic_review import verify_stored_publication
+                records={r['name']:json.loads(r['payload_json']) for r in db.execute(
+                    "SELECT name,payload_json FROM kb_task_checkpoints WHERE task_id=? AND name IN ('semantic_review_input','semantic_review')",(job['id'],))}
+                verify_stored_publication(result,records.get('semantic_review_input',{}),records.get('semantic_review'),payload['question'])
             if status=='succeeded' and result and result.get('clarification',{}).get('kind')=='tool_parameters':
                 payload=json.loads(row['input_json']);clar=result['clarification'];stamp=now_iso()
                 db.execute('INSERT INTO conversation_clarifications(id,task_id,conversation_id,owner_user_id,epoch,needed_count,choices_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',

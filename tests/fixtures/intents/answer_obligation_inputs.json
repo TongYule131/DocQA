@@ -1,0 +1,389 @@
+{
+  "version": "answer-obligations-stub-inputs-v1",
+  "cases": {
+    "N2-R01": {
+      "scenario": "normal",
+      "selected_documents": "*",
+      "facts": [
+        {
+          "text": "设备借用应在本次作业结束后归还；遇到作业延期，应先办理延期登记。",
+          "part_ids": [
+            "p1"
+          ],
+          "quote_texts": [
+            "设备借用应在本次作业结束后归还；遇到作业延期，应先办理延期登记。"
+          ],
+          "claim_type": "direct"
+        }
+      ],
+      "answer_parts": [
+        {
+          "part_id": "p1",
+          "state": "answered",
+          "missing_detail": ""
+        }
+      ],
+      "missing_part_ids": [],
+      "plan_blocks": [
+        {
+          "part_ids": [
+            "p1"
+          ],
+          "groups": [
+            [
+              "设备借用应在本次作业结束后归还；遇到作业延期，应先办理延期登记。"
+            ]
+          ]
+        }
+      ],
+      "block_facts": [
+        [
+          0
+        ]
+      ]
+    },
+    "N2-R02": {
+      "scenario": "normal",
+      "selected_documents": "*",
+      "facts": [
+        {
+          "text": "本次检修许可在设备重新投入运行时失效；更换检修对象应重新申请许可。",
+          "part_ids": [
+            "p2"
+          ],
+          "quote_texts": [
+            "本次检修许可在设备重新投入运行时失效；更换检修对象应重新申请许可。"
+          ],
+          "claim_type": "direct"
+        }
+      ],
+      "answer_parts": [
+        {
+          "part_id": "p2",
+          "state": "answered",
+          "missing_detail": ""
+        }
+      ],
+      "missing_part_ids": [],
+      "plan_blocks": [
+        {
+          "part_ids": [
+            "p2"
+          ],
+          "groups": [
+            [
+              "本次检修许可在设备重新投入运行时失效；更换检修对象应重新申请许可。"
+            ]
+          ]
+        }
+      ],
+      "block_facts": [
+        [
+          0
+        ]
+      ]
+    },
+    "N2-R03": {
+      "scenario": "normal",
+      "selected_documents": "*",
+      "facts": [
+        {
+          "text": "报修单须写明设备编号和故障现象，资料完整后方可受理。",
+          "part_ids": [
+            "p1"
+          ],
+          "quote_texts": [
+            "报修单须写明设备编号和故障现象，资料完整后方可受理。"
+          ],
+          "claim_type": "direct"
+        }
+      ],
+      "answer_parts": [
+        {
+          "part_id": "p1",
+          "state": "answered",
+          "missing_detail": ""
+        },
+        {
+          "part_id": "p2",
+          "state": "missing_evidence",
+          "missing_detail": "所选资料没有夜间受理例外的规定。"
+        }
+      ],
+      "missing_part_ids": [
+        "p2"
+      ],
+      "plan_blocks": [
+        {
+          "part_ids": [
+            "p1"
+          ],
+          "groups": [
+            [
+              "报修单须写明设备编号和故障现象，资料完整后方可受理。"
+            ]
+          ]
+        }
+      ],
+      "block_facts": [
+        [
+          0
+        ]
+      ]
+    },
+    "N2-R04": {
+      "scenario": "normal",
+      "selected_documents": "*",
+      "facts": [
+        {
+          "text": "临时领用服务于单次任务，任务结束后由领用人交还；岗位配发服务于持续岗位需要，由使用人保管并在离岗时交还。",
+          "part_ids": [
+            "p1"
+          ],
+          "quote_texts": [
+            "临时领用只用于单次任务，任务结束后由领用人交还。",
+            "岗位配发用于持续岗位需要，由使用人保管，离岗时办理交还。"
+          ],
+          "claim_type": "inference"
+        }
+      ],
+      "answer_parts": [
+        {
+          "part_id": "p1",
+          "state": "answered",
+          "missing_detail": ""
+        }
+      ],
+      "missing_part_ids": [],
+      "plan_blocks": [
+        {
+          "part_ids": [
+            "p1"
+          ],
+          "groups": [
+            [
+              "临时领用只用于单次任务，任务结束后由领用人交还。"
+            ],
+            [
+              "岗位配发用于持续岗位需要，由使用人保管，离岗时办理交还。"
+            ]
+          ]
+        }
+      ],
+      "block_facts": [
+        [
+          0
+        ]
+      ]
+    },
+    "N2-R05": {
+      "scenario": "normal",
+      "selected_documents": "*",
+      "facts": [
+        {
+          "text": "第一阶段核对原件身份和设备记录，第二阶段转向封装状态检查并记录可见破损。",
+          "part_ids": [
+            "p1"
+          ],
+          "quote_texts": [
+            "第一阶段核对原件身份，确认设备与记录对应。",
+            "第二阶段检查封装状态，记录可见破损。"
+          ],
+          "claim_type": "inference"
+        },
+        {
+          "text": "第二阶段记录可见破损，第三阶段复核前两阶段记录，确认异常已处理后才放行。",
+          "part_ids": [
+            "p1"
+          ],
+          "quote_texts": [
+            "第二阶段检查封装状态，记录可见破损。",
+            "第三阶段复核前两阶段记录，确认异常已处理后放行。"
+          ],
+          "claim_type": "inference"
+        }
+      ],
+      "answer_parts": [
+        {
+          "part_id": "p1",
+          "state": "answered",
+          "missing_detail": ""
+        }
+      ],
+      "missing_part_ids": [],
+      "plan_blocks": [
+        {
+          "role": "comparison",
+          "part_ids": [
+            "p1"
+          ],
+          "groups": [
+            [
+              "第一阶段核对原件身份，确认设备与记录对应。"
+            ],
+            [
+              "第二阶段检查封装状态，记录可见破损。"
+            ]
+          ]
+        },
+        {
+          "role": "comparison",
+          "part_ids": [
+            "p1"
+          ],
+          "groups": [
+            [
+              "第二阶段检查封装状态，记录可见破损。"
+            ],
+            [
+              "第三阶段复核前两阶段记录，确认异常已处理后放行。"
+            ]
+          ]
+        }
+      ],
+      "block_facts": [
+        [
+          0
+        ],
+        [
+          1
+        ]
+      ]
+    },
+    "N2-R06": {
+      "scenario": "normal",
+      "selected_documents": "*",
+      "facts": [
+        {
+          "text": "甲类工具仅供室内使用。乙类工具仅供室外使用。",
+          "part_ids": [
+            "p1"
+          ],
+          "quote_texts": [
+            "甲类工具仅供室内使用。乙类工具仅供室外使用。"
+          ],
+          "claim_type": "direct"
+        }
+      ],
+      "answer_parts": [
+        {
+          "part_id": "p1",
+          "state": "answered",
+          "missing_detail": ""
+        }
+      ],
+      "missing_part_ids": [],
+      "plan_blocks": [
+        {
+          "part_ids": [
+            "p1"
+          ],
+          "groups": [
+            [
+              "甲类工具仅供室内使用。乙类工具仅供室外使用。"
+            ]
+          ]
+        }
+      ],
+      "block_facts": [
+        [
+          0
+        ]
+      ]
+    },
+    "N2-R07": {
+      "scenario": "normal",
+      "selected_documents": "*",
+      "facts": [
+        {
+          "text": "先登记再领取只说明办理顺序，不能证明登记使故障率下降；记录没有报告故障率测量或对照研究。",
+          "part_ids": [
+            "p1"
+          ],
+          "quote_texts": [
+            "领取流程要求先登记使用人，再领取工具。该记录只描述办理顺序，没有报告故障率测量或对照研究。"
+          ],
+          "claim_type": "inference"
+        }
+      ],
+      "answer_parts": [
+        {
+          "part_id": "p1",
+          "state": "answered",
+          "missing_detail": ""
+        }
+      ],
+      "missing_part_ids": [],
+      "plan_blocks": [
+        {
+          "part_ids": [
+            "p1"
+          ],
+          "groups": [
+            [
+              "领取流程要求先登记使用人，再领取工具。该记录只描述办理顺序，没有报告故障率测量或对照研究。"
+            ]
+          ]
+        }
+      ],
+      "block_facts": [
+        [
+          0
+        ]
+      ]
+    },
+    "N2-R08": {
+      "scenario": "normal",
+      "selected_documents": "*",
+      "facts": [
+        {
+          "text": "甲规程要求值班人员复核，乙规程要求检验人员签字后启用；两份文件均未标注更新时间，因而不能确定乙规程更新。",
+          "part_ids": [
+            "p1",
+            "p2"
+          ],
+          "quote_texts": [
+            "甲规程要求值班人员复核后启用。",
+            "乙规程要求检验人员签字后启用。两份文件均未标注更新时间。"
+          ],
+          "claim_type": "inference"
+        }
+      ],
+      "answer_parts": [
+        {
+          "part_id": "p1",
+          "state": "answered",
+          "missing_detail": ""
+        },
+        {
+          "part_id": "p2",
+          "state": "answered",
+          "missing_detail": ""
+        }
+      ],
+      "missing_part_ids": [],
+      "plan_blocks": [
+        {
+          "part_ids": [
+            "p1",
+            "p2"
+          ],
+          "groups": [
+            [
+              "甲规程要求值班人员复核后启用。"
+            ],
+            [
+              "乙规程要求检验人员签字后启用。两份文件均未标注更新时间。"
+            ]
+          ]
+        }
+      ],
+      "block_facts": [
+        [
+          0
+        ]
+      ]
+    }
+  },
+  "provider_contract": "只读取本冻结响应，不读取预期动作、状态或计分标签；原文选项ID按实际可见内容绑定。"
+}

@@ -4,7 +4,7 @@ import json
 import re
 import unicodedata
 
-ROUTING_VERSION = 'intent-execution-v4'
+ROUTING_VERSION = 'intent-execution-v5'
 INTENT_SCHEMA = """
 ALTER TABLE intent_nodes ADD COLUMN match_mode TEXT NOT NULL DEFAULT 'exact'
  CHECK(match_mode IN ('exact','interaction','keywords'));
@@ -24,6 +24,17 @@ PATTERNS = {
 def normalized(text):
     text = unicodedata.normalize('NFKC', text).casefold()
     return ''.join(c for c in text if not c.isspace() and not unicodedata.category(c).startswith('P'))
+
+
+def interaction_family(question):
+    """同类纯交互可组合；任一分句含业务内容就不走纯交互规则。"""
+    query=normalized(question)
+    single=next((key for key, pattern in PATTERNS.items() if re.fullmatch(pattern,query)),None)
+    if single:return single
+    clauses=[normalized(c) for c in re.split(r'[，,。.!！?？；;\n]+',question) if normalized(c)]
+    if not 2<=len(clauses)<=8:return None
+    return next((key for key,pattern in PATTERNS.items()
+                 if all(re.fullmatch(pattern,clause) for clause in clauses)),None)
 
 
 def public_decision(decision):
@@ -76,7 +87,7 @@ def decide(question, base_id, rows, scope='knowledge', *, contextual_question=No
     signature = hashlib.sha256(json.dumps([ROUTING_VERSION, rows,semantic_policy], ensure_ascii=False,
         sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     eligible = eligible_rows(rows,base_id,scope)
-    family = next((key for key, pattern in PATTERNS.items() if re.fullmatch(pattern, query)), None)
+    family = interaction_family(question)
     groups = [[], [], []]
     for row in eligible:
         method, score = None, 0

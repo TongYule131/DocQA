@@ -44,7 +44,8 @@ def digest(value: str) -> str:
 
 
 def public_user(row) -> dict:
-    return {key: row[key] for key in ('id', 'username', 'display_name', 'role', 'active')}
+    return {**{key: row[key] for key in ('id', 'username', 'display_name', 'role', 'active')},
+            'must_change_password':bool(row['must_change_password']) if 'must_change_password' in row.keys() else False}
 
 
 def cancel_user_jobs(db, user_id: str, base_id: str | None = None):
@@ -139,7 +140,8 @@ class ProductAccess:
         token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         with self.repository.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            current = db.execute('SELECT active,password_hash FROM product_users WHERE id=?', (user['id'],)).fetchone()
+            current = db.execute('SELECT u.*,COALESCE(a.must_change_password,0) AS must_change_password FROM product_users u '
+                'LEFT JOIN product_account_state a ON a.user_id=u.id WHERE u.id=?', (user['id'],)).fetchone()
             if not current or not current['active'] or current['password_hash'] != encoded:
                 raise HTTPException(401, '账号状态已变更，请重新登录')
             # 成功仅清账号失败计数；来源限流仍限制高频认证请求。
@@ -147,13 +149,14 @@ class ProductAccess:
             db.execute('DELETE FROM product_sessions WHERE expires_at<=?', (now,))
             db.execute('INSERT INTO product_sessions VALUES (?,?,?,?,?)',
                        (digest(token), user['id'], csrf, now + 12 * 3600, now_iso()))
-        return public_user(user), token, csrf
+        return public_user(current), token, csrf
 
     def session(self, token):
         if not token or len(token) > 200:
             return None
         with self.repository.connect() as db:
-            row = db.execute('SELECT u.*,s.csrf_token FROM product_sessions s JOIN product_users u ON u.id=s.user_id '
+            row = db.execute('SELECT u.*,s.csrf_token,COALESCE(a.must_change_password,0) AS must_change_password FROM product_sessions s JOIN product_users u ON u.id=s.user_id '
+                             'LEFT JOIN product_account_state a ON a.user_id=u.id '
                              'WHERE s.token_hash=? AND s.expires_at>? AND u.active=1',
                              (digest(token), int(time.time()))).fetchone()
         return {**public_user(row), 'csrf_token': row['csrf_token']} if row else None
@@ -202,6 +205,28 @@ class ProductAccess:
         if row is None:
             raise HTTPException(404, '资料不存在或未获授权')
         return dict(row)
+
+    def owns_source_version(self,document_id: str,version_id: str) -> bool:
+        """历史来源须真正被本人的成功回答引用；调用方仍须先核对文档准入。"""
+        owner=self.actor['id'] if self.actor else None
+        with self.repository.connect() as db:
+            legacy=db.execute('SELECT 1 FROM question_results r JOIN question_jobs j ON j.id=r.job_id '
+                'WHERE j.owner_user_id=? AND r.document_id=? AND r.parse_version_id=?',
+                (owner,document_id,version_id)).fetchone()
+            if legacy:return True
+            # 同时防御坏JSON和非对象引用；单有输入快照或文档ID不授予旧版本读取权。
+            rows=db.execute("SELECT DISTINCT t.* FROM kb_tasks t, "
+                "json_each(CASE WHEN json_valid(t.result_json) THEN t.result_json ELSE '{}' END,'$.citations') c "
+                "WHERE t.owner_user_id=? AND t.kind='question' AND t.status='succeeded' "
+                "AND json_extract(CASE WHEN c.type='object' THEN c.value ELSE '{}' END,'$.document_id')=? "
+                "AND json_extract(CASE WHEN c.type='object' THEN c.value ELSE '{}' END,'$.parse_version_id')=?",
+                (owner,document_id,version_id)).fetchall()
+            from app.knowledge_tasks import KnowledgeTasks
+            for row in rows:
+                try:
+                    if KnowledgeTasks.allowed(db,row):return True
+                except (ValueError,KeyError):continue
+        return False
 
     def visible_documents(self, documents):
         with self.repository.connect() as db:

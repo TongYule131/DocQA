@@ -3,7 +3,7 @@ import hmac
 import re
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response,Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.product_access import (COOKIE, PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH,
@@ -31,7 +31,7 @@ class UserUpdate(StrictBody):
 
 
 class PasswordReset(StrictBody):
-    password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH, repr=False)
+    pass  # 重置值只由服务端决定，不接受客户端提供密码。
 
 
 class BaseCreate(StrictBody):
@@ -59,6 +59,7 @@ class Member(StrictBody):
 def authorize_request(access, request):
     """采用允许清单；新增旧接口不会因为忘记检查而默认向客户开放。"""
     actor, path, method = access.actor, request.url.path, request.method
+    if path=='/account/password' and method=='GET':return
     if path.startswith('/api/auth/'):
         return
     if path.startswith(('/api/feedback','/api/kb-conversations','/api/kb-tasks/','/api/chat/','/api/ingestions')) or path=='/app/knowledge':
@@ -153,7 +154,17 @@ def install_product_routes(app, access):
     def users():
         access.admin()
         with access.repository.connect() as db:
-            return [{**public_user(r), 'created_at': r['created_at']} for r in db.execute('SELECT * FROM product_users ORDER BY created_at')]
+            return [{**public_user(r), 'created_at': r['created_at']} for r in db.execute('SELECT u.*,COALESCE(a.must_change_password,0) AS must_change_password '
+                'FROM product_users u LEFT JOIN product_account_state a ON a.user_id=u.id ORDER BY u.created_at')]
+
+    from app.account_security import PasswordChange
+
+    @router.post('/api/auth/password')
+    def change_own_password(body:PasswordChange,response:Response):
+        from app.account_security import change_password
+        change_password(access,body)
+        response.delete_cookie(access.cookie_name,path='/',secure=access.cookie_secure,httponly=True,samesite='strict')
+        return {'status':'password_changed','sessions_revoked':True}
 
     @router.post('/api/admin/users', status_code=201)
     def create_user(body: UserCreate):
@@ -177,18 +188,24 @@ def install_product_routes(app, access):
             if not body.active:
                 db.execute('DELETE FROM product_sessions WHERE user_id=?', (user_id,))
                 cancel_user_jobs(db, user_id)
-            return public_user(db.execute('SELECT * FROM product_users WHERE id=?', (user_id,)).fetchone())
+            return public_user(db.execute('SELECT u.*,COALESCE(a.must_change_password,0) AS must_change_password FROM product_users u '
+                'LEFT JOIN product_account_state a ON a.user_id=u.id WHERE u.id=?',(user_id,)).fetchone())
 
     @router.post('/api/admin/users/{user_id}/password')
-    def reset_password(user_id: str, body: PasswordReset):
+    def reset_password(user_id: str, body: PasswordReset,response:Response):
+        from app.account_security import reset_password
+        reset_password(access,user_id)
+        if user_id==access.actor['id']:response.delete_cookie(access.cookie_name,path='/',secure=access.cookie_secure,httponly=True,samesite='strict')
+        return {'status': 'password_reset', 'sessions_revoked': True,'must_change_password':True}
+
+    @router.get('/api/admin/account-events')
+    def account_events(user_id:str|None=Query(default=None,max_length=100),limit:int=Query(default=30,ge=1,le=100)):
         access.admin()
-        encoded = password_hash(body.password)
         with access.repository.connect() as db:
-            if not db.execute('SELECT 1 FROM product_users WHERE id=?', (user_id,)).fetchone():
-                raise HTTPException(404, '账号不存在')
-            db.execute('UPDATE product_users SET password_hash=? WHERE id=?', (encoded, user_id))
-            db.execute('DELETE FROM product_sessions WHERE user_id=?', (user_id,))
-        return {'status': 'password_reset', 'sessions_revoked': True}
+            return [dict(r) for r in db.execute('SELECT e.*,a.username AS actor_username,t.username AS target_username '
+                'FROM product_account_events e JOIN product_users a ON a.id=e.actor_user_id JOIN product_users t ON t.id=e.target_user_id '
+                +('WHERE e.target_user_id=? ' if user_id else '')+'ORDER BY e.created_at DESC,e.id DESC LIMIT ?',
+                (user_id,limit) if user_id else (limit,))]
 
     @router.get('/api/knowledge-bases')
     def bases():

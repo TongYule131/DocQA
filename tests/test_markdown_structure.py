@@ -39,6 +39,28 @@ def test_inline_pipes_and_escaped_pipes_do_not_split_cells():
     assert markdown_spans(text)==[(0,len(text),'markdown_table')]
 
 
+@pytest.mark.parametrize('heading,title',[
+    ('# 客户端 C#\n','客户端 C#'),
+    ('# 标识###\n','标识###'),
+    ('# 标识 ###\n','标识'),
+    ('  ## 子题F# ##\r\n','子题F#'),
+])
+def test_local_markdown_heading_preserves_literal_hashes_and_only_removes_separated_closing_marks(team,heading,title):
+    env,_,clients=team;admin=clients['admin'];text=heading+'\n说明原文。\n'
+    uploaded=admin.post('/api/documents',files={'file':('hash-title.md',text.encode(),'text/markdown')})
+    assert uploaded.status_code==201;identifier=uploaded.json()['document']['id']
+    response=admin.post('/api/documents/'+identifier+'/parse',json={'idempotency_key':'literal-heading'})
+    from app.parse_worker import ParseWorker
+    assert ParseWorker(env.settings,env.repository).run_forever(max_tasks=1)==1
+    task=env.repository.get_task(response.json()['task']['id']);assert task.status=='succeeded'
+    version=env.repository.get(identifier).active_parse_version_id
+    blocks=env.repository.blocks(version)
+    assert blocks[0].text==heading and all(b.heading_path==title for b in blocks)
+    assert all(s.section_path==title for b in blocks for s in b.sources)
+    assert all(c.heading_path==title for c in env.repository.chunks(identifier,version))
+    assert not env.embedding.calls and not env.model.calls
+
+
 def test_long_code_is_split_only_on_lines_and_not_merged_with_prose():
     text='## 示例\n\n说明文字。\n\n```python\n# 这里不是标题\n'+''.join('    value_'+str(i)+' = "text"\n' for i in range(20))+'```\n\n后续说明。\n'
     doc=document(text);chunks=chunk_document(doc,ChunkingConfig(max_chars=160,overlap_chars=20))
@@ -115,4 +137,25 @@ def test_parse_overflow_keeps_old_version_and_chunks(team):
     assert '超过分块上限' in task.error_message
     assert env.repository.get(identifier).active_parse_version_id==original
     assert [c.model_dump() for c in env.repository.chunks(identifier,original)]==chunks
+    assert not env.embedding.calls and not env.model.calls
+
+
+@pytest.mark.parametrize('format',['md','txt'])
+def test_markdown_policy_identity_creates_new_version_without_changing_other_formats(team,monkeypatch,format):
+    import app.markdown_document as markdown
+    from app.parse_worker import ParseWorker
+    env,_,clients=team;admin=clients['admin'];raw='相同原文，策略升级不能修改旧解析记录。\n'.encode()
+    response=admin.post('/api/documents',files={'file':('same-source.'+format,raw)})
+    identifier=response.json()['document']['id'];worker=ParseWorker(env.settings,env.repository)
+    versions=[];snapshots=[]
+    for number,policy in enumerate(('isolated-md-policy-A','isolated-md-policy-B','isolated-md-policy-B')):
+        monkeypatch.setattr(markdown,'MARKDOWN_PARSER_VERSION',policy)
+        task=admin.post('/api/documents/'+identifier+'/parse',json={'idempotency_key':'policy-'+str(number),'force':bool(number)})
+        assert task.status_code==202 and worker.run_forever(max_tasks=1)==1
+        version=env.repository.get(identifier).active_parse_version_id;versions.append(version)
+        snapshots.append(env.repository.get_parse_version(version).model_dump())
+    assert (versions[0]!=versions[1]) is (format=='md')
+    assert versions[1]==versions[2]
+    assert env.repository.get_parse_version(versions[0]).model_dump()==snapshots[0]
+    assert len(env.repository.list_parse_versions(identifier))==(2 if format=='md' else 1)
     assert not env.embedding.calls and not env.model.calls

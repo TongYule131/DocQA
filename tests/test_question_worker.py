@@ -260,16 +260,25 @@ def test_recovered_answer_checkpoint_with_forged_quote_is_not_published(tmp_path
 
 
 def test_partial_answer_persists_and_exports_missing_points(tmp_path):
-    env = question_fixture(tmp_path)
+    env = question_fixture(tmp_path,question_max_requests=3)
     body = json.loads(REPLY)
     body.update(status="partial", missing_points=["第二部分的实践效果没有足够依据。"])
     body["answer_parts"].append({"part_id":"p2","state":"missing_evidence",
                                   "missing_detail":body["missing_points"][0]})
-    env.model.handler = lambda *_: json.dumps(body, ensure_ascii=False)
+    body['presentation']['blocks'][0]['role']='conclusion'
+    def provider(system,user):
+        if '选材与段落规划器' in system:
+            unit=json.loads(user)['evidence_units'][0]
+            return json.dumps({'blocks':[{'role':'conclusion','focus':'章节数量','part_ids':['p1'],
+                'groups':[{'label':'原文数量','units':[{'ref':unit['ref'],'unit':unit['unit']}]}]}],
+                'missing_part_ids':['p2']},ensure_ascii=False)
+        return json.dumps(body,ensure_ascii=False)
+    env.model.handler = provider
     job, _ = submit(env,question=QUESTION+"第二部分的实践效果如何？")
     assert worker(env).run_job(job["id"])
     complete = env.service.get_job(job["id"])
     assert complete["status"] == "succeeded", complete
+    assert complete['requests_used']==3
     result = env.service.get_result(complete["result_id"])
     assert result["answer"]["status"] == "partial"
     assert result["answer"]["missing_points"] == body["missing_points"]

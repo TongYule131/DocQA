@@ -1,7 +1,8 @@
 """在上游JSON仍在到达时验证完整论断；只输出局部草稿，不替代最终整体校验。"""
 import json
 
-from app.rag_answer_contract import ANSWER_CONTRACT_VERSION, question_parts, validate_task_output
+from app.rag_answer_contract import ANSWER_CONTRACT_VERSION, validate_task_output
+from app.question_obligations import answer_question_parts as question_parts
 from app.rag_validation import ModelOutputError, _reject_duplicate_keys, validate_user_condition_boundary
 
 STREAM_VERSION = 'validated-fact-stream-v2'

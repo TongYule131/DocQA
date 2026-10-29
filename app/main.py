@@ -136,7 +136,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.middleware("http")
     async def require_compatible_runtime(request, call_next):
         request.state.request_id = f"req-{uuid4().hex}"
-        page_route = request.url.path in {"/", "/app", "/single", "/admin", "/tools", "/knowledge", "/login", "/setup"} or request.url.path.startswith(('/admin/','/app/'))
+        page_route = request.url.path in {"/", "/app", "/single", "/admin", "/tools", "/knowledge", "/login", "/setup",'/account/password'} or request.url.path.startswith(('/admin/','/app/'))
         # 代码更新或库被外部替换后，旧进程不得继续提交/领取收费任务。
         if page_route or request.url.path.startswith(("/api/", "/static/")):
             try:
@@ -148,6 +148,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         token = actor_context.set(actor)
         try:
             path = request.url.path
+            from app.account_security import restrict_password_change,guard_session_stream
+            if access.team_mode and restrict_password_change(request,actor):
+                if page_route:return RedirectResponse('/account/password',status_code=303,headers={'Cache-Control':'no-store'})
+                return JSONResponse(status_code=403,content={'code':'password_change_required','detail':'请先修改初始密码后再使用业务功能'},headers={'Cache-Control':'no-store'})
             if access.team_mode and not path.startswith('/static/') and path not in ('/login', '/setup', '/api/auth/login', '/api/auth/me', '/api/auth/setup-status', '/api/auth/setup'):
                 if not actor:
                     if page_route:
@@ -158,6 +162,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 verify_mutation(request, actor)
             protect_temporary_request(access, request)
             response = await call_next(request)
+            if access.team_mode and actor and response.headers.get('content-type','').startswith('text/event-stream'):
+                guard_session_stream(response,access,request.cookies.get(access.cookie_name),actor['id'])
         except HTTPException as exc:
             response = JSONResponse(status_code=exc.status_code, content={'detail': exc.detail})
         finally:
@@ -217,11 +223,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "解析版本不存在或不属于该文档")
         if access.team_mode and access.actor['role'] != 'admin':
             published = access.require_document(document_id)
-            with repository.connect() as db:
-                own = db.execute('SELECT 1 FROM question_results r JOIN question_jobs j ON j.id=r.job_id '
-                    'WHERE j.owner_user_id=? AND r.document_id=? AND r.parse_version_id=?',
-                    (access.actor['id'], document_id, version_id)).fetchone()
-            if published and version_id != published['parse_version_id'] and not own:
+            if published and version_id != published['parse_version_id'] and not access.owns_source_version(document_id,version_id):
                 raise HTTPException(404, '解析版本未发布或未获授权')
         return version
 
@@ -281,6 +283,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get('/setup', include_in_schema=False)
     def setup_page():
         return workspace_page('setup.html', 'setup')
+
+    @app.get('/account/password',include_in_schema=False)
+    def account_password_page():
+        return workspace_page('account-password.html','account-password')
 
     install_product_routes(app, access)
     install_profile_routes(app, access)
