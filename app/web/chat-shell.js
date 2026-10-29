@@ -42,7 +42,8 @@ for (const button of document.querySelectorAll('.send-button,#kb-send')) {
 for (const button of document.querySelectorAll('.composer-add')) button.replaceChildren(icon('plus'));
 for (const button of document.querySelectorAll('.history-title .icon-button')) button.replaceChildren(icon('refresh'));
 for (const summary of document.querySelectorAll('.workspace-menu>summary')) summary.setAttribute('aria-label', '打开个人与工作空间菜单');
-const menus = [...document.querySelectorAll('.workspace-menu,.chat-settings,.history-options')];
-document.addEventListener('click', event => { for (const menu of menus) if (!menu.contains(event.target)) menu.open = false; });
+const menus = [...document.querySelectorAll('.workspace-menu,.chat-settings,.history-options,#scope-filter')];
+document.addEventListener('click', event => { const path=event.composedPath();for (const menu of menus) if (!path.includes(menu)&&!menu.contains(event.target)) menu.open = false; });
+for(const menu of menus)menu.addEventListener('toggle',()=>{if(menu.open)for(const other of menus)if(other!==menu)other.open=false;});
 document.addEventListener('keydown', event => { if (event.key === 'Escape') for (const menu of menus) menu.open = false; });
 window.docqaAuthReady?.then(installProfile).catch(() => {});

@@ -126,7 +126,7 @@ async function loadTraces() {
   const version = ++generation, q = $('trace-search').value.trim(), status = $('trace-status').value;
   const data = await api(`/api/admin/traces?q=${encoded(q)}&status=${encoded(status)}&page=${tracePage}`); if (version !== generation) return;
   traceTotal = data.total; const s = data.stats;
-  stats($('trace-stats'), [['成功 / 失败 / 运行中', `${s.succeeded} / ${s.failed} / ${s.running}`], ['成功率', s.success_rate === null ? '—' : `${s.success_rate}%`], ['平均耗时', duration(s.average_ms)], ['P95 耗时', duration(s.p95_ms)]]);
+  stats($('trace-stats'), [['成功', s.succeeded], ['失败', s.failed], ['运行中', s.running], ['成功率', s.success_rate === null ? '—' : `${s.success_rate}%`], ['平均耗时', duration(s.average_ms)], ['P95 耗时', duration(s.p95_ms)]]);
   $('trace-window').textContent = data.window; const rows = $('trace-rows'); rows.replaceChildren();
   for (const i of data.items) { const row = traceRow(i.status); cell(row, i.name); cell(row, i.id).className = 'node-code'; cell(row, i.owner); cell(row, duration(i.elapsed_ms)); cell(row, '').append(traceStatus(i.status)); cell(row, date(i.started_at || i.created_at)); cell(row, '').append(button('查看链路 →', () => showTrace(i.id))); rows.append(row); }
   if (!data.items.length) { const row = node('tr'), c = cell(row, '暂无匹配运行记录'); c.colSpan = 7; rows.append(row); }
@@ -155,16 +155,16 @@ async function showTrace(id) {
   if(data.execution){const info=node('section','','panel'),e=data.execution;info.append(node('h2','执行动作与资源'),node('p',e.name));if(e.resources.tool_id)info.append(node('p','工具：'+e.resources.tool_id));if(e.requires_retrieval)info.append(node('p',`当前授权快照 · ${e.resources.document_ids.length}份已选资料${e.constraints.top_k?' · TopK '+e.constraints.top_k:''}`));root.append(info);}
   if(data.query_plan){const details=node('details','','panel');details.append(node('summary',`查询计划 · ${data.query_plan.name}`));data.query_plan.effects.forEach(effect=>details.append(node('p',effect)));if(data.query_plan.required_evidence.length)details.append(node('p',`所需证据：${data.query_plan.required_evidence.join('、')}`));details.append(node('small',`${data.query_plan.version} · 本地规则规划，新增模型调用 0 次；权限范围沿用当前资料选择。`));root.append(details);}
   const panel = node('section', '', 'panel'); panel.append(node('h2', '执行时序'));
-  const scroll = node('div', '', 'table-scroll'), table = node('table', '', 'trace-grid'), head = node('thead'), header = node('tr'); ['节点', '类型', '时间线', '耗时 / 起点'].forEach(t => header.append(node('th', t))); head.append(header); table.append(head);
+  const scroll = node('div', '', 'table-scroll'), table = node('table', '', 'trace-grid'), head = node('thead'), header = node('tr'); ['节点', '类型', '状态', '时间线', '耗时 / 起点'].forEach(t => header.append(node('th', t))); head.append(header); table.append(head);
   const body = node('tbody'), byId = new Map(data.spans.map(s => [s.id, s]));
   const windowMs = Math.max(1, data.elapsed_ms || 0, ...data.spans.map(s => (s.offset_ms || 0) + (s.elapsed_ms || 0)));
   for (const s of data.spans) {
     const row = traceRow(s.status), name = node('span', s.name, 'span-name'); let depth = 0, p = s.parent_id; const seen = new Set([s.id]);
-    while (p && byId.has(p) && !seen.has(p)) { seen.add(p); depth++; p = byId.get(p).parent_id; } name.style.setProperty('--depth', String(Math.min(depth, 6))); name.append(traceStatus(s.status)); cell(row, '').append(name); cell(row, s.kind);
+    while (p && byId.has(p) && !seen.has(p)) { seen.add(p); depth++; p = byId.get(p).parent_id; } name.style.setProperty('--depth', String(Math.min(depth, 6))); cell(row, '').append(name); cell(row, s.kind); const state=cell(row,'');state.className='trace-state-cell';state.append(traceStatus(s.status));
     const track = node('div', '', 'trace-track'), bar = node('div', '', `trace-bar ${s.status}`); bar.style.left = `${Math.max(0, Math.min(100, 100 * (s.offset_ms || 0) / windowMs))}%`; bar.style.width = `${Math.max(0, Math.min(100, 100 * (s.elapsed_ms || 0) / windowMs))}%`; bar.title = `${statusNames[s.status] || s.status} · ${duration(s.elapsed_ms)}`; track.append(bar); cell(row, '').append(track);
     const t = cell(row, duration(s.elapsed_ms)); t.className = 'span-time'; t.append(node('p', `@ ${duration(s.offset_ms)}`, 'muted-detail')); if (s.error_code) t.append(node('small', s.error_code, 'form-error')); body.append(row);
   }
-  if (!data.spans.length) { const row = node('tr'), c = cell(row, '任务尚未执行，暂无节点'); c.colSpan = 4; body.append(row); }
+  if (!data.spans.length) { const row = node('tr'), c = cell(row, '任务尚未执行，暂无节点'); c.colSpan = 5; body.append(row); }
   table.append(body); scroll.append(table); panel.append(scroll, node('p', data.timing_note, 'footnote')); root.append(panel, node('p', data.content_policy, 'footnote'));
   const url = new URL(location.href); url.searchParams.set('trace', id); history.replaceState(null, '', url);
 }

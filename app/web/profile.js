@@ -22,7 +22,7 @@ export async function installProfile(session) {
   const nameInput=document.createElement('input');nameInput.id='profile-display-name';nameInput.maxLength=80;nameInput.value=name;nameInput.autocomplete='nickname';
   const nameSave=document.createElement('button');nameSave.type='button';nameSave.className='secondary';nameSave.textContent='保存显示名称';
   const account=document.createElement('p');account.className='profile-hint';account.textContent=`登录账号：${session.user?.username||''}`;
-  const security=document.createElement('a');security.className='profile-security';security.href='/account/password';security.textContent='账号安全 · 修改密码';
+  const security=document.createElement('a');security.className='profile-security button secondary';security.href='/account/password';security.textContent='账号安全 · 修改密码';
   const hint = document.createElement('p'); hint.className = 'profile-hint'; hint.textContent = 'PNG、JPG、WebP，最大2MB。保存时居中裁剪为方形。';
   const input = document.createElement('input'); input.type = 'file'; input.id = 'avatar-file'; input.accept = 'image/png,image/jpeg,image/webp'; input.setAttribute('aria-label', '选择头像图片');
   const status = document.createElement('p'); status.className = 'profile-status'; status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');

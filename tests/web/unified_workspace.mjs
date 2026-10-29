@@ -32,6 +32,7 @@ const api=async(path,options={})=>{
   if(path==='/api/chat/scopes'){if(holdRefresh)await holdRefresh;return [structuredClone(base)];}
   if(path.startsWith('/api/chat/conversations?'))return [{id:detail.id,title:detail.title}];
   if(path==='/api/ingestions?base_id=base')return [];
+  if(path==='/api/chat/conversations'&&options.method==='POST')return {id:detail.id};
   if(path.endsWith('/turns'))return {id:'submission'};
   if(path.startsWith('/api/chat/conversations/'))return structuredClone(detail);
   throw new Error('Unexpected path '+path);
@@ -44,7 +45,7 @@ const context={document,node,renderAnswer,sourceLocationsText,answerTextForDispl
   setTimeout:()=>1,clearTimeout(){},navigator:{clipboard:{writeText:async()=>{}}},Option:class extends Element {constructor(text,value){super('option');this.textContent=text;this.value=value;}},
 };
 await vm.runInNewContext('(async()=>{'+script+'})()',context);
-const inputs=()=>ids.get('document-options').walk().filter(el=>el.tagName==='input');
+const inputs=()=>ids.get('document-options').walk().filter(el=>el.tagName==='input'&&el.type==='checkbox');
 const allButton=()=>ids.get('document-options').walk().find(el=>el.tagName==='button');
 assert.equal(inputs().length,3);
 await ids.get('chat-refresh').onclick();
@@ -65,7 +66,7 @@ assert.equal(ids.get('scope-caption').textContent,'全部可用资料（2 份）
 
 inputs()[0].checked=false;inputs()[0].onchange();
 assert.deepEqual(inputs().map(el=>el.checked),[false,true,false]);
-assert.equal(ids.get('scope-caption').textContent,'已选择 1 份资料');
+assert.equal(ids.get('scope-caption').textContent,'仅使用：第二份.txt');
 assert.equal(ids.get('kb-send').disabled,false);
 inputs()[1].checked=false;inputs()[1].onchange();
 assert.equal(ids.get('scope-caption').textContent,'未选择资料');
@@ -125,4 +126,35 @@ assert.equal(calls.filter(c=>c.method==='POST').length,2);
 detail={...detail,id:'k:all',document_ids:[]};
 await ids.get('kb-history').children[0].onclick();
 assert.deepEqual(inputs().map(el=>el.checked),[true,true,false],'历史全库范围恢复后仍应展示实际全选');
+
+async function bootPicker(saved=new Map(),user='fresh'){
+  const elements=new Map([...html.matchAll(/id="([^"]+)"/g)].map(m=>[m[1],new Element()]));
+  const dom={...document,getElementById:id=>elements.get(id),querySelectorAll:()=>elements.get('document-options').walk().filter(el=>['input','button'].includes(el.tagName))};
+  globalThis.document=dom;
+  const env={...context,document:dom,location:{search:'?base=base'},window:{docqaAuthReady:Promise.resolve({user:{id:user,role:'customer'}}),addEventListener(){}},
+    sessionStorage:{getItem:key=>saved.get(key)||null,setItem:(key,value)=>saved.set(key,value),removeItem:key=>saved.delete(key)}};
+  await vm.runInNewContext('(async()=>{'+script+'})()',env);
+  return {elements,saved,boxes:()=>elements.get('document-options').walk().filter(el=>el.type==='checkbox'),
+    buttons:()=>elements.get('document-options').walk().filter(el=>el.tagName==='button')};
+}
+let picker=await bootPicker();
+assert(picker.boxes().every(el=>!el.checked),'首次新会话不默认授权全部资料');
+assert.equal(picker.elements.get('kb-send').disabled,true);
+await picker.buttons().find(el=>el.attributes['aria-label']==='仅使用 第一份.txt').onclick();
+assert.deepEqual(picker.boxes().map(el=>el.checked),[true,false,false],'仅此份一键清除其他勾选');
+assert.equal(picker.elements.get('scope-caption').textContent,'仅使用：第一份.txt');
+const search=picker.elements.get('document-options').walk().find(el=>el.type==='search');
+search.value='第二份';search.oninput();assert.equal(picker.boxes().length,1);
+assert.equal(picker.boxes()[0].value,'two');
+picker=await bootPicker(picker.saved);
+assert.deepEqual(picker.boxes().map(el=>el.checked),[true,false,false],'重新打开保留当前账号的明确范围');
+await picker.buttons().find(el=>el.dataset.selectNone==='true').onclick();
+picker=await bootPicker(picker.saved);
+assert(picker.boxes().every(el=>!el.checked),'全不选也持久保留，不重新变为全库');
+assert.equal(picker.elements.get('kb-send').disabled,true);
+await picker.buttons().find(el=>el.attributes['aria-label']==='仅使用 第二份.txt').onclick();
+const shared=picker.saved;
+const other=await bootPicker(shared,'other-user');
+assert(other.boxes().every(el=>!el.checked),'其他账号不继承资料偏好');
+console.log('PASS document picker: fresh empty, one-click exclusive selection, search, explicit none persistence and account isolation');
 console.log('unified workspace: visible all-ready selection, explicit empty selection guard, exact selected/all POST, preparing/empty scopes, refresh and busy/running/waiting locks, long title disclosure and conversation switching passed');

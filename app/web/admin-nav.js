@@ -8,11 +8,12 @@ if (sidebar && nav) {
   const brand=sidebar.querySelector('.brand');
   brand.replaceChildren(node('span','D','brand-symbol'),node('span','DocQA','nav-label'));
   const toggle=node('button','','admin-collapse');toggle.type='button';toggle.append(icon('panel'));sidebar.insertBefore(toggle,brand.nextSibling);
+  const collapseKey=window.innerWidth<=800?'docqa.ui.adminCollapsedMobile':'docqa.ui.adminCollapsed';
   function collapse(value) {
     document.body.classList.toggle('admin-nav-collapsed',value);toggle.setAttribute('aria-label',value?'展开后台侧栏':'收起后台侧栏');toggle.title=value?'展开侧栏':'收起侧栏';toggle.setAttribute('aria-expanded',String(!value));
-    try { localStorage.setItem('docqa.ui.adminCollapsed',String(value)); } catch { }
+    try { localStorage.setItem(collapseKey,String(value)); } catch { }
   }
-  let collapsed=window.innerWidth<=800;try {const saved=localStorage.getItem('docqa.ui.adminCollapsed');if(saved!==null)collapsed=saved==='true';}catch{}
+  let collapsed=window.innerWidth<=800;try {const saved=localStorage.getItem(collapseKey);if(saved!==null)collapsed=saved==='true';}catch{}
   collapse(collapsed);toggle.onclick=()=>collapse(!document.body.classList.contains('admin-nav-collapsed'));
   nav.replaceChildren();
   function link(label,href,name,active=false) {
@@ -27,7 +28,7 @@ if (sidebar && nav) {
   const listLink=link('意图列表','/admin/intents?view=list','list',path==='/admin/intents'&&view==='list');const testLink=link('意图测试台','/admin/intents?view=test','chat',path==='/admin/intents'&&view==='test');children.append(treeLink,listLink,testLink);
   function expanded(value){children.hidden=!value;trigger.setAttribute('aria-expanded',String(value));}
   expanded(path==='/admin/intents');trigger.onclick=()=>expanded(children.hidden);group.append(trigger,children);nav.append(group);
-  nav.append(link('链路追踪','/admin/traces','trace',path==='/admin/traces'),link('用户管理','/admin/users','users',path==='/admin/users'),link('系统设置','/admin/settings','settings',path==='/admin/settings'));
+  nav.append(link('反馈处理','/admin/feedback','feedback',path==='/admin/feedback'),link('链路追踪','/admin/traces','trace',path==='/admin/traces'),link('用户管理','/admin/users','users',path==='/admin/users'),link('系统设置','/admin/settings','settings',path==='/admin/settings'));
   const bottom=sidebar.querySelector('.sidebar-bottom');if(bottom)bottom.replaceChildren(link('返回对话','/app','chat'));
   window.docqaAuthReady?.then(async session=>{
     if(!session.user||!bottom)return;
