@@ -15,6 +15,7 @@ from uuid import uuid4
 from fastapi import Body, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 
@@ -109,7 +110,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         async def heartbeat():
             while True:
                 await asyncio.sleep(5)
-                try:runtime.check()
+                try:await run_in_threadpool(runtime.check)
                 except RuntimeMismatch:return
         heartbeat_task=asyncio.create_task(heartbeat())
         try:yield
@@ -124,6 +125,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.question_service = questions
     app.state.product_access = access
     app.state.conversations = conversations
+    # 版本放进目录，模块的相对 import 也继承同一版本；旧页面仍走运行身份保护。
+    versioned_static = f"/static/{runtime.fingerprint}/"
+    app.mount(versioned_static.rstrip('/'), StaticFiles(directory=web_dir), name="versioned-static")
     app.mount("/static", StaticFiles(directory=web_dir), name="static")
 
     @app.exception_handler(RequestValidationError)
@@ -140,10 +144,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # 代码更新或库被外部替换后，旧进程不得继续提交/领取收费任务。
         if page_route or request.url.path.startswith(("/api/", "/static/")):
             try:
-                runtime.check()
+                # 源码和SQLite结构检查包含阻塞IO；资源并发加载时不能占住事件循环。
+                await run_in_threadpool(runtime.check)
             except RuntimeMismatch as exc:
                 return JSONResponse(status_code=503, content={
                     "status": "not_ready", "code": "runtime_mismatch", "detail": str(exc)})
+        if request.url.path.startswith('/static/'):
+            # 这里只提供公开的前端代码；静态资源无需反复读取账号或执行业务授权。
+            response = await call_next(request)
+            response.headers['X-Request-ID'] = request.state.request_id
+            response.headers['Cache-Control'] = ('public, max-age=31536000, immutable'
+                if request.url.path.startswith(versioned_static) and response.status_code in (200, 304) else 'no-store')
+            return response
         actor = access.session(request.cookies.get(access.cookie_name)) if access.team_mode else None
         token = actor_context.set(actor)
         try:
@@ -170,7 +182,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             actor_context.reset(token)
         response.headers["X-Request-ID"] = request.state.request_id
         if page_route or request.url.path.startswith(("/static/", "/api/")):
-            # 本地升级后普通刷新也必须拿到当前页面，不能继续复用旧 JS/CSS。
+            # 页面和业务数据始终重新读取；带源码身份目录的公开资源单独缓存。
             response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -228,12 +240,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return version
 
     def workspace_page(filename: str, view: str = ""):
-        # 文件名仅来自下面固定路由，绝不接受任意路径。模块资源也使用 no-store。
+        # 文件名仅来自下面固定路由；页面不缓存，全部静态依赖绑定当前源码身份。
         html = (web_dir / filename).read_text(encoding="utf-8")
         html = html.replace('<body>', f'<body data-workspace-view="{view}">')
         html = html.replace('<body ', f'<body data-team-mode="{str(access.team_mode).lower()}" ', 1)
-        for asset in ("app.js", "style.css", "workspace.js", "workspace.css", "admin-workspace.js", "knowledge.js", "product.css", "login.js", "conversation.js", "conversation.css", "admin.css", "admin.js", "setup.js", "unified-chat.js", "unified-chat.css"):
-            html = html.replace(f'"/static/{asset}"', f'"/static/{asset}?v={runtime.fingerprint}"')
+        html = html.replace('"/static/', '"' + versioned_static)
         return HTMLResponse(html)
 
     @app.get("/", include_in_schema=False)

@@ -161,12 +161,12 @@ def test_page_assets_follow_running_code_and_do_not_reuse_old_cache(tmp_path):
             page = client.get(route)
             assert page.headers['cache-control'] == 'no-store'
             for asset in assets:
-                path = f'/static/{asset}?v={fingerprint}'
+                path = f'/static/{fingerprint}/{asset}'
                 assert f'"{path}"' in page.text
                 response = client.get(path)
                 assert response.status_code == 200
-                assert response.headers['cache-control'] == 'no-store'
-        assert 'renderLegacyChunks' in client.get(f'/static/app.js?v={fingerprint}').text
+                assert response.headers['cache-control'] == 'public, max-age=31536000, immutable'
+        assert 'renderLegacyChunks' in client.get(f'/static/{fingerprint}/app.js').text
 
 
 @pytest.mark.parametrize('damage', ['future', 'table'])
