@@ -9,6 +9,7 @@ const paths = {
   users: ['M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2','M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8','M17 3a4 4 0 0 1 0 8','M22 21v-2a4 4 0 0 0-3-3.9'],
   settings: ['m12 3 2 3 3-.2 1.5 2.6-1.5 2.6 1.5 2.6-1.5 2.6-3-.2-2 3-2-3-3 .2L5.5 14 7 11.4 5.5 8.8 7 6.2 10 6Z','M12 14a3 3 0 1 0 0-6 3 3 0 0 0 0 6'],
   chat: ['M21 11a8 8 0 0 1-8 8H7l-4 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z'],
+  feedback: ['M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 4V6a2 2 0 0 1 2-2Z','M7 9h10M7 13h7'],
   chevron: ['m8 10 4 4 4-4'],
   more: ['M5 12h.01M12 12h.01M19 12h.01'],
   plus: ['M12 5v14M5 12h14'],
@@ -17,6 +18,7 @@ const paths = {
 };
 export function icon(name) {
   const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');
+  svg.setAttribute('width','18');svg.setAttribute('height','18');svg.setAttribute('focusable','false');
   svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('fill','none');svg.setAttribute('stroke','currentColor');svg.setAttribute('stroke-width','1.7');svg.setAttribute('stroke-linecap','round');svg.setAttribute('stroke-linejoin','round');svg.setAttribute('aria-hidden','true');svg.classList.add('ui-icon');
   for (const d of paths[name] || paths.more) { const p=document.createElementNS(ns,'path');p.setAttribute('d',d);svg.append(p); }
   return svg;

@@ -39,7 +39,7 @@ powershell -NoProfile -File scripts\stop_local.ps1 -DataDir D:\python\DocQA\data
 | `/admin`、`/knowledge` | 管理、资料准备、解析／索引、生效与授权 |
 | `/admin/intents`、`/admin/traces` | 意图配置／测试台与实际执行链路 |
 | `/admin/users`、`/account/password` | 管理员账号维护、两端自助改密 |
-| `/admin/feedback` | 管理员反馈处理；当前为独立入口 |
+| `/admin/feedback` | 管理员反馈处理；后台侧栏可进入 |
 | `/tools`、`/admin/documents` | 文档工程、摘要和信息提取 |
 | `/docs` | 实际请求类型和OpenAPI，团队模式下限管理员 |
 
@@ -48,6 +48,8 @@ powershell -NoProfile -File scripts\stop_local.ps1 -DataDir D:\python\DocQA\data
 两端职责、实际入口和导航缺口统一见[阶段06产品流程](docs/阶段06-产品工作台与业务接入.md)；普通客户上传到自己的临时库，团队库资料写入由管理员管理。
 
 N04已随N01～N04整包正式上线，补齐个人设置和账号安全：用户及管理员可修改自己的显示名称，从`/account/password`核对原密码后设置不同的新密码（4～32位、两遍确认）；成功后重新登录。管理员重置只使用固定初始密码123456，并强制用户下次登录先改密，安全操作可在用户管理查看。正式schema17保留历史账号和业务归属；正式部署与实际验证状态见阶段05。
+
+新会话首次进入不默认勾选资料；可“全选可用”“全不选”、按名称搜索或点“仅此份”。同一浏览器会话中按账号、知识库及已有会话记住明确选择；空选择禁用发送，不自动回退全库。链路执行时序将状态单独分列，个人设置、安全及退出入口使用统一有边框控件。发布与验证范围见阶段05。
 
 ## 实现版本
 
