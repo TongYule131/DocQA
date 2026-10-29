@@ -331,7 +331,7 @@ class ParseWorker:
         spans = _text_paragraph_spans(text)
         if document.format=='md':
             # 标题独立为结构节点；代码围栏内部的 # 保持原文，不当标题。
-            from app.markdown_document import markdown_spans
+            from app.markdown_document import markdown_spans,markdown_heading,MARKDOWN_PARSER_VERSION
             structure=markdown_spans(text)
             spans = [(a,b) for a,b,_ in structure]
             kinds = [label for _,_,label in structure]
@@ -350,7 +350,7 @@ class ParseWorker:
             "pages": {"1": {"page_no": 1}},
         }
         self.repository.update_task_progress(task.id, token, stage="normalizing")
-        parser_version='local-markdown-3' if document.format=='md' else 'local-text-2'
+        parser_version=MARKDOWN_PARSER_VERSION if document.format=='md' else 'local-text-2'
         normalized = normalize_docling_result(document.id, payload, document.format or "txt",
                                              parser_version=parser_version)
         # 补充 TXT 的行范围来源，并说明其页码不是物理 PDF 页码。
@@ -360,8 +360,8 @@ class ParseWorker:
             if document.format=='md':
                 block.text=text[start:end];block.char_count=len(block.text)
                 if kind=='section_header':
-                    match=re.match(r'^ {0,3}(#{1,6})\s+(.+)',text[start:end].strip())
-                    level=len(match[1]);headings=[h for h in headings if h[0]<level];headings.append((level,match[2].rstrip(' #\r\n')))
+                    level,title=markdown_heading(text[start:end])
+                    headings=[h for h in headings if h[0]<level];headings.append((level,title))
                 block.heading_path=' / '.join(h[1] for h in headings) or None
                 if kind=='markdown_table':block.block_type='markdown_table'
             for source in block.sources:
@@ -443,6 +443,7 @@ class ParseWorker:
         # 结果文件：先写临时目录，再原子改名；失败时旧版本不变。
         result_hash = hashlib.sha256(json.dumps(
             {"schema": RESULT_SCHEMA_VERSION, "chunking": CHUNKING_ALGO,
+             **({'markdown_parser':parser_version} if fmt=='md' else {}),
              "origin": origin_hash, "quality": quality_status,
              "blocks": [{"t": b.block_type, "x": b.text, "table": b.table, "s": [s.model_dump() for s in b.sources]}
                         for b in normalized.blocks],
@@ -471,6 +472,9 @@ class ParseWorker:
 
         self.repository.update_task_progress(task.id, token, stage="publishing")
         config_summary = self.client.config_summary()
+        if fmt=='md':
+            from app.markdown_document import MARKDOWN_STRUCTURE_VERSION
+            config_summary=dict(config_summary,markdown_structure=MARKDOWN_STRUCTURE_VERSION,markdown_parser=parser_version)
         health = (task.request_summary or {}).get('pdf_text_health')
         if health:
             config_summary = dict(config_summary, force_ocr=health['force_ocr'], pdf_text_health=health)

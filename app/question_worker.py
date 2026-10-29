@@ -120,11 +120,11 @@ class QuestionWorker:
                 if stage!='stream_check':
                     from app.answer_stream_store import AnswerStreamStore
                     AnswerStreamStore(self.repository).append('question',job,'reset' if stage=='stream_started' else 'block',details)
-            elif stage in {"query_started", "generation_started", "composition_started"}:
+            elif stage in {"query_started", "generation_started", "composition_started",'semantic_review_started'}:
                 role = "embedding" if stage == "query_started" else "generation"
                 current_role = role
-                progress("retrieving" if role == "embedding" else "planning" if stage == "composition_started" else "generating",
-                         "正在查询并固定证据" if role == "embedding" else "正在选择证据和规划段落" if stage == "composition_started" else "正在生成回答")
+                progress("retrieving" if role == "embedding" else "planning" if stage == "composition_started" else 'validating' if stage=='semantic_review_started' else "generating",
+                         "正在查询并固定证据" if role == "embedding" else "正在选择证据和规划段落" if stage == "composition_started" else '正在只读复核事实、条件、覆盖与关系' if stage=='semantic_review_started' else "正在生成回答")
                 current_sequence = self.store.reserve(job_id, token, role)
                 if current_sequence is None:
                     check_active()
@@ -133,6 +133,17 @@ class QuestionWorker:
                 if isinstance(details.get("diagnostics"), dict):
                     if not self.store.save_checkpoint(job_id, token, role="evidence", payload=details["diagnostics"], sequence_no=None):
                         raise _Stopped("lease_lost", "执行租约已失效，本次执行不再继续")
+            elif stage in ('draft_completed','semantic_review_completed'):
+                name='draft_answer_checkpoint' if stage=='draft_completed' else 'semantic_review_checkpoint'
+                value=details['checkpoint'] if stage=='draft_completed' else details['report']
+                if not self.store.save_checkpoint(job_id,token,role='evidence',payload={name:value},diagnostics={name:value},
+                    sequence_no=current_sequence,elapsed_ms=_elapsed(call_started),provider_usage=details.get('provider_usage')):
+                    raise _Stopped('lease_lost','正文或复核检查点未保存，未发布结果')
+                current_sequence,call_started,current_role=None,None,None
+            elif stage=='semantic_review_input':
+                check_active();value={'semantic_review_input':details['request']}
+                if not self.store.save_checkpoint(job_id,token,role='evidence',payload=value,diagnostics=value,sequence_no=None):
+                    raise _Stopped('lease_lost','复核输入未保存，未发起请求')
             elif stage == "composition_completed":
                 checkpoint=details['checkpoint']
                 if not self.store.save_checkpoint(job_id,token,role='evidence',payload={'composition_checkpoint':checkpoint},
@@ -188,9 +199,12 @@ class QuestionWorker:
                 retrieval = self.store.checkpoint(job_id, "retrieval")
                 if retrieval is not None:
                     progress("evidence_ready", "复用已保存检索检查点，不重复查询向量")
+                evidence=self.store.checkpoint(job_id,'evidence') or {}
+                review_args=({'draft_checkpoint':evidence.get('draft_answer_checkpoint'),'review_checkpoint':evidence.get('semantic_review_checkpoint')}
+                    if snapshot.get('semantic_review',{}).get('enabled') else {})
                 outcome = self.rag.answer(job["document_id"], job["question"], snapshot=snapshot,
                                           observer=observer, retrieval_checkpoint=retrieval,
-                                          composition_checkpoint=(self.store.checkpoint(job_id,'evidence') or {}).get('composition_checkpoint'))
+                                          composition_checkpoint=evidence.get('composition_checkpoint'),**review_args)
                 answer = RagAnswer.model_validate(outcome.answer).model_dump()
                 # 正常返回的内容均已走 RAG 严格校验，不保存上游原始模型响应。
                 if not self.store.save_checkpoint(job_id, token, role="answer", payload=answer,
@@ -217,7 +231,7 @@ class QuestionWorker:
                 call_status="uncertain" if uncertain else "failed", elapsed_ms=_elapsed(call_started), provider_usage=provider_usage(),not_sent=getattr(exc,'not_sent',False))
             logger.warning("问答任务 %s request_id=%s 失败 code=%s", job_id, job["request_id"], code)
         except RagError as exc:
-            self.store.finish(job_id, token, status="failed", code=exc.code,
+            self.store.finish(job_id, token, status="needs_attention" if exc.code=='semantic_review_uncertain' else 'failed', code=exc.code,
                 message=("模型输出未通过结构或引用校验，未发布回答" if exc.code == "rag_output_invalid" else
                          "问答证据、输入范围或模型配置校验失败，未发布回答"), elapsed_ms=_elapsed(call_started), provider_usage=provider_usage())
             logger.warning("问答任务 %s request_id=%s 失败 code=%s", job_id, job["request_id"], exc.code)

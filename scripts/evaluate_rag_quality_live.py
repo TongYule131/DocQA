@@ -122,7 +122,7 @@ def freeze_run(directory, frozen, repair_revision=None):
 def revalidate_saved_answer(record, request, raw, pack, *, case, snapshot, prior_snapshot):
     """仅复用相同输入/提示词的成功生成；重新走当前严格解析和来源边界。"""
     from app.rag_composition import needs_plan,refine_pack,writer_prompt
-    current=snapshot.get('answer_contract_version')=='fact-context-parts-v8'
+    current=snapshot.get('answer_contract_version') in {'fact-context-parts-v8','fact-context-parts-v9'}
     if current:
         if needs_plan(case['question']):raise EvaluationStopped('缺少复杂题原始规划检查点，不复用')
         pack=refine_pack(pack)

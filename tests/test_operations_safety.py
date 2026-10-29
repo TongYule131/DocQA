@@ -17,6 +17,7 @@ from app.runtime import RuntimeGuard,RuntimeMismatch
 from app.maintenance import maintenance
 from app.data_backup import backup
 from app.local_supervisor import roles_ready
+from app.migrations import SCHEMA_VERSION
 from app.uploads import store_upload
 
 
@@ -34,7 +35,7 @@ def test_maintenance_and_live_roles_exclude_each_other(tmp_path):
     try:
         with pytest.raises(RuntimeError):backup(tmp_path,tmp_path.parent/(tmp_path.name+'-blocked-backup'))
     finally:guard.release_lifecycle()
-    assert backup(tmp_path,tmp_path.parent/(tmp_path.name+'-allowed-backup'))['schema_version']==16
+    assert backup(tmp_path,tmp_path.parent/(tmp_path.name+'-allowed-backup'))['schema_version']==SCHEMA_VERSION
 
 
 def test_queue_timeout_releases_quota_without_provider_calls(tmp_path):

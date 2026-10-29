@@ -6,8 +6,8 @@ import re
 
 from app.rag_validation import ModelOutputError, parse_model_output, validate_model_output
 
-ANSWER_CONTRACT_VERSION = "fact-context-parts-v8"
-SUPPORTED_CONTRACT_VERSIONS = {"fact-context-parts-v1", "fact-context-parts-v2", "fact-context-parts-v3", "fact-context-parts-v4", "fact-context-parts-v5", "fact-context-parts-v6", "fact-context-parts-v7", ANSWER_CONTRACT_VERSION}
+ANSWER_CONTRACT_VERSION = "fact-context-parts-v9"
+SUPPORTED_CONTRACT_VERSIONS = {"fact-context-parts-v1", "fact-context-parts-v2", "fact-context-parts-v3", "fact-context-parts-v4", "fact-context-parts-v5", "fact-context-parts-v6", "fact-context-parts-v7", "fact-context-parts-v8", ANSWER_CONTRACT_VERSION}
 CONTEXT_LABELS = {"subject": "对象", "period": "期间", "unit": "单位",
                   "scope": "范围", "condition": "限定", "role": "用途"}
 # 紧接数字或百分号的连字符属于区间分隔，中文/英文后的一元正负号仍须保留。
@@ -82,15 +82,20 @@ def _without_known_section_locators(value,evidence,section_headings=None):
 
 
 # 旧离线调用默认按原v3读取；生产必须显式传入任务冻结的协议版本，禁止失败后降级。
-def validate_task_output(raw, evidence, *, question, contract_version="fact-context-parts-v3", _claim_sources=None,_section_headings=None,_whole_answer=True):
+def validate_task_output(raw, evidence, *, question, contract_version="fact-context-parts-v3", _claim_sources=None,_section_headings=None,_whole_answer=True,_expected_parts=None):
     if not isinstance(contract_version, str) or contract_version not in SUPPORTED_CONTRACT_VERSIONS:
         _fail("unsupported_contract_version")
-    if contract_version == ANSWER_CONTRACT_VERSION:
+    if contract_version in {'fact-context-parts-v8',ANSWER_CONTRACT_VERSION}:
         payload=parse_model_output(raw)
         if 'presentation' not in payload:_fail('presentation_missing')
         presentation=payload.pop('presentation')
+        if _whole_answer and isinstance(payload.get('conclusion'),list) and isinstance(payload.get('explanation'),list):
+            from app.rag_presentation import validate_fact_progress
+            validate_fact_progress(payload['conclusion']+payload['explanation'])
         from app.rag_claim_evidence import validate_unit_output
-        output=validate_unit_output(json.dumps(payload,ensure_ascii=False),evidence,question=question,declare_parts=True,derive_refs=True)
+        from app.question_obligations import answer_question_parts
+        expected_parts=answer_question_parts(question) if contract_version==ANSWER_CONTRACT_VERSION else question_parts(question)
+        output=validate_unit_output(json.dumps(payload,ensure_ascii=False),evidence,question=question,declare_parts=True,derive_refs=True,expected_parts=expected_parts)
         from app.rag_presentation import validate_presentation
         from app.rag_answer_strategy import presentation_policy
         output.presentation=validate_presentation(presentation,output.conclusion+output.explanation,**presentation_policy(question))
@@ -188,7 +193,7 @@ def validate_task_output(raw, evidence, *, question, contract_version="fact-cont
         fact.context = accepted
     if total > 4000:
         _fail("text_too_long")
-    expected = question_parts(question)
+    expected = question_parts(question) if _expected_parts is None else _expected_parts
     if len(parts) != len(expected):
         _fail("coverage_mismatch")
     states, assigned, gaps = [], set(), []

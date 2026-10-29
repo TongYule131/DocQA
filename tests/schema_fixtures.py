@@ -1,5 +1,7 @@
-"""旧版本夹具撤销v16增量，禁止只改迁移登记伪造历史schema。"""
+"""旧版本夹具撤销v17／v16增量，禁止只改迁移登记伪造历史schema。"""
 def remove_v16(db):
+    for table in ('product_account_events','product_account_state'):
+        db.execute(f'DROP TABLE IF EXISTS {table}')
     for table in ('feedback_evidence','feedback_cases','conversation_clarifications','intent_semantic_examples',
         'intent_semantic_policy','storage_reservations','document_storage_owners'):
         db.execute(f'DROP TABLE IF EXISTS {table}')

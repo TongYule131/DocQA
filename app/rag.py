@@ -148,6 +148,7 @@ class RagService:
 
     def _configuration_signature(self) -> str:
         """冻结实际影响问答的非凭证配置；排队后改配置不能静默扩大输入或费用。"""
+        from app.answer_semantic_review import policy as review_policy
         names = ("deepseek_base_url", "deepseek_model", "deepseek_thinking",
                  "deepseek_reasoning_effort", "deepseek_max_tokens", "rag_retrieval_k",
                  "rag_context_k", "rag_context_max_chars", "rag_input_max_chars", "rag_min_score")
@@ -166,6 +167,7 @@ class RagService:
         payload["answer_strategy_signature"] = policy_signature()
         from app.rag_composition import COMPOSITION_VERSION
         payload["composition_version"] = COMPOSITION_VERSION
+        payload['semantic_review']=review_policy(self.settings)
         from app.rag_extract_context import SELECTION_VERSION
         from app.rag_support_review import REVIEW_VERSION
         payload['evidence_selection_version']=SELECTION_VERSION
@@ -220,11 +222,13 @@ class RagService:
         from app.rag_answer_strategy import strategy_for_question
         from app.rag_composition import needs_plan
         from app.query_understanding import policy
+        from app.answer_semantic_review import policy as review_policy,enabled as review_enabled
         frozen = {
             'reranker_input_hash':policy(self.settings)['reranker_replay_hash'],
             "answer_strategy":strategy_for_question(question),
             "composition_version":"evidence-composition-v1",
-            "provider_requests_expected":2+int(needs_plan(question)),
+            "provider_requests_expected":2+int(needs_plan(question))+int(review_enabled(self.settings)),
+            'semantic_review':review_policy(self.settings),
             'stream_protocol':STREAM_VERSION,
             'evidence_selection_version':SELECTION_VERSION,
             'claim_review_version':REVIEW_VERSION,
@@ -251,11 +255,16 @@ class RagService:
         return frozen
 
     def answer(self, document_id: str, question: str, *, snapshot: dict | None = None,
-               observer=None, retrieval_checkpoint: dict | None = None, composition_checkpoint: dict | None = None) -> RagOutcome:
+               observer=None, retrieval_checkpoint: dict | None = None, composition_checkpoint: dict | None = None,
+               draft_checkpoint=None,review_checkpoint=None) -> RagOutcome:
         started = time.perf_counter()
         # observer 的异常必须向上传递：失去租约、取消或预算不足时不能继续收费。
         emit = observer or (lambda _stage, _details: None)
         frozen = snapshot
+        from app.answer_semantic_review import enabled as review_enabled
+        if frozen is None and review_enabled(self.settings):
+            raise RagError(409,'semantic_review_requires_task','启用语义复核时请使用持久化问答任务，旧同步入口不发起额外请求')
+        review_on=bool(frozen and frozen.get('semantic_review',{}).get('enabled'))
         if frozen is None:
             document, start_version_id, info = self._preflight(document_id)
         else:
@@ -403,9 +412,11 @@ class RagService:
                 retrieval_ms=retrieval_ms, started=started, generated=False)
             if frozen is not None:
                 outcome.answer.prompt_version = TASK_PROMPT_VERSION
-                if frozen.get('answer_contract_version')=='fact-context-parts-v8':
+                if frozen.get('answer_contract_version') in {'fact-context-parts-v8','fact-context-parts-v9'}:
                     outcome.answer.presentation={'blocks':[]}
                 from app.rag_answer_contract import question_parts
+                if frozen.get('answer_contract_version')=='fact-context-parts-v9':
+                    from app.question_obligations import answer_question_parts as question_parts
                 outcome.answer.answer_parts = [RagAnswerPart(**part, state="missing_evidence", fact_indices=[],
                     missing_detail="本次没有可送入生成模型的合格证据片段。") for part in question_parts(question)]
             return outcome
@@ -414,6 +425,8 @@ class RagService:
             raise RagError(503, "provider_not_configured",
                            "尚未配置 DEEPSEEK_API_KEY，请填写本地 .env 后重启服务")
 
+        from copy import deepcopy
+        review_pack=deepcopy(pack) if review_on else None
         composition_plan=None
         if frozen is not None:
             from app.rag_composition import prepare_composition, writer_prompt, validate_writer_plan
@@ -442,9 +455,16 @@ class RagService:
         generation_started = time.perf_counter()
         if frozen is not None:
             self._verify_table_snapshot(frozen)
-        emit("generation_started", {})
+        from app.answer_semantic_review import fingerprint as review_fingerprint
+        writer_input_hash=review_fingerprint([system_prompt,user_prompt])
+        if draft_checkpoint is not None:
+            if not review_on or draft_checkpoint.get('input_hash')!=writer_input_hash:
+                raise RagError(409,'draft_checkpoint_changed','已保存正文与冻结输入不一致，未重新生成')
+            raw=json.dumps(draft_checkpoint['protocol'],ensure_ascii=False)
+        else:emit("generation_started", {})
         from app.answer_stream import STREAM_VERSION, FactStreamParser, checked_block
-        if frozen and frozen.get('stream_protocol')==STREAM_VERSION and hasattr(self.model,'generate_stream') and observer:
+        if draft_checkpoint is not None:pass
+        elif frozen and frozen.get('stream_protocol')==STREAM_VERSION and hasattr(self.model,'generate_stream') and observer:
             def completed(category,ordinal,fact):
                 block=checked_block(category,ordinal,fact,pack,question,self)
                 block['presentation_block']=parser.presentation_block(category,ordinal)
@@ -494,10 +514,31 @@ class RagService:
             answer.prompt_version = TASK_PROMPT_VERSION
             answer.missing_points = list(validated.missing_points)
             answer.answer_parts = [RagAnswerPart(**part) for part in validated.answer_parts]
+        if review_on:
+            from app.answer_semantic_review import request as review_request,messages,validate as validate_review,require_accept
+            if draft_checkpoint is None:
+                from app.rag_validation import parse_model_output
+                emit('draft_completed',{'checkpoint':{'input_hash':writer_input_hash,'protocol':parse_model_output(raw)},
+                    'provider_usage':getattr(self.model,'last_call_metadata',None)})
+            value=review_request(question,review_pack,answer)
+            review_system,review_user=messages(value)
+            if len(review_system)+len(review_user)>self.settings.question_input_max_chars:
+                raise RagError(422,'semantic_review_input_too_large','复核输入超过预算，保留已生成正文，不发起复核或发布')
+            try:
+                if review_checkpoint is not None:report=validate_review(review_checkpoint,value)
+                else:
+                    emit('semantic_review_input',{'request':value})
+                    emit('semantic_review_started',{})
+                    report=validate_review(self.model.generate(review_system,review_user),value)
+                    emit('semantic_review_completed',{'report':report,'provider_usage':getattr(self.model,'last_call_metadata',None)})
+                require_accept(report)
+            except ModelOutputError as exc:
+                raise RagError(502,exc.reason,'语义复核未通过，未发布回答；原正文和费用记录保留') from None
+            answer.quality_review=report
         return RagOutcome(answer=answer, diagnostics={
             "selected": [{"reference_id": item.reference_id, "chunk_id": item.chunk_id,
                           "page": item.page, "text": item.text,
-                          "document_id": item.document_id} for item in pack.items],
+                          "document_id": item.document_id} for item in (review_pack.items if review_on else pack.items)],
             "dropped_candidates": len(pack.drop_reasons),
             "context_chars": pack.context_chars,
             "input_chars": len(system_prompt) + len(user_prompt),

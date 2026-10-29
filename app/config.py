@@ -101,6 +101,8 @@ class Settings:
     query_planner_enabled: bool = False
     semantic_intent_enabled: bool = False
     memory_summary_enabled: bool = False
+    # 增加一次有界复核HTTP；付费计划关闭时默认不启用，必须显式部署配置。
+    answer_semantic_review_enabled: bool = False
     active_global_limit: int = 4
     active_user_limit: int = 1
     queue_global_limit: int = 100
@@ -194,6 +196,7 @@ class Settings:
             query_term_mapping=value("DOCQA_QUERY_TERM_MAPPING", "{}"),
             query_planner_enabled=value("DOCQA_QUERY_PLANNER_ENABLED", "0") == "1",
             semantic_intent_enabled=value("DOCQA_SEMANTIC_INTENT_ENABLED", "0") == "1",
+            answer_semantic_review_enabled=value("DOCQA_ANSWER_SEMANTIC_REVIEW_ENABLED", "0") == "1",
             memory_summary_enabled=value("DOCQA_MEMORY_SUMMARY_ENABLED", "0") == "1",
             active_global_limit=int(value("DOCQA_ACTIVE_GLOBAL_LIMIT", "4")),
             active_user_limit=int(value("DOCQA_ACTIVE_USER_LIMIT", "1")),
@@ -218,6 +221,7 @@ class Settings:
         )
 
     def __post_init__(self):
+        if type(self.answer_semantic_review_enabled) is not bool:raise ValueError('answer_semantic_review_enabled必须是布尔值')
         from app.query_understanding import term_mapping
         term_mapping(self)
         if (any(type(getattr(self,k)) is not int or not 1<=getattr(self,k)<=1000000 for k in ('queue_wait_seconds','storage_global_mb','storage_user_mb'))

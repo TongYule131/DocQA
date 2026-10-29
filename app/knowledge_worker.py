@@ -244,6 +244,9 @@ class KnowledgeWorker:
             def generate_plan():return self.model.generate(plan_system,plan_user),getattr(self.model,'last_call_metadata',None)
             with self.tasks.span(job,'证据选材与段落规划','COMPOSITION',parent):
                 return self.tasks.call(job,'generation',generate_plan,checkpoint='composition_plan',validate=validate)
+        from copy import deepcopy
+        review_on=payload.get('semantic_review',{}).get('enabled',False)
+        review_pack=deepcopy(pack) if review_on else None
         pack,composition_plan,_=prepare_composition(pack,payload['question'],obtain_plan)
         items=pack.items
         self.tasks.stage(job['id'],job['lease_token'],'generating')
@@ -310,7 +313,7 @@ class KnowledgeWorker:
             from app.intent_execution import execution_contract
             answer=render_answer(checked)
             if checked.status=='insufficient_evidence':answer=INSUFFICIENT_EVIDENCE_TEXT
-            return dict(answer_id='kanswer-'+job['id'],answer=answer,status=checked.status,conclusion=facts,explanation=explanation,presentation=checked.presentation,
+            result=dict(answer_id='kanswer-'+job['id'],answer=answer,status=checked.status,conclusion=facts,explanation=explanation,presentation=checked.presentation,
                 citations=[dict(c.model_dump(),filename=names[c.document_id]) for c in citations],clarification_questions=checked.clarification_questions,
                 missing_points=checked.missing_points,answer_parts=checked.answer_parts,prompt_version=KNOWLEDGE_PROMPT_VERSION,
                 limitations=['只依据本轮入选资料作答，来源匹配不等于全部语义已自动认证']+(['上下文预算限制了入选证据范围'] if pack.truncated else [])+
@@ -318,3 +321,27 @@ class KnowledgeWorker:
                 retrieval={'candidate_count':len(pack.candidates),'selected_count':len(items),'context_chars':pack.context_chars,
                     'truncated':pack.truncated,'slots':pack.slot_hints,'math_evidence':pack.math_hints,'coverage':diagnostics['coverage']},route=route['code'],snapshot_id=payload['snapshot_id'],
                 execution=execution_contract(route,payload['understanding'],plan))
+            if review_on:
+                from app.answer_semantic_review import request as review_request,messages,validate as validate_review,require_accept
+                from app.rag_validation import ModelOutputError
+                value=review_request(payload['question'],review_pack,result);review_system,review_user=messages(value)
+                if len(review_system)+len(review_user)>self.settings.question_input_max_chars:
+                    raise TaskStopped('semantic_review_input_too_large','复核输入超过预算，保留正文，未发起复核或发布')
+                self.tasks.save_local_resolution(job,value,name='semantic_review_input')
+                self.tasks.stage(job['id'],job['lease_token'],'validating')
+                def review():
+                    try:self.check(job)
+                    except TaskStopped as exc:
+                        exc.not_sent=True
+                        raise
+                    return self.model.generate(review_system,review_user),getattr(self.model,'last_call_metadata',None)
+                self.check(job)
+                with self.tasks.span(job,'事实条件覆盖与关系只读复核','SEMANTIC_REVIEW',parent):
+                    report=self.tasks.call(job,'generation',review,checkpoint='semantic_review',validate=lambda raw:validate_review(raw,value))
+                self.check(job)
+                try:require_accept(report)
+                except ModelOutputError as exc:
+                    raise TaskStopped(exc.reason,'语义复核未通过；正文、原结果和费用记录保留',
+                        'needs_attention' if report['verdict']=='uncertain' else 'failed') from None
+                result['quality_review']=report
+            return result

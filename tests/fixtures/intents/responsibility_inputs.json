@@ -1,0 +1,745 @@
+{
+  "version": "docqa-intent-runtime-inputs-v1",
+  "mode": "offline-production-orchestration-with-stubs",
+  "settings": {
+    "semantic_intent_enabled": false,
+    "query_planner_enabled": false,
+    "memory_summary_enabled": false,
+    "reranker_replay_path": "",
+    "question_max_requests": 8,
+    "team_mode": true,
+    "session_cookie_secure": false
+  },
+  "corpora": {
+    "development": [
+      {
+        "key": "manual",
+        "filename": "检修与仓储手册.txt",
+        "paragraphs": [
+          "检修手册规定，停机检查前应切断电源并挂牌。",
+          "设备启用前须完成检查且由值班人员确认。",
+          "分层检验法仅适用于已完成预处理的批次。",
+          "仓储手册要求先核验到货记录，再检查包装并登记异常。"
+        ]
+      }
+    ],
+    "calibration": [
+      {
+        "key": "borrow",
+        "filename": "借用与值班规程.txt",
+        "paragraphs": [
+          "借用仅限临时使用，借用人须按期归还并保持物品完好。",
+          "同类设备须经值班人员复核后启用。",
+          "值班交接须核对记录并当面交接。"
+        ]
+      },
+      {
+        "key": "receive",
+        "filename": "领用与启用规程.txt",
+        "paragraphs": [
+          "领用用于持续岗位需要，领用人负责保管；停用后登记交还。",
+          "同类设备须由检验人员签字后启用。",
+          "资料中的核实今天余量指核对记录中的当日余量，不代表已获取实时读数。"
+        ]
+      }
+    ],
+    "holdout": [
+      {
+        "key": "water",
+        "filename": "灌溉与水务规程.txt",
+        "paragraphs": [
+          "灌溉前须关闭旁路并检查阀门，禁止带压检修。",
+          "记录中当前时点变量指记录采集的时间，不表示现时测量。",
+          "检修前须关闭进水阀，并由值班人员确认隔离状态。",
+          "防汛方案要求巡查河岸并及时报告渗漏。"
+        ]
+      },
+      {
+        "key": "pump",
+        "filename": "泵站检修规程.txt",
+        "paragraphs": [
+          "泵站检修前须切断电源，并由检修人员确认停电状态。"
+        ]
+      }
+    ]
+  },
+  "cases": {
+    "IR-D01": {
+      "scenario": "normal",
+      "selected_documents": "manual",
+      "response": {
+        "text": "检修手册规定，停机检查前应切断电源并挂牌。",
+        "quote_texts": [
+          "检修手册规定，停机检查前应切断电源并挂牌。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-D02": {
+      "scenario": "normal",
+      "response": {
+        "text": "检修手册规定，停机检查前应切断电源并挂牌。",
+        "quote_texts": [
+          "检修手册规定，停机检查前应切断电源并挂牌。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      },
+      "selected_documents": "manual"
+    },
+    "IR-D03": {
+      "scenario": "normal",
+      "response": {
+        "text": "设备启用前须完成检查且由值班人员确认。",
+        "quote_texts": [
+          "设备启用前须完成检查且由值班人员确认。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      },
+      "selected_documents": "manual"
+    },
+    "IR-D04": {
+      "scenario": "normal",
+      "selected_documents": "manual",
+      "response": {
+        "text": "检修手册规定，停机检查前应切断电源并挂牌。",
+        "quote_texts": [
+          "检修手册规定，停机检查前应切断电源并挂牌。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-D06": {
+      "scenario": "normal",
+      "selected_documents": "manual",
+      "response": {
+        "text": "检修手册规定，停机检查前应切断电源并挂牌。",
+        "quote_texts": [
+          "检修手册规定，停机检查前应切断电源并挂牌。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-D07": {
+      "scenario": "normal",
+      "selected_documents": "manual",
+      "response": {
+        "text": "检修手册规定，停机检查前应切断电源并挂牌。",
+        "quote_texts": [
+          "检修手册规定，停机检查前应切断电源并挂牌。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-D12": {
+      "scenario": "normal",
+      "response": {
+        "text": "仓储手册要求先核验到货记录，再检查包装并登记异常。",
+        "quote_texts": [
+          "仓储手册要求先核验到货记录，再检查包装并登记异常。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      },
+      "selected_documents": "manual"
+    },
+    "IR-D05": {
+      "scenario": "normal",
+      "entity_names": [
+        "分层检验法"
+      ],
+      "response": {
+        "text": "分层检验法仅适用于已完成预处理的批次。",
+        "quote_texts": [
+          "分层检验法仅适用于已完成预处理的批次。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      },
+      "selected_documents": "manual"
+    },
+    "IR-D08": {
+      "scenario": "tool_complete",
+      "selected_documents": "manual",
+      "tool": {
+        "properties": {
+          "warehouse": {
+            "type": "string",
+            "title": "库位"
+          },
+          "product": {
+            "type": "string",
+            "title": "货号"
+          }
+        },
+        "required": [
+          "warehouse",
+          "product"
+        ],
+        "initial_arguments": {
+          "warehouse": "甲库",
+          "product": "货甲"
+        },
+        "command": "执行已登记的库位查询：库位=甲库，货号=货甲。"
+      },
+      "response": {
+        "text": "检修手册规定，停机检查前应切断电源并挂牌。",
+        "quote_texts": [
+          "检修手册规定，停机检查前应切断电源并挂牌。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-D09": {
+      "scenario": "tool_missing",
+      "selected_documents": "manual",
+      "tool": {
+        "properties": {
+          "warehouse": {
+            "type": "string",
+            "title": "库位"
+          },
+          "product": {
+            "type": "string",
+            "title": "货号"
+          }
+        },
+        "required": [
+          "warehouse",
+          "product"
+        ],
+        "initial_arguments": {
+          "warehouse": "甲库",
+          "product": null
+        },
+        "command": "执行已登记的库位查询：库位=甲库。"
+      },
+      "response": {
+        "text": "检修手册规定，停机检查前应切断电源并挂牌。",
+        "quote_texts": [
+          "检修手册规定，停机检查前应切断电源并挂牌。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-D10": {
+      "scenario": "foreign_temporary",
+      "selected_documents": "manual",
+      "response": {
+        "text": "检修手册规定，停机检查前应切断电源并挂牌。",
+        "quote_texts": [
+          "检修手册规定，停机检查前应切断电源并挂牌。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-D11": {
+      "scenario": "revoke_before_worker",
+      "selected_documents": "manual",
+      "response": {
+        "text": "检修手册规定，停机检查前应切断电源并挂牌。",
+        "quote_texts": [
+          "检修手册规定，停机检查前应切断电源并挂牌。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-C01": {
+      "scenario": "normal",
+      "response": {
+        "text": "值班交接须核对记录并当面交接。",
+        "quote_texts": [
+          "值班交接须核对记录并当面交接。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      },
+      "selected_documents": "borrow"
+    },
+    "IR-C02": {
+      "scenario": "normal",
+      "response": {
+        "text": "资料中的核实今天余量指核对记录中的当日余量，不代表已获取实时读数。",
+        "quote_texts": [
+          "资料中的核实今天余量指核对记录中的当日余量，不代表已获取实时读数。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      },
+      "selected_documents": "receive"
+    },
+    "IR-C03": {
+      "scenario": "normal",
+      "response": {
+        "text": "借用适用于临时使用并须按期完好归还；领用面向持续岗位需要，由领用人保管并在停用后登记交还。",
+        "quote_texts": [
+          "借用仅限临时使用，借用人须按期归还并保持物品完好。",
+          "领用用于持续岗位需要，领用人负责保管；停用后登记交还。"
+        ],
+        "claim_type": "inference",
+        "missing_part_ids": []
+      },
+      "selected_documents": "*"
+    },
+    "IR-C10": {
+      "scenario": "normal",
+      "selected_documents": "borrow",
+      "query_vector": [
+        0.0,
+        1.0
+      ],
+      "settings": {
+        "rag_min_score": 0.99
+      },
+      "response": {
+        "text": "值班交接须核对记录并当面交接。",
+        "quote_texts": [
+          "值班交接须核对记录并当面交接。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-C11": {
+      "scenario": "normal",
+      "response": {
+        "text": "两份规程分别要求值班人员复核和检验人员签字后启用，应保留各自条件，不能自行确定哪份更新。",
+        "quote_texts": [
+          "同类设备须经值班人员复核后启用。",
+          "同类设备须由检验人员签字后启用。"
+        ],
+        "claim_type": "inference",
+        "missing_part_ids": []
+      },
+      "selected_documents": "*"
+    },
+    "IR-C04": {
+      "scenario": "waiting_upload",
+      "selected_documents": "borrow",
+      "response": {
+        "text": "值班交接须核对记录并当面交接。",
+        "quote_texts": [
+          "值班交接须核对记录并当面交接。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-C05": {
+      "scenario": "tool_credentials_missing",
+      "selected_documents": "borrow",
+      "tool": {
+        "properties": {
+          "point": {
+            "type": "string",
+            "title": "配送点"
+          }
+        },
+        "required": [
+          "point"
+        ],
+        "initial_arguments": {
+          "point": "乙站"
+        },
+        "continuation_arguments": {
+          "point": "乙站",
+          "date": "本周一"
+        },
+        "confirmed_values": [
+          "本周一"
+        ],
+        "command": "执行已登记的配送查询：配送点=乙站。"
+      },
+      "response": {
+        "text": "值班交接须核对记录并当面交接。",
+        "quote_texts": [
+          "值班交接须核对记录并当面交接。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-C06": {
+      "scenario": "tool_continue",
+      "selected_documents": "borrow",
+      "tool": {
+        "properties": {
+          "point": {
+            "type": "string",
+            "title": "配送点"
+          },
+          "date": {
+            "type": "string",
+            "title": "日期"
+          }
+        },
+        "required": [
+          "point",
+          "date"
+        ],
+        "initial_arguments": {
+          "point": "乙站",
+          "date": null
+        },
+        "continuation_arguments": {
+          "point": "乙站",
+          "date": "本周一"
+        },
+        "confirmed_values": [
+          "本周一"
+        ],
+        "command": "执行已登记的配送查询：配送点=乙站。"
+      },
+      "response": {
+        "text": "值班交接须核对记录并当面交接。",
+        "quote_texts": [
+          "值班交接须核对记录并当面交接。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-C07": {
+      "scenario": "tool_change_known_parameter",
+      "selected_documents": "borrow",
+      "tool": {
+        "properties": {
+          "point": {
+            "type": "string",
+            "title": "配送点"
+          },
+          "date": {
+            "type": "string",
+            "title": "日期"
+          }
+        },
+        "required": [
+          "point",
+          "date"
+        ],
+        "initial_arguments": {
+          "point": "乙站",
+          "date": null
+        },
+        "continuation_arguments": {
+          "point": "丙站",
+          "date": "本周一"
+        },
+        "confirmed_values": [
+          "本周一"
+        ],
+        "command": "执行已登记的配送查询：配送点=乙站。"
+      },
+      "response": {
+        "text": "值班交接须核对记录并当面交接。",
+        "quote_texts": [
+          "值班交接须核对记录并当面交接。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-C08": {
+      "scenario": "cancelled_confirmation",
+      "selected_documents": "borrow",
+      "tool": {
+        "properties": {
+          "point": {
+            "type": "string",
+            "title": "配送点"
+          },
+          "date": {
+            "type": "string",
+            "title": "日期"
+          }
+        },
+        "required": [
+          "point",
+          "date"
+        ],
+        "initial_arguments": {
+          "point": "乙站",
+          "date": null
+        },
+        "continuation_arguments": {
+          "point": "乙站",
+          "date": "本周一"
+        },
+        "confirmed_values": [
+          "本周一"
+        ],
+        "command": "执行已登记的配送查询：配送点=乙站。"
+      },
+      "response": {
+        "text": "值班交接须核对记录并当面交接。",
+        "quote_texts": [
+          "值班交接须核对记录并当面交接。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-C09": {
+      "scenario": "foreign_filter",
+      "selected_documents": "borrow",
+      "response": {
+        "text": "值班交接须核对记录并当面交接。",
+        "quote_texts": [
+          "值班交接须核对记录并当面交接。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-C12": {
+      "scenario": "configuration_mismatch",
+      "selected_documents": "borrow",
+      "response": {
+        "text": "值班交接须核对记录并当面交接。",
+        "quote_texts": [
+          "值班交接须核对记录并当面交接。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-H01": {
+      "scenario": "normal",
+      "response": {
+        "text": "灌溉前须关闭旁路并检查阀门，禁止带压检修。",
+        "quote_texts": [
+          "灌溉前须关闭旁路并检查阀门，禁止带压检修。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      },
+      "selected_documents": "water"
+    },
+    "IR-H02": {
+      "scenario": "normal",
+      "response": {
+        "text": "记录中当前时点变量指记录采集的时间，不表示现时测量。",
+        "quote_texts": [
+          "记录中当前时点变量指记录采集的时间，不表示现时测量。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      },
+      "selected_documents": "water"
+    },
+    "IR-H03": {
+      "scenario": "normal",
+      "selected_documents": "water",
+      "response": {
+        "text": "灌溉前须关闭旁路并检查阀门，禁止带压检修。",
+        "quote_texts": [
+          "灌溉前须关闭旁路并检查阀门，禁止带压检修。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-H04": {
+      "scenario": "normal",
+      "selected_documents": "water",
+      "response": {
+        "text": "灌溉前须关闭旁路并检查阀门，禁止带压检修。",
+        "quote_texts": [
+          "灌溉前须关闭旁路并检查阀门，禁止带压检修。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-H12": {
+      "scenario": "normal",
+      "response": {
+        "text": "防汛方案要求巡查河岸并及时报告渗漏。",
+        "quote_texts": [
+          "防汛方案要求巡查河岸并及时报告渗漏。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": [
+          "p2"
+        ]
+      },
+      "selected_documents": "water"
+    },
+    "IR-H05": {
+      "scenario": "normal",
+      "clear_entity_names": [
+        "旧灌溉法"
+      ],
+      "selected_documents": "water",
+      "response": {
+        "text": "灌溉前须关闭旁路并检查阀门，禁止带压检修。",
+        "quote_texts": [
+          "灌溉前须关闭旁路并检查阀门，禁止带压检修。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-H06": {
+      "scenario": "normal",
+      "top_k": 1,
+      "response": {
+        "text": "检修前须关闭进水阀，并由值班人员确认隔离状态。",
+        "quote_texts": [
+          "检修前须关闭进水阀，并由值班人员确认隔离状态。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      },
+      "selected_documents": "water"
+    },
+    "IR-H07": {
+      "scenario": "tool_http_failure",
+      "selected_documents": "water",
+      "tool": {
+        "properties": {
+          "gate": {
+            "type": "string",
+            "title": "闸号"
+          }
+        },
+        "required": [
+          "gate"
+        ],
+        "initial_arguments": {
+          "gate": "闸甲"
+        },
+        "command": "执行已登记的闸门状态查询：闸号=闸甲。",
+        "confirmed_values": [
+          "闸甲"
+        ]
+      },
+      "response": {
+        "text": "灌溉前须关闭旁路并检查阀门，禁止带压检修。",
+        "quote_texts": [
+          "灌溉前须关闭旁路并检查阀门，禁止带压检修。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-H08": {
+      "scenario": "tool_uncertain",
+      "selected_documents": "water",
+      "tool": {
+        "properties": {
+          "station": {
+            "type": "string",
+            "title": "测站"
+          }
+        },
+        "required": [
+          "station"
+        ],
+        "initial_arguments": {
+          "station": "站甲"
+        },
+        "command": "执行已登记的水量查询：测站=站甲。",
+        "confirmed_values": [
+          "站甲"
+        ]
+      },
+      "response": {
+        "text": "灌溉前须关闭旁路并检查阀门，禁止带压检修。",
+        "quote_texts": [
+          "灌溉前须关闭旁路并检查阀门，禁止带压检修。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-H09": {
+      "scenario": "tool_disabled_confirmation",
+      "selected_documents": "water",
+      "tool": {
+        "properties": {
+          "gate": {
+            "type": "string",
+            "title": "闸号"
+          }
+        },
+        "required": [
+          "gate"
+        ],
+        "initial_arguments": {
+          "gate": null
+        },
+        "command": "执行已登记的闸门状态查询。",
+        "confirmed_values": [
+          "闸甲"
+        ],
+        "continuation_arguments": {
+          "gate": "闸甲"
+        }
+      },
+      "response": {
+        "text": "灌溉前须关闭旁路并检查阀门，禁止带压检修。",
+        "quote_texts": [
+          "灌溉前须关闭旁路并检查阀门，禁止带压检修。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-H10": {
+      "scenario": "foreign_confirmation",
+      "selected_documents": "water",
+      "tool": {
+        "properties": {
+          "station": {
+            "type": "string",
+            "title": "测站"
+          }
+        },
+        "required": [
+          "station"
+        ],
+        "initial_arguments": {
+          "station": null
+        },
+        "command": "执行已登记的水量查询。",
+        "confirmed_values": [
+          "站甲"
+        ],
+        "continuation_arguments": {
+          "station": "站甲"
+        }
+      },
+      "response": {
+        "text": "灌溉前须关闭旁路并检查阀门，禁止带压检修。",
+        "quote_texts": [
+          "灌溉前须关闭旁路并检查阀门，禁止带压检修。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    },
+    "IR-H11": {
+      "scenario": "expired_temporary",
+      "selected_documents": "water",
+      "response": {
+        "text": "灌溉前须关闭旁路并检查阀门，禁止带压检修。",
+        "quote_texts": [
+          "灌溉前须关闭旁路并检查阀门，禁止带压检修。"
+        ],
+        "claim_type": "direct",
+        "missing_part_ids": []
+      }
+    }
+  },
+  "provider_contract": "供应商边界为桩；计划只按实际选项ID绑定冻结的quote_texts，不读取预期标签；写作只输出冻结正文，不润色。入口走实际认证/CSRF/路由；每题独立目录。"
+}

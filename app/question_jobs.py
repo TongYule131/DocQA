@@ -432,7 +432,7 @@ class QuestionJobStore:
                 if any(a.support_review!=b.support_review for a,b in zip(
                         rechecked.conclusion+rechecked.explanation,validated.conclusion+validated.explanation)):
                     raise ValueError('claim_review_checkpoint_changed')
-            if snapshot.get("answer_contract_version") in {"fact-context-parts-v4","fact-context-parts-v5","fact-context-parts-v6","fact-context-parts-v7","fact-context-parts-v8"}:
+            if snapshot.get("answer_contract_version") in {"fact-context-parts-v4","fact-context-parts-v5","fact-context-parts-v6","fact-context-parts-v7","fact-context-parts-v8","fact-context-parts-v9"}:
                 if any(not citation.evidence_id or citation.source_reference_id is None for citation in validated.citations):
                     raise ValueError("result_citation_identity_missing")
                 if len({c.evidence_id for c in validated.citations}) != len(validated.citations):
@@ -455,7 +455,7 @@ class QuestionJobStore:
                 from app.rag_context import EvidenceItem, EvidencePack
                 from app.rag_validation import render_markdown, validate_user_condition_boundary
                 from app.rag_prompts import INSUFFICIENT_EVIDENCE_TEXT
-                is_v4 = snapshot["answer_contract_version"] in {"fact-context-parts-v4","fact-context-parts-v5","fact-context-parts-v6","fact-context-parts-v7","fact-context-parts-v8"}
+                is_v4 = snapshot["answer_contract_version"] in {"fact-context-parts-v4","fact-context-parts-v5","fact-context-parts-v6","fact-context-parts-v7","fact-context-parts-v8","fact-context-parts-v9"}
                 # v4发布时已逐条重算稳定ID和原文范围；用这些已核对范围重验数值、限定和覆盖。
                 # 不能把展示引述号再当输入片段号，也不能降级后直接相信落库的答案正文。
                 scoped_items = ([EvidenceItem(reference_id=c.reference_id, chunk_id=c.chunk_id,
@@ -482,9 +482,12 @@ class QuestionJobStore:
                             grouped.setdefault(c.source_reference_id,[]).append([c.char_start,c.char_end])
                         own_sources.append([admission.item_by_ref(ref).text[a:b] for ref,ranges in grouped.items()
                                             for a,b in merge_ranges(ranges)])
+                from app.question_obligations import answer_question_parts
                 checked = validate_task_output(_dump(payload), pack, question=row["question"],
                                                contract_version="fact-context-parts-v3" if is_v4 else snapshot["answer_contract_version"],
                                                _claim_sources=own_sources,
+                                               _expected_parts=(answer_question_parts(row['question'])
+                                                   if snapshot['answer_contract_version']=='fact-context-parts-v9' else None),
                                                _section_headings=[item.heading_path for item in admission.items] if is_v4 and snapshot.get('evidence_selection_version') else None)
                 for fact, stored in zip(checked.conclusion + checked.explanation, validated.conclusion + validated.explanation):
                     fact.claim_type = stored.claim_type
@@ -494,7 +497,7 @@ class QuestionJobStore:
                                                for c in validated.citations}
                     validate_user_condition_boundary(checked,admission,question=row['question'])
                 else:validate_user_condition_boundary(checked, pack, question=row["question"])
-                if snapshot['answer_contract_version']=='fact-context-parts-v8':
+                if snapshot['answer_contract_version'] in {'fact-context-parts-v8','fact-context-parts-v9'}:
                     from app.rag_presentation import validate_presentation
                     checked.presentation=validate_presentation(validated.presentation,checked.conclusion+checked.explanation)
                 expected_text = (INSUFFICIENT_EVIDENCE_TEXT if validated.status == "insufficient_evidence"
@@ -503,6 +506,9 @@ class QuestionJobStore:
                         or validated.prompt_version != snapshot.get("task_prompt_version")
                         or validated.answer != expected_text):
                     raise ValueError("result_contract_mismatch")
+            if snapshot.get('semantic_review',{}).get('enabled') and validated.status in {'answered','partial'}:
+                from app.answer_semantic_review import verify_publication
+                verify_publication(validated,admission,row['question'],evidence.get('semantic_review_checkpoint'))
             if validated.status in {"answered", "partial"} and not validated.conclusion:
                 raise ValueError("answered_without_conclusion")
             if (validated.status == "partial") != bool(validated.missing_points):
@@ -621,6 +627,8 @@ class QuestionJobService:
         job['provider_requests_expected']=0 if system_route else json.loads(row['snapshot_json']).get('provider_requests_expected',2)
         job['streaming']=bool(json.loads(row['snapshot_json']).get('stream_protocol')) and not system_route
         if not system_route and (self.store.checkpoint(job_id,'evidence') or {}).get('composition_checkpoint'):completed+=1
+        if not system_route and json.loads(row['snapshot_json']).get('semantic_review',{}).get('enabled'):
+            completed=min(job['provider_requests_expected'],sum(c['status']!='intent' for c in calls))
         job["steps_completed"], job["steps_total"] = completed, 1 if system_route else job['provider_requests_expected']
         job["requests_remaining"] = row["max_requests"] - row["requests_used"]
         document = self.repository.get(row["document_id"])
@@ -685,6 +693,10 @@ class QuestionJobService:
                 raise TaskConflict("已取消的任务不能重试，请重新提交问题")
             roles = {r[0] for r in db.execute("SELECT role FROM question_checkpoints WHERE job_id=?", (job_id,))}
             required = 0 if "answer" in roles else 1 if "retrieval" in roles else 2
+            snapshot=json.loads(row['snapshot_json'])
+            if snapshot.get('semantic_review',{}).get('enabled') and 'answer' not in roles:
+                evidence=self.store.checkpoint(job_id,'evidence') or {}
+                required=(0 if 'retrieval' in roles else 1)+(0 if evidence.get('draft_answer_checkpoint') else 1)+(0 if evidence.get('semantic_review_checkpoint') else 1)
             if row["max_requests"] - row["requests_used"] < required:
                 raise TaskConflict("问答任务剩余预算不足；重试不会重置预算，请查看调用记录")
             if key:

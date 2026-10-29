@@ -45,6 +45,7 @@ def normalize_avatar(data: bytes) -> bytes:
 
 
 def install_profile_routes(app, access):
+    from app.account_security import NameUpdate,change_name
     def owner():
         if not access.actor:
             raise HTTPException(401, '请登录后设置个人头像')
@@ -53,12 +54,18 @@ def install_profile_routes(app, access):
     def profile(user_id):
         with access.repository.connect() as db:
             row = db.execute('SELECT revision FROM product_user_avatars WHERE user_id=?', (user_id,)).fetchone()
-        return {'display_name': access.actor['display_name'],
+            user=db.execute('SELECT username,display_name FROM product_users WHERE id=?',(user_id,)).fetchone()
+        return {'display_name': user['display_name'],'username':user['username'],
                 'avatar_url': '/api/auth/avatar?v=' + row['revision'] if row else None}
 
     @app.get('/api/auth/profile')
     def get_profile():
         return JSONResponse(profile(owner()), headers=PRIVATE_HEADERS)
+
+    @app.put('/api/auth/profile')
+    def update_profile(body:NameUpdate):
+        user_id=owner();change_name(access,body.display_name)
+        return JSONResponse(profile(user_id),headers=PRIVATE_HEADERS)
 
     @app.put('/api/auth/avatar')
     def upload_avatar(file: UploadFile = File(...)):

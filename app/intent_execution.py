@@ -1,7 +1,7 @@
 """将意图候选转成有范围和动作的执行决策；不创建任务或执行外部请求。"""
 import re
 
-EXECUTION_VERSION = 'intent-execution-v1'
+EXECUTION_VERSION = 'intent-execution-v2'
 ACTION_NAMES = {'reply': '简短回应', 'clarify': '确认问题对象', 'retrieve': '授权资料检索',
                 'query_tool': '只读工具查询', 'source_unavailable': '缺少可用实时数据源',
                 'split_request': '确认本轮处理范围'}
@@ -10,10 +10,13 @@ ACTION_NAMES = {'reply': '简短回应', 'clarify': '确认问题对象', 'retri
 def request_requirements(question):
     """只识别显式外部查询要求；文档里的实时概念和被否定的动作不触发工具需求。"""
     text = re.sub(r'[“「《\"]([^”」》\"\n]*)[”」》\"]', '', question)
-    clauses = [s.strip() for s in re.split(r'[，,；;。\n]|(?:并且|同时|然后|再|并)(?=查询|查看|获取|调用|核实)', text) if s.strip()]
+    # 协调词后的动作各自判定；后半句的“解释”不能掩盖前半句的真实查询。
+    actions = r'查询|查看|获取|调用|核实|告诉我|解释|定义|概括|总结|比较|对比|解读'
+    clauses = [s.strip() for s in re.split(
+        r'[，,；;。\n]|(?:并且|同时|然后|以及|再|并)(?=(?:请|先)?(?:' + actions + r'))', text) if s.strip()]
     live, document = [], []
     for clause in clauses:
-        if re.search(r'^(?:不是|并非|不要|不需要|无需|不必|别).{0,8}(?:查|调用|执行|获取|连接)', clause):
+        if re.search(r'^(?:(?:请|麻烦|劳驾)\s*)?(?:先|暂时|本轮)?(?:不是|并非|不要|不需要|无需|不必|别).{0,8}(?:查|调用|执行|获取|连接)', clause):
             continue
         explains = bool(re.search(r'解释|定义|含义|原理|如何实现|怎么实现|为什么|是什么意思|什么叫|文档.{0,8}(?:中|里)|资料.{0,8}(?:中|里)|论文|报告.{0,8}(?:中|里)', clause))
         selected_material=bool(re.search(r'当前(?:的)?(?:文档|资料|知识库|会话|索引|模型|问题|文件)',clause))
@@ -59,9 +62,9 @@ def execution_contract(route, understanding, plan):
 def local_result(resolution, task_id):
     route=resolution['route'];action=resolution['execution']['action']
     return {'response_kind':'system','answer':route['response_text'],
-            'status':'insufficient_evidence' if action=='source_unavailable' else 'clarification_needed' if action=='split_request' else 'answered',
+            'status':'insufficient_evidence' if action=='source_unavailable' else 'clarification_needed' if action in ('split_request','clarify') else 'answered',
             'citations':[],'conclusion':[],'explanation':[],'limitations':[],
-            'clarification_questions':['请确认本轮处理文档内容还是实时数据。'] if action=='split_request' else [],
+            'clarification_questions':([route['response_text']] if action in ('split_request','clarify') else []),
             'route':route['code'],'prompt_version':'system-intent-v2','execution':resolution['execution'],
             **({'clarification':{'id':'clarify-'+task_id,**resolution['understanding']['clarification']}}
                if route['code']=='clarification-needed' else {})}

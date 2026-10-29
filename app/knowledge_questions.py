@@ -158,7 +158,9 @@ class KnowledgeQuestions:
             from app.rag_composition import needs_plan
             payload['stream_protocol']=STREAM_VERSION
             # 随任务冻结；不能用新版分类器反算旧任务曾经需要的请求数。
-            payload['provider_requests_expected']=2+int(needs_plan(question))+int(self.access.settings.query_planner_enabled)
+            from app.answer_semantic_review import policy as review_policy,enabled as review_enabled
+            payload['semantic_review']=review_policy(self.access.settings)
+            payload['provider_requests_expected']=2+int(needs_plan(question))+int(self.access.settings.query_planner_enabled)+int(review_enabled(self.access.settings))
         if route['kind']=='MCP':
             from app.knowledge_tools import ToolRegistry
             tool=ToolRegistry(self.repository).get(route.get('tool_id'))

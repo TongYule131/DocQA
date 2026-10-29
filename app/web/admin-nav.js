@@ -1,5 +1,6 @@
 import { node } from './answer-view.js';
 import { icon } from './ui-icons.js';
+import { installProfile } from './profile.js';
 
 const sidebar=document.querySelector('.admin-sidebar'),nav=sidebar?.querySelector('nav');
 if (sidebar && nav) {
@@ -28,6 +29,12 @@ if (sidebar && nav) {
   expanded(path==='/admin/intents');trigger.onclick=()=>expanded(children.hidden);group.append(trigger,children);nav.append(group);
   nav.append(link('链路追踪','/admin/traces','trace',path==='/admin/traces'),link('用户管理','/admin/users','users',path==='/admin/users'),link('系统设置','/admin/settings','settings',path==='/admin/settings'));
   const bottom=sidebar.querySelector('.sidebar-bottom');if(bottom)bottom.replaceChildren(link('返回对话','/app','chat'));
+  window.docqaAuthReady?.then(async session=>{
+    if(!session.user||!bottom)return;
+    bottom.append(link('账号安全','/account/password','settings'));
+    const personal=node('button','','admin-profile-button secondary');personal.type='button';personal.dataset.profileOpen='';personal.setAttribute('aria-label','个人设置');personal.append(icon('users'),node('span','个人设置','nav-label'));bottom.append(personal);
+    await installProfile(session);
+  }).catch(()=>{});
   window.addEventListener('docqa:intent-view',event=>{
     for (const [a,key] of [[treeLink,'tree'],[listLink,'list'],[testLink,'test']]) { const active=event.detail===key;a.classList.toggle('active',active);if(active)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current'); }
   });
