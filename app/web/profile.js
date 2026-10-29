@@ -4,7 +4,8 @@ let installed=false;
 export async function installProfile(session) {
   if(installed)return;installed=true;
   let name = session.user?.display_name || '工作空间';
-  if(!document.querySelector('link[href="/static/profile.css"]')) { const style=document.createElement('link');style.rel='stylesheet';style.href='/static/profile.css';document.head.append(style); }
+  const stylesheet = new URL('./profile.css', import.meta.url).pathname;
+  if(!document.querySelector(`link[href="${stylesheet}"]`)) { const style=document.createElement('link');style.rel='stylesheet';style.href=stylesheet;document.head.append(style); }
   for (const label of document.querySelectorAll('.account-name')) label.textContent = name;
   let profile = { avatar_url: null }, previewUrl = null, selected = null, busy = false,loading=false,loadToken=0;
   const request = createApiClient();
