@@ -64,14 +64,15 @@ function paint(state) {
   $('stage-status').textContent = job?.error_message || (uncertain ? '等待提交确认' : job?.cancel_requested
     ? '已请求停止后续处理；已在途的请求仍可能计费。' : activeStatuses.includes(job?.status)
       ? `${stageLabels[job.stage] || '正在处理'}，可稍后从历史查看。` : '');
-  stream.watch(state.job?[state.job]:[]);
-  if (state.result && state.result.id !== renderedResult) {
+  stream.watch(state.job?[{...state.job,result:state.result?.answer}]:[]);
+  const displaying=state.job&&(stream.presenting?.(state.job)||false);
+  if (state.result && !displaying && state.result.id !== renderedResult) {
     renderAnswer($('answer-body'), state.result.answer, openSource); renderedResult = state.result.id;
   }
-  if (!state.result && renderedResult !== null) { renderedResult = null; $('answer-body').replaceChildren(); closeSources(false); }
-  if(!state.result){$('answer-body').replaceChildren();stream.render($('answer-body'),state.job||{},openSource);}
-  $('answer-actions').hidden = !state.result;
-  $('show-sources').disabled = !state.result?.answer.citations?.length;
+  if ((!state.result||displaying) && renderedResult !== null) { renderedResult = null; $('answer-body').replaceChildren(); closeSources(false); }
+  if(!state.result||displaying){$('answer-body').replaceChildren();stream.render($('answer-body'),state.job||{},openSource);}
+  $('answer-actions').hidden = !state.result||displaying;
+  $('show-sources').disabled = displaying||!state.result?.answer.citations?.length;
   if (state.result) {
     for (const format of ['markdown', 'json']) $(`export-${format}`).href = `/api/question-results/${encoded(state.result.id)}/export?format=${format}`;
   }

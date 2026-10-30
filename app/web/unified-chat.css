@@ -28,3 +28,7 @@
 @media(max-width:800px){.kb-chat-header{gap:10px}.chat-title-details #chat-title{font-size:14px}.chat-settings>summary{font-size:12px;padding-right:0}}
 
 .entity-memory-tools{border:0;margin:0;padding:0;min-width:0}
+
+/* 主区与侧栏使用外层剩余高度，顶部提示条换行后也不能挤出发送和账号入口。 */
+.kb-chat-main,.kb-chat-sidebar{height:100%;min-height:0}
+#context-budget{margin:8px 0;line-height:1.6;color:#62748c;overflow-wrap:anywhere}

@@ -81,3 +81,4 @@
 .kb-assistant .reference:focus-visible,.kb-assistant .source-chip:focus-visible{outline:2px solid #739fe9;outline-offset:2px}
 .kb-assistant .source-list{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start}
 .kb-assistant .source-chip{padding:4px 8px;margin:0;border-radius:7px;font-size:11px;line-height:18px;max-width:100%;text-align:left;overflow-wrap:anywhere}
+.general-stream-text{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.85}

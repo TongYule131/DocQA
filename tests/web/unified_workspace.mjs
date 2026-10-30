@@ -27,8 +27,11 @@ const base={id:'base',name:'合成知识库',revision:1,active_snapshot_id:'v1',
 let detail={id:'k:one',base_id:'base',title:'长问题'.repeat(400),memory_enabled:true,memory_notes:'',revision:0,archived:false,document_ids:['one'],turns:[],submissions:[]};
 const calls=[],storage=new Map();
 let holdRefresh=null;
+let quotaUnavailable=false;
+const quota={context_budget:{available:true,reported_tokens:50,held_units:200,remaining_units:750,overrun_calls:0}};
 const api=async(path,options={})=>{
   calls.push({path,method:options.method||'GET',body:options.body?JSON.parse(options.body):null});
+  if(path==='/api/chat/quota'){if(quotaUnavailable)throw new Error('isolated-quota-unavailable');return structuredClone(quota);}
   if(path==='/api/chat/scopes'){if(holdRefresh)await holdRefresh;return [structuredClone(base)];}
   if(path.startsWith('/api/chat/conversations?'))return [{id:detail.id,title:detail.title}];
   if(path==='/api/ingestions?base_id=base')return [];
@@ -37,14 +40,19 @@ const api=async(path,options={})=>{
   if(path.startsWith('/api/chat/conversations/'))return structuredClone(detail);
   throw new Error('Unexpected path '+path);
 };
+let holdPresentation=false,holdRevision=0;
 const context={document,node,renderAnswer,sourceLocationsText,answerTextForDisplay,createUnifiedClient,
   createApiClient:()=>api,encoded:encodeURIComponent,URLSearchParams,location:{search:'?chat=k%3Aone'},
-  createAnswerStream:()=>({revision:0,watch(){},render(){},pause(){},dispose(){}}),
+  feedbackButton:()=>new Element('button'),clarificationForm:()=>null,
+  createAnswerStream:()=>({get revision(){return holdRevision;},watch(){},presenting(){return holdPresentation;},render(container){if(holdPresentation){container.append(node('p','DISPLAY_SENTINEL'));return true;}},pause(){},dispose(){}}),
   window:{docqaAuthReady:Promise.resolve({user:{id:'synthetic',role:'customer'}}),addEventListener(){}},
   sessionStorage:{getItem:key=>storage.get(key)||null,setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)},
   setTimeout:()=>1,clearTimeout(){},navigator:{clipboard:{writeText:async()=>{}}},Option:class extends Element {constructor(text,value){super('option');this.textContent=text;this.value=value;}},
 };
 await vm.runInNewContext('(async()=>{'+script+'})()',context);
+assert(ids.get('context-budget').textContent.includes('已实报 50 token'));
+assert(ids.get('context-budget').textContent.includes('待核预留 200'));
+assert(!ids.get('context-budget').textContent.includes('%'),'没有验证窗口时不显示百分比');
 const inputs=()=>ids.get('document-options').walk().filter(el=>el.tagName==='input'&&el.type==='checkbox');
 const allButton=()=>ids.get('document-options').walk().find(el=>el.tagName==='button');
 assert.equal(inputs().length,3);
@@ -70,11 +78,12 @@ assert.equal(ids.get('scope-caption').textContent,'仅使用：第二份.txt');
 assert.equal(ids.get('kb-send').disabled,false);
 inputs()[1].checked=false;inputs()[1].onchange();
 assert.equal(ids.get('scope-caption').textContent,'未选择资料');
-assert.equal(ids.get('kb-send').disabled,true,'取消全部勾选不能回退到全库检索');
-ids.get('kb-input').value='空选不能发送';
+assert.equal(ids.get('kb-send').disabled,false,'全不选仍允许普通聊天');
+ids.get('kb-input').value='空选的普通聊天';
 ids.get('kb-form').onsubmit({preventDefault(){}});
 for(let n=0;n<60;n++)await Promise.resolve();
-assert.equal(calls.filter(c=>c.method==='POST').length,1,'空选不得提交为全库问题');
+assert.equal(calls.filter(c=>c.method==='POST').length,2);
+assert.equal(calls.filter(c=>c.path.endsWith('/turns')).at(-1).body.resource_mode,'none','全不选显式提交为none，不能解释为全库');
 await ids.get('chat-refresh').onclick();
 assert.equal(ids.get('scope-caption').textContent,'未选择资料','刷新不能将空选变成全库');
 
@@ -82,7 +91,7 @@ await allButton().onclick();
 ids.get('kb-input').value='全部可用资料';
 ids.get('kb-form').onsubmit({preventDefault(){}});
 for(let n=0;n<60;n++)await Promise.resolve();
-assert.deepEqual(calls.filter(c=>c.path.endsWith('/turns'))[1].body.document_ids,[],'保留服务端全部可用快照的兼容协议');
+assert.deepEqual(calls.filter(c=>c.path.endsWith('/turns'))[2].body.document_ids,[],'保留服务端全部可用快照的兼容协议');
 
 inputs()[2].checked=true;inputs()[2].onchange();
 assert.equal(ids.get('scope-caption').textContent,'已选择 3 份资料');
@@ -93,7 +102,7 @@ await ids.get('chat-refresh').onclick();
 assert(inputs().every(el=>!el.checked));
 assert.equal(ids.get('scope-caption').textContent,'暂无可用资料');
 assert.equal(allButton().disabled,true);
-assert.equal(ids.get('kb-send').disabled,true);
+assert.equal(ids.get('kb-send').disabled,false,'无可用资料也能普通聊天');
 inputs()[2].checked=true;inputs()[2].onchange();
 assert.equal(ids.get('kb-send').disabled,false,'显式选择准备中的资料仍可提交等待问题');
 base.documents[0].ready=true;base.documents[1].ready=true;
@@ -122,7 +131,7 @@ detail={...detail,id:'k:two',title:'另一段 <img src=x> 长标题'};
 await ids.get('kb-history').children[0].onclick();
 assert.equal(ids.get('chat-title-details').open,false,'切换会话默认收起标题');
 assert.equal(ids.get('chat-title-full').textContent,detail.title);
-assert.equal(calls.filter(c=>c.method==='POST').length,2);
+assert.equal(calls.filter(c=>c.method==='POST').length,3);
 detail={...detail,id:'k:all',document_ids:[]};
 await ids.get('kb-history').children[0].onclick();
 assert.deepEqual(inputs().map(el=>el.checked),[true,true,false],'历史全库范围恢复后仍应展示实际全选');
@@ -139,7 +148,7 @@ async function bootPicker(saved=new Map(),user='fresh'){
 }
 let picker=await bootPicker();
 assert(picker.boxes().every(el=>!el.checked),'首次新会话不默认授权全部资料');
-assert.equal(picker.elements.get('kb-send').disabled,true);
+assert.equal(picker.elements.get('kb-send').disabled,false,'空范围不阻止普通聊天');
 await picker.buttons().find(el=>el.attributes['aria-label']==='仅使用 第一份.txt').onclick();
 assert.deepEqual(picker.boxes().map(el=>el.checked),[true,false,false],'仅此份一键清除其他勾选');
 assert.equal(picker.elements.get('scope-caption').textContent,'仅使用：第一份.txt');
@@ -151,10 +160,41 @@ assert.deepEqual(picker.boxes().map(el=>el.checked),[true,false,false],'重新�
 await picker.buttons().find(el=>el.dataset.selectNone==='true').onclick();
 picker=await bootPicker(picker.saved);
 assert(picker.boxes().every(el=>!el.checked),'全不选也持久保留，不重新变为全库');
-assert.equal(picker.elements.get('kb-send').disabled,true);
+assert.equal(picker.elements.get('kb-send').disabled,false,'空范围不阻止普通聊天');
 await picker.buttons().find(el=>el.attributes['aria-label']==='仅使用 第二份.txt').onclick();
 const shared=picker.saved;
 const other=await bootPicker(shared,'other-user');
 assert(other.boxes().every(el=>!el.checked),'其他账号不继承资料偏好');
 console.log('PASS document picker: fresh empty, one-click exclusive selection, search, explicit none persistence and account isolation');
-console.log('unified workspace: visible all-ready selection, explicit empty selection guard, exact selected/all POST, preparing/empty scopes, refresh and busy/running/waiting locks, long title disclosure and conversation switching passed');
+quotaUnavailable=true;const withoutQuota=await bootPicker();
+assert.equal(withoutQuota.elements.get('context-budget').textContent,'');
+assert.equal(withoutQuota.elements.get('kb-send').disabled,false,'用量读取失败不阻塞对话，准入由服务端执行');
+quotaUnavailable=false;
+detail.turns=[{id:'budget-only',source:'knowledge',question:'合成预算问题',status:'succeeded',
+  result:{response_kind:'general',answer:'合成回复'},context_budget:{last_request:{counting_status:'estimated',occupancy_percent:90,output_reserved:128},history_reduction:{removed_source_turns:[1]}}}];
+const budgetPicker=await bootPicker();await budgetPicker.elements.get('kb-history').children[0].onclick();
+assert(budgetPicker.elements.get('context-budget').textContent.includes('输入为估算'));
+assert(!budgetPicker.elements.get('context-budget').textContent.includes('90%'));
+assert(budgetPicker.elements.get('context-budget').textContent.includes('输出预留 128'));
+assert(budgetPicker.elements.get('context-budget').textContent.includes('早期完整轮次'));
+detail.turns[0].context_budget.last_request.counting_status='verified';detail.turns[0].context_budget.last_request.occupancy_percent=75.5;
+await budgetPicker.elements.get('chat-refresh').onclick();
+assert(budgetPicker.elements.get('context-budget').textContent.includes('75.5%'));
+console.log('PASS context quota: reported versus held, no unverified percentage, whole-turn reduction and nonblocking quota errors');
+detail.turns[0].retrieval_agent={stop_reason:'no_new_evidence',steps:[{round:1,action:'read_source'}]};
+await budgetPicker.elements.get('chat-refresh').onclick();
+const agentDetails=budgetPicker.elements.get('kb-turns').walk().find(el=>el.tagName==='details'&&el.textContent.includes('资料查阅记录'));
+assert(agentDetails&&!agentDetails.open,'实际查阅记录默认折叠');
+assert(agentDetails.textContent.includes('读取原文')&&agentDetails.textContent.includes('没有新增可用原文'));
+detail.turns[0].retrieval_agent.stop_reason='no_supported_parts';
+await budgetPicker.elements.get('chat-refresh').onclick();
+assert(budgetPicker.elements.get('kb-turns').textContent.includes('未进行正文生成'));
+console.log('PASS actual retrieval steps: collapsed record and no-new-evidence stop explanation');
+detail.turns[0].result.answer='FINAL_SENTINEL';holdPresentation=true;holdRevision++;
+await budgetPicker.elements.get('chat-refresh').onclick();
+assert(budgetPicker.elements.get('kb-turns').textContent.includes('DISPLAY_SENTINEL'));
+assert(!budgetPicker.elements.get('kb-turns').textContent.includes('FINAL_SENTINEL'),'最终GET不能越过显示队列直接替换全文');
+holdPresentation=false;holdRevision++;await budgetPicker.elements.get('chat-refresh').onclick();
+assert(budgetPicker.elements.get('kb-turns').textContent.includes('FINAL_SENTINEL'));
+console.log('PASS completed response remains behind presentation queue until drained');
+console.log('unified workspace: visible all-ready selection, explicit none mode without all-scope fallback, exact selected/all POST, preparing/empty scopes, refresh and busy/running/waiting locks, long title disclosure and conversation switching passed');

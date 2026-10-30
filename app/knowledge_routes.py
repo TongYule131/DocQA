@@ -254,7 +254,9 @@ def install_knowledge_routes(app,access,rag):
                 'execution':resolution['execution'],
                 'retrieval_budget':execution_budget(plan,access.settings,route),'availability':availability,
                 'response_preview':route.get('response_text') if route['kind']=='SYSTEM' else None,'top_k':route.get('top_k')})
-        return {'results':results,'supplier_calls':0,'persisted':False,'note':'与会话使用同一规则；测试不创建问答任务，不执行检索、模型或工具'}
+        return {'results':results,'supplier_calls':0,'persisted':False,
+            'automatic_dispatch':{'executed':False,'reason':'普通LLM／文档自动分流在会话worker执行，本页未运行模型，不能据本页候选判断最终动作'},
+            'note':'这里只预览受控规则与本地查询计划；新会话的模型自动分流未运行。测试不创建任务，不执行检索、模型或工具'}
 
     @router.get('/api/admin/mcp-tools')
     def tools():

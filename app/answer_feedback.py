@@ -59,12 +59,14 @@ class Feedback:
             if row['kind'] != 'question':
                 raise HTTPException(409, '仅支持回答反馈')
             payload = json.loads(row['input_json'])
+            frozen=self.knowledge.tasks.checkpoint(identifier,'auto_document_input') if payload.get('chat_policy') else None
+            if frozen:payload={**payload,**frozen['payload']}
             diagnostic=self.knowledge.tasks.checkpoint(identifier,'diagnostic_retrieval_attempt_'+str(row['attempt_count'])) or {}
             return {'question':payload['question'],'answer':json.loads(row['result_json']) if row['result_json'] else None,
                 'reproduction':{'task_input_hash':row['input_hash'],'configuration':payload.get('configuration'),
                     'documents':payload.get('documents',[]),'query_plan':payload.get('query_plan'),
                     'input_manifest':diagnostic.get('input_manifest',[]),'budget':payload.get('retrieval_budget'),
-                    'conversation_history_shared':False}}
+                    'chat_policy':payload.get('chat_policy'),'conversation_history_shared':False}}
         self.access.require_question(identifier)
         row = self.questions.get_job(identifier)
         frozen=json.loads(self.questions.store.row(identifier)['snapshot_json'])
@@ -209,13 +211,18 @@ def install_feedback_routes(app, access, questions):
     def quality():
         access.admin()
         with access.repository.connect() as db:
-            statuses={r[0]:r[1] for r in db.execute("SELECT status,COUNT(*) FROM kb_tasks WHERE kind='question' AND COALESCE(json_extract(input_json,'$.route.kind'),'KB')!='SYSTEM' GROUP BY status")}
-            answered=db.execute("SELECT COUNT(*) FROM kb_tasks WHERE kind='question' AND status='succeeded' AND json_extract(result_json,'$.status')='answered' AND COALESCE(json_extract(input_json,'$.route.kind'),'KB')!='SYSTEM'").fetchone()[0]
+            business="""kind='question' AND (COALESCE(json_extract(input_json,'$.route.kind'),'KB') NOT IN ('SYSTEM','AUTO')
+                OR json_extract(input_json,'$.route.kind')='AUTO' AND EXISTS(SELECT 1 FROM kb_task_checkpoints k
+                WHERE k.task_id=kb_tasks.id AND k.name='auto_document_input'
+                AND json_extract(k.payload_json,'$.payload.route.kind') IN ('KB','MCP')))"""
+            statuses={r[0]:r[1] for r in db.execute('SELECT status,COUNT(*) FROM kb_tasks WHERE '+business+' GROUP BY status')}
+            answered=db.execute("SELECT COUNT(*) FROM kb_tasks WHERE "+business+" AND status='succeeded' AND json_extract(result_json,'$.status')='answered'").fetchone()[0]
+            general=db.execute("SELECT COUNT(*) FROM kb_tasks WHERE status='succeeded' AND json_extract(result_json,'$.response_kind')='general'").fetchone()[0]
             feedback={r[0]:r[1] for r in db.execute('SELECT status,COUNT(*) FROM answer_feedback GROUP BY status')}
             causes={r[0]:r[1] for r in db.execute('SELECT root_cause,COUNT(*) FROM answer_feedback WHERE root_cause IS NOT NULL GROUP BY root_cause')}
             evidence=db.execute('SELECT COUNT(*) FROM feedback_evidence').fetchone()[0]
         return {'business_tasks':{'total':sum(statuses.values()),'statuses':statuses,'answered':answered},
-            'feedback':feedback,'root_causes':causes,'registered_engineering_evidence':evidence,
+            'general_answers':general,'feedback':feedback,'root_causes':causes,'registered_engineering_evidence':evidence,
             'human_semantic_review':{'reviewed':None,'passed':None,'note':'未登记独立人工rubric，不能由工程通过或工单关闭推断语义通过率'},
             'citation_engineering':{'note':'结果发布继续执行来源和引用硬校验；不以工单关闭数代替引用通过率'},
             'provider_calls':0,'content_policy':'只含汇总计数，无客户问题或正文'}

@@ -87,7 +87,7 @@ def public_plan(plan: dict) -> dict:
 
 def describe_plan(plan: dict) -> dict:
     value = public_plan(plan)
-    value['name'] = TASKS[plan['task_type']][0] if plan['task_type'] in TASKS else {'interaction':'系统交互','tool_query':'只读工具查询'}[plan['task_type']]
+    value['name'] = TASKS[plan['task_type']][0] if plan['task_type'] in TASKS else {'interaction':'系统交互','tool_query':'只读工具查询','general':'通用LLM回答'}[plan['task_type']]
     value['effects'] = [TASKS[f][3] for f in plan['facets']]
     value['required_evidence'] = [REQUIREMENTS[r][0] for r in plan['requirements']]
     return value

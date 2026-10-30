@@ -1,11 +1,28 @@
 """DeepSeek 在线模型适配器，实现 providers.LanguageModel 的 generate 契约。"""
 from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError, OpenAI
 from contextvars import ContextVar
+from contextlib import contextmanager
 import httpx
 
 from app.config import Settings
 from app.provider_usage import response_metadata
+from app.context_budget import effective_output
 from app.resource_governance import guarded_provider, mark_provider_sent,mark_provider_completed,record_provider_usage
+
+
+_JSON_OBJECT_OUTPUT = ContextVar('deepseek_json_object_output', default=False)
+
+
+@contextmanager
+def json_object_output():
+    """仅当前明确JSON契约的调用请求JSON输出；不影响其他任务或并发上下文。"""
+    token = _JSON_OBJECT_OUTPUT.set(True)
+    try:yield
+    finally:_JSON_OBJECT_OUTPUT.reset(token)
+
+
+def _output_options():
+    return {'response_format': {'type': 'json_object'}} if _JSON_OBJECT_OUTPUT.get() else {}
 
 
 class ModelError(Exception):
@@ -44,9 +61,10 @@ class DeepSeekModel:
                     messages=[{"role": "system", "content": system_prompt},
                               {"role": "user", "content": user_prompt}],
                     stream=False,
-                    max_tokens=self.settings.deepseek_max_tokens,
+                    max_tokens=effective_output(self.settings),
                     reasoning_effort=self.settings.deepseek_reasoning_effort,
                     extra_body={"thinking": {"type": self.settings.deepseek_thinking}},
+                    **_output_options(),
                 )
                 mark_provider_completed()
         except APITimeoutError:
@@ -105,9 +123,9 @@ class DeepSeekModel:
                 mark_provider_sent()
                 with client.chat.completions.create(model=self.settings.deepseek_model,
                     messages=[{'role':'system','content':system_prompt},{'role':'user','content':user_prompt}],
-                    stream=True,stream_options={'include_usage':True},max_tokens=self.settings.deepseek_max_tokens,
+                    stream=True,stream_options={'include_usage':True},max_tokens=effective_output(self.settings),
                     reasoning_effort=self.settings.deepseek_reasoning_effort,
-                    extra_body={'thinking':{'type':self.settings.deepseek_thinking}}) as stream:
+                    extra_body={'thinking':{'type':self.settings.deepseek_thinking}},**_output_options()) as stream:
                     if not stream.response.headers.get('content-type','').lower().startswith('text/event-stream'):
                         raise ModelError(502,'上游未返回流式响应；未降级为重复生成')
                     for chunk in stream:

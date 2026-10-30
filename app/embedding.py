@@ -65,7 +65,12 @@ class APIEmbedding:
                         timeout=self.settings.embedding_timeout_seconds, max_retries=0) as client:
                 for offset in range(0, len(texts), self.settings.embedding_batch_size):
                     batch = texts[offset:offset + self.settings.embedding_batch_size]
-                    with provider_guard(self.settings, 'embedding', EmbeddingError, delivery_tracked=True):
+                    from app.context_budget import prepare,BudgetError
+                    try:budget=prepare(self.settings,'embedding',{'model':self.settings.embedding_model,'input':batch,'encoding_format':'float'})
+                    except BudgetError as exc:
+                        error=EmbeddingError(429,str(exc));error.not_sent=True
+                        raise error from None
+                    with provider_guard(self.settings, 'embedding', EmbeddingError, delivery_tracked=True,budget_request=budget):
                         mark_provider_sent()
                         response = client.embeddings.create(
                             model=self.settings.embedding_model, input=batch, encoding_format="float")

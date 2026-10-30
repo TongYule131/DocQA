@@ -12,7 +12,7 @@ def distribution(values):
 def project(db,day):
     calls=db.execute("SELECT elapsed_ms,status FROM kb_task_calls WHERE started_at>=? AND delivery_status!='not_sent' ORDER BY started_at DESC LIMIT 1000",(day,)).fetchall()
     total=[r[0] for r in db.execute("SELECT (julianday(finished_at)-julianday(started_at))*86400000 FROM kb_tasks WHERE started_at>=? AND finished_at IS NOT NULL ORDER BY started_at DESC LIMIT 1000",(day,))]
-    first=[r[0] for r in db.execute("SELECT (julianday(MIN(e.created_at))-julianday(t.started_at))*86400000 FROM answer_stream_events e JOIN kb_tasks t ON t.id=e.kb_task_id WHERE e.kind='block' AND t.started_at>=? GROUP BY t.id ORDER BY t.started_at DESC LIMIT 1000",(day,))]
+    first=[r[0] for r in db.execute("SELECT (julianday(MIN(e.created_at))-julianday(t.started_at))*86400000 FROM answer_stream_events e JOIN kb_tasks t ON t.id=e.kb_task_id WHERE e.kind='block' AND COALESCE(json_extract(e.payload_json,'$.validation_scope'),'')='single_fact' AND t.started_at>=? GROUP BY t.id ORDER BY t.started_at DESC LIMIT 1000",(day,))]
     contexts=[r[0] for r in db.execute("SELECT json_extract(payload_json,'$.context_chars') FROM kb_task_checkpoints WHERE name LIKE 'diagnostic_retrieval_attempt_%' AND created_at>=? ORDER BY created_at DESC LIMIT 1000",(day,))]
     contexts=[v for v in contexts if type(v) in (float,int)]
     return {'window_start':day,'timezone':'UTC','scope':'knowledge_tasks','sample_limit':1000,

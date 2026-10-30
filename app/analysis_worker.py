@@ -57,6 +57,7 @@ ERROR_CALL_UNCERTAIN = "call_uncertain"
 
 
 class AnalysisWorker:
+    budget_source='analysis'
     """串行处理分析任务的 worker；模型可注入，便于离线测试与评估脚本复用。"""
 
     def __init__(self, settings: Settings, repository: Repository | None = None, *,
@@ -545,7 +546,9 @@ class AnalysisWorker:
                           "本次任务的生成预算已用尽或执行令牌已失效；未发起新的请求", False)
         started = time.perf_counter()
         try:
-            raw = self.model.generate(system_prompt, user_prompt)
+            from app.context_budget import profile_scope
+            with profile_scope('analysis_reduce' if role=='reduce' else 'analysis'):
+                raw = self.model.generate(system_prompt, user_prompt)
         except ModelError as exc:
             uncertain=not getattr(exc,'not_sent',False) and (exc.status_code==504 or getattr(exc,'uncertain',False))
             self.repository.settle_analysis_call(job.id, sequence, status='uncertain' if uncertain else 'failed',

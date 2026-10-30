@@ -16,3 +16,11 @@ client=createUnifiedClient({api,storage,key:'alice'});calls.length=0;const detai
 assert.equal(createUnifiedClient({api,storage,key:'bob'}).pending,null);
 let posts=0;const broken=createUnifiedClient({api:async()=>posts++,storage:{getItem:()=>null,setItem:()=>{throw new Error('storage disabled');}},key:'broken'});assert.throws(()=>broken.prepare({baseId:'b',question:'q'}),/storage disabled/);assert.equal(posts,0);
 console.log('unified client: lost create/turn recovery, read-only polling, isolation, storage failure passed');
+
+const ordinaryCalls=[];
+const ordinary=createUnifiedClient({api:async(path,options)=>{const body=JSON.parse(options.body);ordinaryCalls.push({path,body});return path.endsWith('/turns')?{task_id:'fresh-task'}:{id:'k:general'};},storage,key:'ordinary'});
+ordinary.prepare({baseId:null,documentIds:[],resourceMode:'none',question:'通用问题'});await ordinary.confirm();
+assert.equal(ordinaryCalls.length,2);assert.equal(ordinaryCalls[0].body.base_id,null);
+assert(ordinaryCalls.every(c=>c.body.resource_mode==='none'));
+assert.equal(ordinary.lastTaskId,'fresh-task');
+console.log('ordinary conversation uses explicit none, never legacy empty-array all');

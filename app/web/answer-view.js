@@ -46,6 +46,7 @@ function inline(parent, text, citations, open) {
 }
 export function answerTextForDisplay(answer) {
   let text=String(answer.answer || '');
+  if(answer.response_kind==='general')return text;
   const labels={direct:'原文直述',synthesis:'多处综合',inference:'结构推断'};
   const contexts={subject:'对象',period:'期间',unit:'单位',scope:'范围',condition:'限定',role:'用途'};
   for(const fact of [...(answer.conclusion || []),...(answer.explanation || [])]) {
@@ -68,7 +69,9 @@ export function answerTextForDisplay(answer) {
 export function renderAnswer(container, answer, openCitation) {
   container.replaceChildren();
   if (answer.response_kind === 'system') { container.append(node('p', String(answer.answer))); return; }
-  const citations = new Map((answer.citations || []).map(citation => [citation.reference_id, citation]));
+  const general=answer.response_kind==='general';
+  if(general)container.append(node('p','通用回答','answer-origin muted-detail'));
+  const citations = new Map((general?[]:answer.citations || []).map(citation => [citation.reference_id, citation]));
   let list = null, kind = '';
   for (const line of answerTextForDisplay(answer).split('\n')) {
     if (!line.trim()) { list = null; kind = ''; continue; }
@@ -82,6 +85,7 @@ export function renderAnswer(container, answer, openCitation) {
       parent = node('li'); list.append(parent); inline(parent, (bullet || ordered)[1], citations, openCitation);
     } else { list = null; kind = ''; parent = node('p'); container.append(parent); inline(parent, line, citations, openCitation); }
   }
+  if(general)return;
   if (answer.clarification_questions?.length) {
     const question = node('section', '', 'answer-note'); question.append(node('h4', '需要补充的条件'));
     answer.clarification_questions.forEach(text => question.append(node('p', String(text)))); container.append(question);

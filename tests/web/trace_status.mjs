@@ -23,6 +23,9 @@ const api=async(path,options={})=>{
   assert(!options.method || options.method==='GET');calls.push(path);
   if(path.startsWith('/api/admin/traces?'))return {items:[{id:'failed',name:'合成失败',status:'failed'},{id:'ok',name:'合成成功',status:'succeeded'}],total:2,stats:{succeeded:1,failed:1,running:0,success_rate:50},window:'合成窗口'};
   if(path==='/api/admin/traces/failed')return {id:'failed',name:'合成失败',status:'failed',error_code:'output_numeric_context_missing',elapsed_ms:30,
+    retrieval_agent:{stop_reason:'no_new_evidence',admitted_count:4,steps:[{round:1,action:'read_source',state:'no_new_evidence',before:{visible_chars:30},after:{visible_chars:30},requests_before:1,requests_after:2}]},
+    calls:[{sequence_no:1,role:'query_planning',delivery_status:'sent',usage:{total_tokens:50},elapsed_ms:10},
+           {sequence_no:2,role:'generation',delivery_status:'uncertain',usage:null,elapsed_ms:20}],
     diagnostics:[{kind:'retrieval',attempt:'1',admitted_count:4,context_chars:1200,drop_count:0,math_evidence:{total:2,incomplete_count:1,blocked_count:1}},
       {kind:'validation',attempt:'1',reason:'numeric_context_missing',location:{category:'explanation',ordinal:1,numeric_count:2}}],spans:[
     {id:'one',name:'查询',status:'succeeded',kind:'EMBEDDING',offset_ms:0,elapsed_ms:10},
@@ -55,5 +58,8 @@ assert(diagnostic.textContent.includes('依据第 2 条校验失败'));
 assert(diagnostic.textContent.includes('装入 4 项证据'));
 assert(diagnostic.textContent.includes('数学证据组 2 个，未完整装入 1 个'));
 assert(diagnostic.textContent.includes('不可读数学片段 1 个'));
+assert(ids.get('trace-detail').textContent.includes('没有新增原文'));
+assert(ids.get('trace-detail').textContent.includes('实报 50 token'));
+assert(ids.get('trace-detail').textContent.includes('token用量未知'));
 assert.equal(calls.length,2,'列表和详情只读，不调用模型或创建任务');
 console.log('PASS trace status: list, summary, node labels, cancelled state and read-only requests');

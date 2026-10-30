@@ -30,6 +30,7 @@ class _Stopped(Exception):
 
 
 class QuestionWorker:
+    budget_source='question'
     def __init__(self, settings, repository: Repository | None = None, *, rag=None,
                  worker_id: str | None = None, runtime=None):
         self.settings = settings
@@ -122,6 +123,8 @@ class QuestionWorker:
                     AnswerStreamStore(self.repository).append('question',job,'reset' if stage=='stream_started' else 'block',details)
             elif stage in {"query_started", "generation_started", "composition_started",'semantic_review_started'}:
                 role = "embedding" if stage == "query_started" else "generation"
+                from app.context_budget import set_profile
+                set_profile('embedding' if role=='embedding' else 'planning' if stage=='composition_started' else 'review' if stage=='semantic_review_started' else 'answer')
                 current_role = role
                 progress("retrieving" if role == "embedding" else "planning" if stage == "composition_started" else 'validating' if stage=='semantic_review_started' else "generating",
                          "正在查询并固定证据" if role == "embedding" else "正在选择证据和规划段落" if stage == "composition_started" else '正在只读复核事实、条件、覆盖与关系' if stage=='semantic_review_started' else "正在生成回答")

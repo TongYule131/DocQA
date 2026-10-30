@@ -17,6 +17,7 @@ CREATE TABLE answer_stream_events (
 CREATE INDEX ix_answer_stream_question ON answer_stream_events(question_job_id,id);
 CREATE INDEX ix_answer_stream_kb ON answer_stream_events(kb_task_id,id);
 """
+STREAM_EVENT_LIMIT = 1024
 
 
 class AnswerStreamStore:
@@ -26,6 +27,12 @@ class AnswerStreamStore:
     def column(source):
         if source not in ('question','knowledge'):raise ValueError('invalid_stream_source')
         return 'question_job_id' if source=='question' else 'kb_task_id'
+
+    def remaining_capacity(self,source,identifier):
+        column=self.column(source)
+        with self.repository.connect() as db:
+            count=db.execute('SELECT COUNT(*) FROM answer_stream_events WHERE '+column+'=?',(identifier,)).fetchone()[0]
+        return max(0,STREAM_EVENT_LIMIT-count)
 
     def append(self,source,job,kind,payload):
         column=self.column(source);identifier=job['id'];token=job['lease_token']
@@ -43,7 +50,7 @@ class AnswerStreamStore:
                 call=db.execute("SELECT 1 FROM kb_task_calls WHERE task_id=? AND role='generation' AND status='intent'",(identifier,)).fetchone()
             if not valid or not row or row['cancel_requested'] or not call:raise ValueError('stream_execution_stopped')
             count=db.execute('SELECT COUNT(*) FROM answer_stream_events WHERE '+column+'=?',(identifier,)).fetchone()[0]
-            if count>=1024:raise ValueError('stream_event_limit')
+            if count>=STREAM_EVENT_LIMIT:raise ValueError('stream_event_limit')
             db.execute('INSERT INTO answer_stream_events('+column+',attempt_no,kind,payload_json,created_at) VALUES (?,?,?,?,?)',
                 (identifier,row['attempt_count'],kind,json.dumps(payload,ensure_ascii=False,allow_nan=False),now_iso()))
 

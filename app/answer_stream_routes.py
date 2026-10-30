@@ -55,8 +55,8 @@ def install_answer_stream_routes(app,access,questions):
                     yield 'event: state\ndata: '+json.dumps(state,separators=(',',':'))+'\n\n';previous=state
                 if row['status'] not in ('queued','running') and len(batch)<100:return
                 idle+=1
-                if idle%40==0:yield ': keepalive\n\n'
-                await asyncio.sleep(.25)
+                if idle%100==0:yield ': keepalive\n\n'
+                await asyncio.sleep(.1)
         return StreamingResponse(events(),media_type='text/event-stream',
             headers={'Cache-Control':'no-store','X-Accel-Buffering':'no','X-Content-Type-Options':'nosniff'})
 
