@@ -70,7 +70,7 @@ def test_document_stream_persists_a_valid_block_before_generation_finishes(tmp_p
     assert done['requests_used']==2 and len(env.embedding.calls)==1
 
 
-def sdk_stream(monkeypatch,settings,*,finish='stop',disconnect=False):
+def sdk_stream(monkeypatch,settings,*,finish='stop',disconnect=False,text_parts=None):
     sent=[];ended=[]
     def chunk(content=None,reason=None,thinking=None):
         delta={}
@@ -81,7 +81,7 @@ def sdk_stream(monkeypatch,settings,*,finish='stop',disconnect=False):
     class Body(httpx.SyncByteStream):
         def __iter__(self):
             yield ('data: '+json.dumps(chunk(thinking='不要展示的内部思考'))+'\n\n').encode()
-            for part in ('{"conclusion":','[]}'):
+            for part in (text_parts if text_parts is not None else ('{"conclusion":','[]}')):
                 yield ('data: '+json.dumps(chunk(content=part))+'\n\n').encode()
             if disconnect:raise httpx.ReadError('synthetic private upstream body')
             ended.append(True)

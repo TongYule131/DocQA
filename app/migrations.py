@@ -19,7 +19,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # 当前代码期望的数据库结构版本；新增迁移时递增。
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 19
 
 # 旧 source_signature 算法标识：sha256(json(chunk.model_dump()))，保留用于验证旧索引。
 SIGNATURE_ALGO_LEGACY = "sha256-chunk-dump-v1"
@@ -903,8 +903,10 @@ def _apply_v14(db: sqlite3.Connection) -> None:
 from app.improvement_schema import migrate as _apply_v15
 from app.closure_schema import migrate as _apply_v16
 from app.account_schema import migrate as _apply_v17
+from app.general_chat_schema import migrate as _apply_v18
+from app.context_budget_schema import migrate as _apply_v19
 
-MIGRATIONS = {1: _apply_v1, 2: _apply_v2, 3: _apply_v3, 4: _apply_v4, 5: _apply_v5, 6: _apply_v6, 7: _apply_v7, 8: _apply_v8, 9: _apply_v9, 10: _apply_v10, 11: _apply_v11, 12: _apply_v12, 13: _apply_v13, 14: _apply_v14, 15: _apply_v15, 16: _apply_v16, 17: _apply_v17}
+MIGRATIONS = {1: _apply_v1, 2: _apply_v2, 3: _apply_v3, 4: _apply_v4, 5: _apply_v5, 6: _apply_v6, 7: _apply_v7, 8: _apply_v8, 9: _apply_v9, 10: _apply_v10, 11: _apply_v11, 12: _apply_v12, 13: _apply_v13, 14: _apply_v14, 15: _apply_v15, 16: _apply_v16, 17: _apply_v17, 18: _apply_v18, 19: _apply_v19}
 
 
 def _index_shapes(db: sqlite3.Connection) -> dict:

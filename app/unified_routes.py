@@ -14,12 +14,14 @@ class Key(StrictBody):
 
 
 class ChatCreate(Key):
-    base_id:str=Field(min_length=1,max_length=150)
+    base_id:str|None=Field(default=None,min_length=1,max_length=150)
+    resource_mode:Literal['none','selected','all']|None=None
     document_ids:list[str]=Field(default_factory=list,max_length=50)
 
 
 class Turn(Key):
     question:str=Field(min_length=1,max_length=4000,pattern=r'\S')
+    resource_mode:Literal['none','selected','all']|None=None
     document_ids:list[str]|None=Field(default=None,max_length=50)
 
 
@@ -64,7 +66,7 @@ def install_unified_routes(app,access,rag,legacy):
     def conversations(archived:bool=False):return chat.list(archived)
 
     @router.post('/api/chat/conversations',status_code=201)
-    def create(body:ChatCreate):return chat.create(body.base_id,body.request_key,body.document_ids)
+    def create(body:ChatCreate):return chat.create(body.base_id,body.request_key,body.document_ids,body.resource_mode)
 
     @router.get('/api/chat/conversations/{identifier}')
     def detail(identifier:str):return chat.detail(identifier)
@@ -79,7 +81,7 @@ def install_unified_routes(app,access,rag,legacy):
         return chat.detail(identifier)
 
     @router.post('/api/chat/conversations/{identifier}/turns',status_code=202)
-    def turn(identifier:str,body:Turn):return chat.submit(identifier,body.question.strip(),body.request_key,body.document_ids)
+    def turn(identifier:str,body:Turn):return chat.submit(identifier,body.question.strip(),body.request_key,body.document_ids,resource_mode=body.resource_mode)
 
     @router.post('/api/chat/conversations/{identifier}/clarifications/{clarification}/resolve')
     def resolve_clarification(identifier:str,clarification:str,body:Clarify):

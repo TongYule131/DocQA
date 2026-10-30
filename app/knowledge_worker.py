@@ -41,10 +41,12 @@ class KnowledgeWorker:
             payload=json.loads(job['input_json'])
             if fingerprint(payload)!=job['input_hash'] or payload['configuration']!=configuration(self.settings,self.embedding):
                 raise TaskStopped('configuration_changed','输入或模型配置已变化，请重新提交')
-            with self.tasks.span(job,'知识库处理','PIPELINE') as parent:
+            with self.tasks.span(job,'对话处理' if payload.get('chat_policy') else '知识库处理','PIPELINE') as parent:
                 result=self.index(job,payload,parent) if job['kind']=='index' else self.answer(job,payload,parent)
             self.tasks.finish(job,'succeeded',result=result)
-        except TaskStopped as exc:self.tasks.finish(job,exc.status,code=exc.code,message=exc.message)
+        except TaskStopped as exc:
+            if exc.status=='queued':self.tasks.defer(job)
+            else:self.tasks.finish(job,exc.status,code=exc.code,message=exc.message)
         except Exception:self.tasks.finish(job,'failed',code='processing_failed',message='处理或引用校验未通过，未发布结果；请查看链路节点')
         finally:done.set();thread.join(timeout=2)
         return True
@@ -99,6 +101,9 @@ class KnowledgeWorker:
             return index.index_info(job['document_id'])
 
     def answer(self,job,payload,parent):
+        if payload.get('chat_policy'):
+            from app.general_chat import answer_auto
+            return answer_auto(self,job,payload,parent)
         from app.answer_stream import STREAM_VERSION
         if payload.get('stream_protocol') not in (None,STREAM_VERSION):
             raise TaskStopped('stream_protocol_changed','流式协议已变化，请新建任务')
@@ -151,6 +156,11 @@ class KnowledgeWorker:
         search_question=payload.get('retrieval_question',payload['question'])
         # 可选规划也是收费调用，必须先确认所有冻结来源仍有效。
         for doc in payload['documents']:original_index.verify_snapshot(doc['document_id'],doc['snapshot'])
+        agent_on=payload.get('retrieval_agent',{}).get('enabled',False)
+        if agent_on:
+            from app.retrieval_agent import remaining_requests
+            if self.tasks.row(job['id'])['requests_used']+remaining_requests(self.tasks,job['id'])>job['max_requests']:
+                raise TaskStopped('budget_exceeded','本题Agent最坏分支超过冻结预算，未发起下一请求')
         if self.settings.query_planner_enabled:
             from app.query_understanding import planner_messages,validate_plan
             context=payload.get('conversation_context',{}).get('entity_context',{})
@@ -231,6 +241,23 @@ class KnowledgeWorker:
                 raise TaskStopped('source_scope_invalid','证据来源范围无效') from None
             self.tasks.diagnostic(job,'retrieval',diagnostics)
             items=pack.items
+        agent_plan=None;agent_summary=None
+        if agent_on:
+            from app.retrieval_agent import run as run_agent
+            pack,agent_plan,agent_summary,agent_choice=run_agent(self,job,payload,pack,parent,{**limits,'context_chars':budget},query_plan=plan)
+            items=pack.items
+            diagnostics['coverage']={**diagnostics['coverage'],'route':'agent_selected_evidence',
+                                     'admitted_chunk_count':len(items),'semantic_completeness_verified':False}
+            if agent_choice['action']=='ask_clarification':
+                return {'answer':agent_choice['query'],'status':'clarification_needed','citations':[],
+                        'conclusion':[],'explanation':[],'clarification_questions':[agent_choice['query']],
+                        'missing_points':[],'retrieval_agent':agent_summary,
+                        'limitations':['本轮请求需要澄清；没有发布文档事实或执行业务工具']}
+            if agent_summary['stop_reason']=='no_supported_parts':
+                return {'answer':INSUFFICIENT_EVIDENCE_TEXT,'status':'insufficient_evidence','citations':[],
+                        'conclusion':[],'explanation':[],'clarification_questions':[],
+                        'missing_points':['本轮原文尚不足以支持所问内容，未进行正文生成'],
+                        'retrieval_agent':agent_summary,'limitations':['没有将缺失证据改写成完整回答']}
         if not items:return {'answer':INSUFFICIENT_EVIDENCE_TEXT,'status':'insufficient_evidence','citations':[],'conclusion':[],'explanation':[],
             'limitations':['本次检索未得到预算内的完整可用证据，未进行生成或公式核对'],
             'retrieval':{'slots':pack.slot_hints,'math_evidence':pack.math_hints,'coverage':diagnostics['coverage']}}
@@ -247,7 +274,7 @@ class KnowledgeWorker:
         from copy import deepcopy
         review_on=payload.get('semantic_review',{}).get('enabled',False)
         review_pack=deepcopy(pack) if review_on else None
-        pack,composition_plan,_=prepare_composition(pack,payload['question'],obtain_plan)
+        pack,composition_plan,_=prepare_composition(pack,payload['question'],agent_plan or obtain_plan)
         items=pack.items
         self.tasks.stage(job['id'],job['lease_token'],'generating')
         entries=[dict(i.payload(),document_name=names[i.document_id]) for i in items]
@@ -255,6 +282,13 @@ class KnowledgeWorker:
         math_state=('readable_text_unverified' if len(math_slots)==2 and all(s['state']=='admitted' for s in math_slots)
             and not pack.math_hints.get('incomplete_count') else 'unavailable_or_incomplete')
         user=writer_prompt(user_prompt(entries,math_state),pack,composition_plan)
+        if agent_summary:
+            from app.retrieval_agent import WRITER_RULE
+            value=json.loads(user)
+            value['retrieval_obligations']=agent_choice['coverage']
+            value['retrieval_stop_reason']=agent_summary['stop_reason']
+            value['retrieval_obligation_rule']=WRITER_RULE
+            user=dump(value)
         if len(system)+len(user)>self.settings.question_input_max_chars:raise TaskStopped('input_budget_exceeded','证据与规则超出输入预算，未发起生成')
         rag=RagService(self.settings,self.repository,original_index,self.model)
         stream_errors=[]
@@ -264,6 +298,9 @@ class KnowledgeWorker:
             raw=value if isinstance(value,str) else dump(value)
             if composition_plan is not None:validate_writer_plan(raw,composition_plan,pack,question=payload['question'])
             checked=validate_task_output(raw,pack,question=payload['question'],contract_version=ANSWER_CONTRACT_VERSION)
+            if agent_summary:
+                from app.retrieval_agent import validate_obligations
+                validate_obligations(raw,agent_choice)
             validate_user_condition_boundary(checked,pack,question=payload['question']);review_claims(checked,pack)
             return parse_model_output(raw)
         def generate():
@@ -304,6 +341,9 @@ class KnowledgeWorker:
             self.check(job)
             for doc in payload['documents']:original_index.verify_snapshot(doc['document_id'],doc['snapshot'])
             checked=validate_task_output(dump(protocol),pack,question=payload['question'],contract_version=ANSWER_CONTRACT_VERSION)
+            if agent_summary:
+                from app.retrieval_agent import validate_obligations
+                validate_obligations(dump(protocol),agent_choice)
             validate_user_condition_boundary(checked,pack,question=payload['question']);review_claims(checked,pack)
             citations=rag._citations(pack,checked.quotes,checked.citation_bindings)
             ids={c.reference_id:c.evidence_id for c in citations}
@@ -321,6 +361,8 @@ class KnowledgeWorker:
                 retrieval={'candidate_count':len(pack.candidates),'selected_count':len(items),'context_chars':pack.context_chars,
                     'truncated':pack.truncated,'slots':pack.slot_hints,'math_evidence':pack.math_hints,'coverage':diagnostics['coverage']},route=route['code'],snapshot_id=payload['snapshot_id'],
                 execution=execution_contract(route,payload['understanding'],plan))
+            if agent_summary:
+                result['retrieval_agent']=agent_summary
             if review_on:
                 from app.answer_semantic_review import request as review_request,messages,validate as validate_review,require_accept
                 from app.rag_validation import ModelOutputError

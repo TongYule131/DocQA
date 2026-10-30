@@ -9,6 +9,9 @@ async function refresh(){try{
     node('h2','已报告用量'),node('p',`已知总token ${data.usage.known_total_tokens} · 用量未知请求 ${data.usage.unknown_usage_calls} · 可核实费用：未知`),
     node('h2','存储'),node('p',`原件 ${mb(data.storage.original_bytes)}／${mb(data.storage.global_limit_bytes)} · 尚未结算预留 ${mb(data.storage.reserved_bytes)} · 磁盘可用 ${mb(data.storage.disk_free_bytes)}`));
   panel.append(node('h2','需要处理'));
+  if(data.context_budget){const budget=data.context_budget;panel.append(node('h2','统一上下文额度'),
+    node('p',`UTC今日已实报 ${budget.reported_tokens} token · 待核预留 ${budget.held_units} 计量单位 · 未知用量 ${budget.unknown_calls} 次 · 实报超出预留 ${budget.overrun_calls} 次。`),
+    node('p',`全局日额度 ${budget.daily_limit}，单任务默认 ${budget.task_limit}；预留含估算，未知费用不记为零。`));}
   const names={uncertain_calls:'存在不确定的在途请求，请核实费用，勿自动重发',pending_storage_reservations:'存在未完成的文件容量预留，请先核对原件',disk_low:'磁盘可用空间低于保留线',worker_not_ready:'执行者未就绪或进展已停滞',provider_circuit:'供应商处于熔断或半开探测',backup_unverified_or_old:'最近备份未知或超过7天，请核对独立备份'};
   if(!data.alerts.length)panel.append(node('p','未发现当前计数触发的告警。'));
   for(const alert of data.alerts)panel.append(node('p',names[alert.code]||'运行状态需要核对','error'));
@@ -16,7 +19,7 @@ async function refresh(){try{
   const evidence=session?.different_logon_context_observed?'已观测到不同登录上下文；仍需核对实际注销与重新登录操作。':session?.startup_count?'已记录本版驻留启动，尚无跨登录证据。':'尚无本版驻留启动记录。';
   panel.append(node('h2','登录恢复证据'),node('p',evidence),node('p','记录不会主动注销、重启电脑或发起模型请求；真实跨登录恢复仍需实际操作验收。','muted'));
   const latency=data.latency,format=(value)=>value===null?'未知':`${value} ms`;
-  panel.append(node('h2','耗时与上下文'),node('p',`UTC今日知识库任务，最近最多${latency.sample_limit}条；完整任务 P95 ${format(latency.total.p95_ms)}（${latency.total.count}条），首个已校验块 P95 ${format(latency.first_validated_block.p95_ms)}（${latency.first_validated_block.count}条）。`),
+  panel.append(node('h2','耗时与上下文'),node('p',`UTC今日对话处理任务，最近最多${latency.sample_limit}条；完整任务 P95 ${format(latency.total.p95_ms)}（${latency.total.count}条），首个已校验块 P95 ${format(latency.first_validated_block.p95_ms)}（${latency.first_validated_block.count}条）。`),
     node('p',`外部调用 P95 ${format(latency.external_call.p95_ms)} · 失败 ${latency.external_failures} · 不确定 ${latency.external_uncertain} · 上下文最大 ${latency.context.max_chars??'未知'} 字符（${latency.context.count}条）。`));
   panel.append(node('h2','最近备份'),node('p',data.last_backup.status==='completed'?`${data.last_backup.completed_at} · schema ${data.last_backup.schema_version} · ${data.last_backup.file_count}个文件；仅表示备份完成，恢复验收另计。`:'未找到本目录的已完成备份记录。'),node('p','告警仅在本后台展示，未向外部账号发送通知。','muted'));
   panel.append(node('h2','服务状态'));

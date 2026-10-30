@@ -50,9 +50,11 @@ class UnifiedChat:
             if write:allowed|={r[0] for r in db.execute('SELECT document_id FROM knowledge_base_documents WHERE knowledge_base_id=?',(base_id,))}
             if any(current_document(db,base_id,i) not in allowed for i in document_ids):raise HTTPException(404,'所选资料不在可访问的知识库范围')
 
-    def create(self,base_id,key,document_ids):
-        self.validate_filter(base_id,document_ids)
-        row=self.knowledge.create(base_id,key,allow_preparing=True,document_ids=document_ids)
+    def create(self,base_id,key,document_ids,resource_mode=None):
+        from app.general_chat import validate_scope
+        validate_scope(base_id,document_ids,resource_mode)
+        if base_id:self.validate_filter(base_id,document_ids)
+        row=self.knowledge.create(base_id,key,allow_preparing=True,document_ids=document_ids,resource_mode=resource_mode)
         return self.detail('k:'+row['id'])
 
     def original(self,identifier):
@@ -128,7 +130,7 @@ class UnifiedChat:
             'revision':canonical['revision'] if canonical else original.get('revision',0),'archived':canonical['archived'] if canonical else original.get('archived',0),
             'memory_enabled':canonical['memory_enabled'] if canonical else original.get('memory_enabled',True),
             'memory_notes':canonical['memory_notes'] if canonical else original.get('memory_notes',''),
-            'document_ids':document_ids,'turns':turns,'submissions':waiting,
+            'document_ids':document_ids,'resource_mode':canonical.get('resource_mode') if canonical else None,'turns':turns,'submissions':waiting,
             'entity_memory':canonical.get('entity_memory') if canonical else None}
 
     def bridge(self,identifier):
@@ -182,20 +184,22 @@ class UnifiedChat:
                 db.execute('UPDATE conversations SET archived=?,deleted_at=? WHERE id=?',(int(body.archived) if body.archived is not None else before['archived'],now_iso() if body.deleted else None,identifier[2:]))
         return {'deleted':True} if body.deleted else self.detail(identifier)
 
-    def submit(self,identifier,question,key,document_ids=None,*,clarification_id=None):
+    def submit(self,identifier,question,key,document_ids=None,*,clarification_id=None,resource_mode=None):
         source,original=self.original(identifier)
         with self.repository.connect() as db:
             if source=='d' and db.execute("SELECT 1 FROM question_jobs WHERE conversation_id=? AND status IN ('queued','running')",(original['id'],)).fetchone() or source=='q' and original['status'] in ('queued','running'):raise HTTPException(409,'原会话仍有活动任务，请等待完成或停止')
         canonical_id=self.bridge(identifier);conv=self.knowledge.require(canonical_id)
         if conv['archived']:raise HTTPException(409,'会话已归档')
         ids=json.loads(conv['document_filter_json']) if document_ids is None else document_ids
-        signature=fingerprint([question,ids])
+        from app.general_chat import validate_scope
+        validate_scope(conv['base_id'],ids,resource_mode)
+        signature=fingerprint([question,ids] if resource_mode is None else [question,ids,resource_mode])
         with self.repository.connect() as db:
             prior=db.execute('SELECT * FROM chat_submissions WHERE conversation_id=? AND request_key=?',(canonical_id,key)).fetchone()
         if prior:
             if prior['fingerprint']!=signature:raise HTTPException(409,'请求键已用于不同问题或范围')
             return dict(prior)
-        self.validate_filter(conv['base_id'],ids)
+        if conv['base_id']:self.validate_filter(conv['base_id'],ids)
         with self.repository.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             if clarification_id:
@@ -211,7 +215,9 @@ class UnifiedChat:
             if db.execute("SELECT 1 FROM chat_submissions WHERE conversation_id=? AND status='waiting'",(canonical_id,)).fetchone():raise HTTPException(409,'本会话已有等待资料的问题')
             base=db.execute('SELECT * FROM knowledge_bases WHERE id=?',(conv['base_id'],)).fetchone()
             jobs=[dict(r) for r in db.execute('SELECT * FROM ingestion_jobs WHERE base_id=?',(conv['base_id'],))]
-            if ids:
+            if resource_mode is not None:
+                waits=[]  # 新自动分流先处理普通对话；只有实际文档动作才等待资料。
+            elif ids:
                 wanted={current_document(db,conv['base_id'],i) for i in ids}
                 waits=[j['id'] for j in jobs if j['document_id'] in wanted]
             else:
@@ -219,8 +225,8 @@ class UnifiedChat:
             from app.resource_governance import admit
             admit(db,self.repository,self.owner)
             submission='submission-'+uuid4().hex;stamp=now_iso()
-            db.execute('INSERT INTO chat_submissions(id,conversation_id,owner_user_id,request_key,fingerprint,question,document_ids_json,waiting_jobs_json,memory_epoch,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-                (submission,canonical_id,self.owner,key,signature,question,dump(ids),dump(waits),conv['memory_epoch'],stamp,stamp))
+            db.execute('INSERT INTO chat_submissions(id,conversation_id,owner_user_id,request_key,fingerprint,question,document_ids_json,waiting_jobs_json,memory_epoch,created_at,updated_at,resource_mode) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                (submission,canonical_id,self.owner,key,signature,question,dump(ids),dump(waits),conv['memory_epoch'],stamp,stamp,resource_mode))
             if clarification_id:
                 db.execute("UPDATE conversation_clarifications SET state='resolved',resolved_submission_id=?,updated_at=? WHERE id=?",(submission,stamp,clarification_id))
             db.execute("UPDATE kb_conversations SET title=CASE WHEN title='新会话' THEN ? ELSE title END,updated_at=? WHERE id=?",(question[:60],stamp,canonical_id))
@@ -249,7 +255,7 @@ class ChatSubmissionCoordinator:
         from app.product_access import ProductAccess,actor_context,public_user
         with self.repository.connect() as db:
             conv=db.execute('SELECT * FROM kb_conversations WHERE id=?',(row['conversation_id'],)).fetchone()
-            if not conv or conv['deleted_at'] or conv['archived'] or conv['memory_epoch']!=row['memory_epoch'] or not base_allowed(db,conv['base_id'],row['owner_user_id']):
+            if not conv or conv['deleted_at'] or conv['archived'] or conv['memory_epoch']!=row['memory_epoch'] or conv['base_id'] and not base_allowed(db,conv['base_id'],row['owner_user_id']):
                 self.finish(row,'cancelled','access_changed','会话、记忆或资料权限已变化');return
             for identifier in json.loads(row['waiting_jobs_json']):
                 job=db.execute('SELECT * FROM ingestion_jobs WHERE id=?',(identifier,)).fetchone()
@@ -271,6 +277,6 @@ class ChatSubmissionCoordinator:
             with self.repository.connect() as db:
                 confirmation=db.execute('SELECT id FROM conversation_clarifications WHERE resolved_submission_id=?',(row['id'],)).fetchone()
             task=knowledge.submit(row['conversation_id'],row['question'],'submission/'+row['id'],document_ids=json.loads(row['document_ids_json']),submission_id=row['id'],
-                                  confirmation_id=confirmation[0] if confirmation else None)
+                                  confirmation_id=confirmation[0] if confirmation else None,resource_mode=row['resource_mode'] if not confirmation else None)
             self.finish(row,'submitted',None,None,task['id'])
         finally:actor_context.reset(token)

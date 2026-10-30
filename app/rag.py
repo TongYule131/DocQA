@@ -147,12 +147,14 @@ class RagService:
         return document, start_version_id, info
 
     def _configuration_signature(self) -> str:
+        from app.context_budget import policy_hash
         """冻结实际影响问答的非凭证配置；排队后改配置不能静默扩大输入或费用。"""
         from app.answer_semantic_review import policy as review_policy
         names = ("deepseek_base_url", "deepseek_model", "deepseek_thinking",
                  "deepseek_reasoning_effort", "deepseek_max_tokens", "rag_retrieval_k",
                  "rag_context_k", "rag_context_max_chars", "rag_input_max_chars", "rag_min_score")
         payload = {name: getattr(self.settings, name) for name in names}
+        payload['context_budget_policy']=policy_hash(self.settings)
         from app.query_understanding import policy
         payload["understanding_policy"] = policy(self.settings)
         payload["prompt_version"] = PROMPT_VERSION
@@ -435,7 +437,8 @@ class RagService:
                 if len(system)+len(user)>self.settings.question_input_max_chars:
                     raise RagError(422,'rag_input_too_large','证据规划输入超出预算，未发起调用')
                 emit('composition_started',{})
-                raw_plan=self.model.generate(system,user)
+                from app.context_budget import profile_scope
+                with profile_scope('planning'):raw_plan=self.model.generate(system,user)
                 checkpoint=validate(raw_plan)
                 emit('composition_completed',{'checkpoint':checkpoint,'provider_usage':getattr(self.model,'last_call_metadata',None)})
                 return checkpoint
@@ -477,11 +480,13 @@ class RagService:
                 if time.perf_counter()-last_check[0]>=.25:
                     emit('stream_check',{});last_check[0]=time.perf_counter()
             try:
-                raw=self.model.generate_stream(system_prompt,user_prompt,parser.feed,stream_active)
+                from app.context_budget import profile_scope
+                with profile_scope('answer'):raw=self.model.generate_stream(system_prompt,user_prompt,parser.feed,stream_active)
             except ModelOutputError:
                 raise RagError(502,'rag_output_invalid','流式内容未通过结构或引用校验，未发布回答') from None
         else:
-            raw = self.model.generate(system_prompt, user_prompt)
+            from app.context_budget import profile_scope
+            with profile_scope('answer'):raw = self.model.generate(system_prompt, user_prompt)
         generation_ms = _elapsed_ms(generation_started)
 
         emit("validation_started", {})
@@ -529,7 +534,8 @@ class RagService:
                 else:
                     emit('semantic_review_input',{'request':value})
                     emit('semantic_review_started',{})
-                    report=validate_review(self.model.generate(review_system,review_user),value)
+                    from app.context_budget import profile_scope
+                    with profile_scope('review'):report=validate_review(self.model.generate(review_system,review_user),value)
                     emit('semantic_review_completed',{'report':report,'provider_usage':getattr(self.model,'last_call_metadata',None)})
                 require_accept(report)
             except ModelOutputError as exc:

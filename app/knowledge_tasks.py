@@ -44,9 +44,12 @@ def configuration(settings, embedding):
     from app.rag_composition import COMPOSITION_VERSION
     from app.query_understanding import policy
     from app.intent_execution import EXECUTION_VERSION
-    return fingerprint([EXECUTION_VERSION,policy(settings),review_policy(settings),PIPELINE_VERSION,QUERY_PLAN_VERSION,RETRIEVAL_STRATEGY_VERSION,SLOT_PLAN_VERSION,SOURCE_DIAGNOSTIC_VERSION,
+    from app.general_chat import POLICY_VERSION, SYSTEM
+    from app.context_budget import policy_hash
+    from app.retrieval_agent import policy as agent_policy
+    return fingerprint([agent_policy(settings),policy_hash(settings),POLICY_VERSION,SYSTEM,EXECUTION_VERSION,policy(settings),review_policy(settings),PIPELINE_VERSION,QUERY_PLAN_VERSION,RETRIEVAL_STRATEGY_VERSION,SLOT_PLAN_VERSION,SOURCE_DIAGNOSTIC_VERSION,
         SELECTION_VERSION,NUMERIC_ROLE_VERSION,MATH_EVIDENCE_VERSION,SLOT_RANGE_VERSION,PAGE_LABEL_VERSION,PRESENTATION_VERSION,ANSWER_CONTRACT_VERSION,policy_signature(),COMPOSITION_VERSION,PHRASE_POLICY_VERSION,embedding.signature, settings.deepseek_base_url, settings.deepseek_model,
-        settings.deepseek_thinking, TASK_PROMPT_VERSION, KNOWLEDGE_PROMPT_VERSION, KNOWLEDGE_RULE, settings.question_context_max_chars,
+        settings.deepseek_thinking,settings.deepseek_max_tokens,settings.deepseek_reasoning_effort, TASK_PROMPT_VERSION, KNOWLEDGE_PROMPT_VERSION, KNOWLEDGE_RULE, settings.question_context_max_chars,
         settings.question_input_max_chars, settings.question_context_k,settings.question_candidate_k,
         settings.rag_retrieval_k,settings.rag_min_score,MEMORY_SIGNATURE])
 
@@ -57,6 +60,7 @@ class TaskStopped(Exception):
 
 
 class KnowledgeTasks:
+    budget_source='knowledge'
     def __init__(self, repository):
         self.repository = repository
 
@@ -132,6 +136,9 @@ class KnowledgeTasks:
             if payload.get('conversation_id') and row['status'] in ('queued','running'):
                 conv=db.execute('SELECT memory_epoch FROM kb_conversations WHERE id=?',(payload['conversation_id'],)).fetchone()
                 if not conv or conv[0]!=payload.get('memory_epoch'):return False
+            if payload.get('chat_policy'):
+                from app.general_chat import auto_allowed
+                return auto_allowed(db,row,payload)
             base=db.execute('SELECT active_snapshot_id FROM knowledge_bases WHERE id=?',(row['base_id'],)).fetchone()
             if not base or not base[0]:return payload.get('route',{}).get('kind')=='SYSTEM'
             current=scope_documents(db,row['base_id'])
@@ -164,7 +171,8 @@ class KnowledgeTasks:
                 db.execute('UPDATE kb_tasks SET status=?,error_code=?,error_message=?,lease_token=NULL,lease_expires_at=NULL WHERE id=?',
                     ('needs_attention' if pending else 'queued','call_uncertain' if pending else None,'存在未确认调用，请核实后明确重试' if pending else None,entry[0]))
             from app.resource_governance import choose
-            row=choose(db,self.repository,'kb_tasks',identifier)
+            from app.general_chat import ready_for_dispatch
+            row=choose(db,self.repository,'kb_tasks',identifier,ready=ready_for_dispatch)
             if not row:return None
             if not self.allowed(db,row):
                 db.execute("UPDATE kb_tasks SET status='cancelled',error_code='access_revoked',error_message='账号、会话或资料权限已变更',finished_at=? WHERE id=?",(now_iso(),row['id']))
@@ -197,7 +205,7 @@ class KnowledgeTasks:
         status,code='succeeded',None
         try:yield identifier
         except Exception as exc:
-            status,code='failed',exc.code if isinstance(exc,TaskStopped) else 'step_failed'
+            status,code=('waiting' if isinstance(exc,TaskStopped) and exc.status=='queued' else 'failed'),exc.code if isinstance(exc,TaskStopped) else 'step_failed'
             raise
         finally:
             with self.repository.connect() as db:db.execute('UPDATE kb_trace_spans SET status=?,finished_at=?,elapsed_ms=?,error_code=? WHERE id=?',(status,now_iso(),round((time.perf_counter()-start)*1000),code,identifier))
@@ -262,7 +270,7 @@ class KnowledgeTasks:
             uncertain=(getattr(exc,'uncertain',False) or getattr(exc,'status_code',None)==504 or isinstance(exc,TaskStopped) and exc.status=='needs_attention'
                 or not hasattr(exc,'status_code') and not isinstance(exc,(TaskStopped,ValueError,ModelOutputError)))
             code='output_'+exc.reason if isinstance(exc,ModelOutputError) else 'call_uncertain' if uncertain else 'call_failed'
-            if role=='generation' and isinstance(exc,ModelOutputError):
+            if (role=='generation' or checkpoint and checkpoint.startswith('agent_decision:')) and isinstance(exc,ModelOutputError):
                 self.diagnostic(job,'validation',dict(reason=exc.reason,location=exc.location,
                     sequence_no=sequence,output=raw if isinstance(raw,(str,dict)) else None))
             with self.repository.connect() as db:
@@ -270,6 +278,10 @@ class KnowledgeTasks:
                     ('uncertain' if uncertain else 'failed','uncertain' if uncertain else 'sent',code,dump(_usage_metadata(usage)),now_iso(),round((time.perf_counter()-started)*1000),identifier,sequence))
             if isinstance(exc,TaskStopped):raise
             messages = {
+                'output_general_protocol_invalid': '普通回答或本轮分流格式无效，未发布结果；没有改用知识检索',
+                'output_agent_decision_invalid': '检索Agent动作、覆盖或选材格式无效，未继续调用',
+                'output_agent_checkpoint_changed': '检索Agent检查点与当前原文范围不一致，未继续调用',
+                'output_agent_coverage_lost': '正文丢失已登记的证据缺口，未发布完整回答',
                 'output_composition_plan_invalid': '证据选材与段落计划无效，未发起正文生成',
                 'output_composition_reference_invalid': '段落计划或正文使用了范围外的证据单元，未发布结果',
                 'output_composition_coverage_invalid': '段落计划的子问覆盖无效，未发起正文生成',
@@ -293,6 +305,13 @@ class KnowledgeTasks:
                        messages.get(code, '调用或输出校验失败；未发布结果'))
             raise TaskStopped(code,message,'needs_attention' if uncertain else 'failed') from None
 
+    def defer(self,job):
+        with self.repository.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not self.valid(db,job['id'],job['lease_token']):return False
+            db.execute("UPDATE kb_tasks SET status='queued',stage='waiting_materials',lease_token=NULL,lease_expires_at=NULL,updated_at=? WHERE id=?",(now_iso(),job['id']))
+        return True
+
     def finish(self, job, status, *, result=None, code=None, message=None):
         with self.repository.connect() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -300,11 +319,18 @@ class KnowledgeTasks:
             if not row or row['lease_token']!=job['lease_token'] or row['status']!='running':return False
             if status=='succeeded' and not self.valid(db,job['id'],job['lease_token']):status,result,code,message='cancelled',None,'task_stopped','资料权限或会话状态已变化，结果未发布'
             payload=json.loads(row['input_json'])
+            if payload.get('chat_policy'):
+                frozen=db.execute("SELECT payload_json FROM kb_task_checkpoints WHERE task_id=? AND name='auto_document_input'",(job['id'],)).fetchone()
+                if frozen:payload=json.loads(frozen[0])['payload']
             if status=='succeeded' and result and payload.get('semantic_review',{}).get('enabled') and result.get('status') in {'answered','partial'}:
                 from app.answer_semantic_review import verify_stored_publication
                 records={r['name']:json.loads(r['payload_json']) for r in db.execute(
                     "SELECT name,payload_json FROM kb_task_checkpoints WHERE task_id=? AND name IN ('semantic_review_input','semantic_review')",(job['id'],))}
                 verify_stored_publication(result,records.get('semantic_review_input',{}),records.get('semantic_review'),payload['question'])
+            if status=='succeeded' and result and json.loads(row['input_json']).get('chat_policy') and result.get('clarification') and result['clarification'].get('kind')!='tool_parameters':
+                original=json.loads(row['input_json']);clar=result['clarification'];stamp=now_iso()
+                db.execute('INSERT OR IGNORE INTO conversation_clarifications(id,task_id,conversation_id,owner_user_id,epoch,needed_count,choices_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
+                    (clar['id'],row['id'],original['conversation_id'],row['owner_user_id'],original['memory_epoch'],clar['needed_count'],dump(clar['choices']),stamp,stamp))
             if status=='succeeded' and result and result.get('clarification',{}).get('kind')=='tool_parameters':
                 payload=json.loads(row['input_json']);clar=result['clarification'];stamp=now_iso()
                 db.execute('INSERT INTO conversation_clarifications(id,task_id,conversation_id,owner_user_id,epoch,needed_count,choices_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',

@@ -30,6 +30,8 @@ from app.rag_context import EvidencePack, normalize_text
 
 # 校验失败原因码：进入日志与错误码，不含原文、完整输出与凭证。
 REASON_CODE_NAMES = {
+    'agent_decision_invalid','agent_checkpoint_changed','agent_coverage_lost',
+    'general_protocol_invalid',
     'answer_redundant_fact','semantic_review_invalid','semantic_review_rejected','semantic_review_uncertain','semantic_review_result_mismatch',
     'composition_plan_invalid','composition_reference_invalid','composition_coverage_invalid',
     'composition_layout_mismatch','composition_comparison_unpaired','composition_source_missing',

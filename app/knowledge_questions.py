@@ -29,30 +29,34 @@ class KnowledgeQuestions:
         if len(rows)>50:raise HTTPException(422,'首版单知识库问答最多50份资料，请分库管理')
         return base,rows
 
-    def create(self, base_id, key, *, allow_preparing=False, document_ids=None):
-        if allow_preparing:self.access.base(base_id)
+    def create(self, base_id, key, *, allow_preparing=False, document_ids=None, resource_mode=None):
+        if base_id is None:
+            if resource_mode!='none':raise HTTPException(422,'无知识库会话须明确不使用资料')
+        elif allow_preparing:self.access.base(base_id)
         else:self.base_scope(base_id,document_ids)
         with self.repository.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             prior=db.execute('SELECT * FROM kb_conversations WHERE owner_user_id IS ? AND request_key=?',(self.owner,key)).fetchone()
             if prior:
-                if prior['base_id']!=base_id or json.loads(prior['document_filter_json'])!=(document_ids or []):raise HTTPException(409,'请求键已用于其他知识库或文档范围')
+                if prior['base_id']!=base_id or json.loads(prior['document_filter_json'])!=(document_ids or []) or prior['resource_mode']!=resource_mode:raise HTTPException(409,'请求键已用于其他知识库或文档范围')
                 return dict(prior)
             identifier,stamp='kconv-'+uuid4().hex,now_iso()
-            db.execute('INSERT INTO kb_conversations(id,base_id,owner_user_id,title,request_key,created_at,updated_at,document_filter_json) VALUES (?,?,?,?,?,?,?,?)',(identifier,base_id,self.owner,'新会话',key,stamp,stamp,dump(document_ids or [])))
+            db.execute('INSERT INTO kb_conversations(id,base_id,owner_user_id,title,request_key,created_at,updated_at,document_filter_json,resource_mode) VALUES (?,?,?,?,?,?,?,?,?)',(identifier,base_id,self.owner,'新会话',key,stamp,stamp,dump(document_ids or []),resource_mode))
         return self.require(identifier)
 
     def require(self, identifier):
         with self.repository.connect() as db:row=db.execute('SELECT * FROM kb_conversations WHERE id=? AND owner_user_id IS ?',(identifier,self.owner)).fetchone()
         if not row or row['deleted_at']:raise HTTPException(404,'会话不存在或未获授权')
-        self.access.base(row['base_id'])
+        if row['base_id']:self.access.base(row['base_id'])
         return dict(row)
 
     def list(self):
         with self.repository.connect() as db:rows=[dict(r) for r in db.execute('SELECT * FROM kb_conversations WHERE owner_user_id IS ? AND deleted_at IS NULL ORDER BY updated_at DESC',(self.owner,))]
         result=[]
         for r in rows:
-            try:self.access.base(r['base_id']);result.append(r)
+            try:
+                if r['base_id']:self.access.base(r['base_id'])
+                result.append(r)
             except HTTPException:pass
         return result
 
@@ -79,6 +83,14 @@ class KnowledgeQuestions:
         value['result']=json.loads(row['result_json']) if row['result_json'] else None
         with self.repository.connect() as db:
             value['calls']=[{k:r[k] for k in ['sequence_no','role','status','error_code','elapsed_ms']} for r in db.execute('SELECT * FROM kb_task_calls WHERE task_id=? ORDER BY sequence_no',(row['id'],))]
+            from app.context_budget import status as budget_status
+            value['context_budget']=budget_status(db,self.access.settings,task_key='knowledge:'+row['id'])
+            reduction=db.execute("SELECT payload_json FROM kb_task_checkpoints WHERE task_id=? AND name='context_reduction'",(row['id'],)).fetchone()
+            if reduction:value['context_budget']['history_reduction']=json.loads(reduction[0])
+            agent=db.execute("SELECT payload_json FROM kb_task_checkpoints WHERE task_id=? AND name='retrieval_agent'",(row['id'],)).fetchone()
+            if agent:
+                from app.retrieval_agent import public_summary
+                value['retrieval_agent']=public_summary(json.loads(agent[0]))
             if value['result'] and value['result'].get('clarification'):
                 state=db.execute('SELECT state,resolve_key,choices_json FROM conversation_clarifications WHERE task_id=?',(row['id'],)).fetchone()
                 value['result']['clarification']['state']=state['state'] if state else 'cancelled'
@@ -90,7 +102,7 @@ class KnowledgeQuestions:
         conv=self.require(identifier)
         with self.repository.connect() as db:ids=[r[0] for r in db.execute('SELECT task_id FROM kb_conversation_turns WHERE conversation_id=? ORDER BY turn_no',(identifier,))]
         conv['turns']=[self.present(self.require_task(i)) for i in ids]
-        conv['base']=self.access.base(conv['base_id'])
+        conv['base']=self.access.base(conv['base_id']) if conv['base_id'] else None
         from app.entity_memory import context
         with self.repository.connect() as db:conv['entity_memory']=context(db,conv,self.access.settings)
         with self.repository.connect() as db:
@@ -98,7 +110,10 @@ class KnowledgeQuestions:
         conv['entity_memory']['material_scope']=[{'document_id':d['document_id'],'name':d['filename']} for d in documents if not json.loads(conv['document_filter_json']) or d['document_id'] in json.loads(conv['document_filter_json'])]
         return conv
 
-    def submit(self, identifier, question, key, *, document_ids=None, submission_id=None, confirmation_id=None):
+    def submit(self, identifier, question, key, *, document_ids=None, submission_id=None, confirmation_id=None, resource_mode=None):
+        if resource_mode is not None:
+            from app.general_chat import submit_auto
+            return submit_auto(self,identifier,question,key,document_ids or [],resource_mode,submission_id)
         conv=self.require(identifier)
         if conv['archived']:raise HTTPException(409,'会话已归档，请恢复或新建会话')
         document_ids=json.loads(conv['document_filter_json']) if document_ids is None else document_ids
@@ -109,6 +124,13 @@ class KnowledgeQuestions:
                 previous=json.loads(prior['input_json'])
                 if previous['question']!=question or previous.get('document_filter',[])!=document_ids:raise HTTPException(409,'请求键已用于不同问题或文档范围')
                 return self.present(self.require_task(prior['id']))
+        payload=self.prepare_payload(conv,question,document_ids,submission_id=submission_id,confirmation_id=confirmation_id)
+        row=self.tasks.create('question',payload,identifier+'/'+key,base_id=conv['base_id'],owner=self.owner,max_requests=8,conversation_id=identifier)
+        return self.present(row)
+
+    def prepare_payload(self,conv,question,document_ids,*,submission_id=None,confirmation_id=None):
+        identifier=conv['id']
+        with self.repository.connect() as db:
             history=[json.loads(r[0])['question'] for r in db.execute("SELECT j.input_json FROM kb_conversation_turns t JOIN kb_tasks j ON j.id=t.task_id WHERE t.conversation_id=? AND j.status='succeeded' AND json_extract(j.input_json,'$.memory_epoch')=? AND json_extract(j.input_json,'$.route.kind')!='SYSTEM' ORDER BY t.turn_no DESC LIMIT 3",(identifier,conv['memory_epoch']))][::-1] if conv['memory_enabled'] else []
             anchor=db.execute('SELECT source,source_id FROM unified_chat_links WHERE conversation_id=?',(identifier,)).fetchone()
         if conv['memory_enabled'] and conv['memory_epoch']==0:history=(json.loads(conv['initial_context_json'])+history)[-3:]
@@ -161,6 +183,10 @@ class KnowledgeQuestions:
             from app.answer_semantic_review import policy as review_policy,enabled as review_enabled
             payload['semantic_review']=review_policy(self.access.settings)
             payload['provider_requests_expected']=2+int(needs_plan(question))+int(self.access.settings.query_planner_enabled)+int(review_enabled(self.access.settings))
+            from app.retrieval_agent import policy as agent_policy
+            payload['retrieval_agent']=agent_policy(self.access.settings)
+            if payload['retrieval_agent']['enabled']:
+                payload['provider_requests_expected']=payload['retrieval_agent']['max_provider_requests']
         if route['kind']=='MCP':
             from app.knowledge_tools import ToolRegistry
             tool=ToolRegistry(self.repository).get(route.get('tool_id'))
@@ -175,8 +201,7 @@ class KnowledgeQuestions:
                 if candidate['kind']=='MCP':
                     tool=registry.get(candidate.get('tool_id'))
                     if tool and tool['enabled'] and tool['read_only']:payload['semantic_tool_revisions'][tool['id']]=tool['revision']
-        row=self.tasks.create('question',payload,identifier+'/'+key,base_id=base['id'],owner=self.owner,max_requests=8,conversation_id=identifier)
-        return self.present(row)
+        return payload
 
     def memory(self, identifier, enabled, clear):
         self.require(identifier)

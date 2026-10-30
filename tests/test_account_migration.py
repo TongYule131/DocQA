@@ -39,7 +39,7 @@ def old_environment(tmp_path):
 
 def test_upgrade_preserves_all_old_rows_avatar_sources_and_session_and_is_idempotent(tmp_path):
     env,user,before=old_environment(tmp_path)
-    summary=env.repository.initialize();assert summary['from']==16 and summary['to']==17 and summary['applied']==[17] and summary['backup']
+    summary=env.repository.initialize();assert summary['from']==16 and summary['to']==migrations.SCHEMA_VERSION and summary['applied']==list(range(17,migrations.SCHEMA_VERSION+1)) and summary['backup']
     with env.repository.connect() as db:
         after=snapshot(db);assert all(after[name]==rows for name,rows in before.items())
         assert tuple(db.execute('SELECT user_id,must_change_password,credential_version FROM product_account_state').fetchone())==(user['id'],0,0)
@@ -56,15 +56,20 @@ def test_upgrade_preserves_all_old_rows_avatar_sources_and_session_and_is_idempo
 
 def test_failed_v17_upgrade_rolls_back_and_backup_restores_in_another_isolated_directory(tmp_path):
     env,user,before=old_environment(tmp_path/'source')
+    previous_backups=set((env.settings.data_dir/'db-backups').glob('*.db'))
     migrations.MigrationHook.register(17,lambda:(_ for _ in ()).throw(RuntimeError('synthetic-account-migration-failure')))
     try:
         with pytest.raises(migrations.MigrationError,match='synthetic-account-migration-failure'):env.repository.initialize()
     finally:migrations.MigrationHook.clear()
     with env.repository.connect() as db:assert migrations.validate_schema(db,version=16)==16 and snapshot(db)==before
-    backups=list((env.settings.data_dir/'db-backups').glob('*.db'));assert backups
+    # glob不保证创建顺序；精确选本次失败迁移生成的备份，不能误取建库前的空库备份。
+    backups=set((env.settings.data_dir/'db-backups').glob('*.db'))-previous_backups;assert len(backups)==1
+    failed_backup=backups.pop()
     restored=tmp_path/'restored';restored.mkdir()
-    with closing(sqlite3.connect(backups[-1].as_uri()+'?mode=ro',uri=True)) as source,closing(sqlite3.connect(restored/'docqa.db')) as target:source.backup(target)
-    repository=Repository(restored/'docqa.db');assert repository.initialize()['applied']==[17]
+    with closing(sqlite3.connect(failed_backup.as_uri()+'?mode=ro',uri=True)) as source,closing(sqlite3.connect(restored/'docqa.db')) as target:
+        assert migrations.validate_schema(source,version=16)==16 and snapshot(source)==before
+        source.backup(target)
+    repository=Repository(restored/'docqa.db');assert repository.initialize()['applied']==list(range(17,migrations.SCHEMA_VERSION+1))
     with repository.connect() as db:
         after=snapshot(db);assert all(after[name]==rows for name,rows in before.items())
         assert not db.execute('SELECT 1 FROM product_account_state WHERE must_change_password=1').fetchone()

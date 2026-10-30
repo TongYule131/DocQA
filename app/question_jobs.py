@@ -609,6 +609,8 @@ class QuestionJobService:
             calls = db.execute("SELECT sequence_no,role,status,error_code,started_at,settled_at,elapsed_ms,provider_usage_json"
                                " FROM question_calls WHERE job_id=? ORDER BY sequence_no", (job_id,)).fetchall()
             stages = db.execute("SELECT stage,created_at FROM question_stage_events WHERE job_id=? ORDER BY id", (job_id,)).fetchall()
+            from app.context_budget import status as budget_status
+            job['context_budget']=budget_status(db,self.settings,task_key='question:'+job_id)
             completed = db.execute("SELECT COUNT(*) FROM question_checkpoints WHERE job_id=? AND role IN ('retrieval','answer')", (job_id,)).fetchone()[0]
         job["calls"] = []
         for call in calls:

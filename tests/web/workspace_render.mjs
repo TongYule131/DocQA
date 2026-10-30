@@ -11,6 +11,11 @@ class Element {
   walk() { return [this, ...this.children.flatMap(item => item.walk())]; }
 }
 globalThis.document = { createElement: tag => new Element(tag), createTextNode: text => new Element('#text', text) };
+const ordinaryRoot=new Element('div');
+renderAnswer(ordinaryRoot,{response_kind:'general',answer:'通用解释 <img src=x> [1]',citations:[{reference_id:1}]},()=>{throw Error('no ordinary citations');});
+assert.match(ordinaryRoot.textContent,/通用回答/);
+assert.match(ordinaryRoot.textContent,/\[1\]/);
+assert(!ordinaryRoot.walk().some(e=>['button','img','script','details'].includes(e.tagName)));
 const root = new Element('div'); let opened = null;
 const answer = { answer: '# 标题\n**关键事实** <img src="https://example.invalid/track" onerror="alert(1)"> [1] [99]\n- [外链](javascript:alert(1))',
   citations: [{ reference_id: 1, quote: '<script>bad()</script>', sources: [{ format: 'docx', section_path: '第一章' }] }],

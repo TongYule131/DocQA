@@ -45,14 +45,15 @@ function render() {
     for (const task of current?.turns || []) {
       const turn = node('section', '', 'kb-chat-turn'); turn.append(node('p', task.question, 'kb-user-message'));
       const answer = node('article', '', 'kb-assistant'); answer.append(node('strong', 'DocQA'));
-      if (task.result) {
+      const displaying=stream.presenting?.(task)||false;
+      if (task.result&&!displaying) {
         const body = node('div', '', 'answer-body'); renderAnswer(body, task.result, openSource); answer.append(body);
         const facts = [...(task.result.conclusion || []), ...(task.result.explanation || [])];
         if (facts.length) { const audit = node('details', '', 'audit-details'); audit.append(node('summary', '查看论断与引用校验详情')); facts.forEach(f => audit.append(node('p', `${({ direct: '原文直述', synthesis: '多处综合', inference: '推断' })[f.claim_type] || '待核对'} · ${f.text} · ${f.support_review?.status === 'needs_review' ? '存在待复核风险' : '证据规则检查通过'}；语义未自动认证`))); answer.append(audit); }
         const actions = node('div', '', 'row'), copy = node('button', '复制回答', 'secondary'); copy.type = 'button'; copy.onclick = async () => { try { await navigator.clipboard.writeText(answerTextForDisplay(task.result)); notice('已复制回答'); } catch { notice('无法使用剪贴板，请选择正文复制。'); } }; actions.append(copy); const download = node('a', '导出结果', 'button secondary'); download.href = `/api/kb-tasks/${encoded(task.id)}/export`; actions.append(download); answer.append(actions);
       } else {
         stream.render(answer,task,openSource);
-        answer.append(node('p', task.error_message || labels[task.stage] || '正在处理'));
+        if(!displaying)answer.append(node('p', task.error_message || labels[task.stage] || '正在处理'));
         if (active(task)) { const cancel = node('button', task.cancel_requested ? '正在停止' : '停止后续处理', 'secondary'); cancel.type = 'button'; cancel.disabled = Boolean(task.cancel_requested); cancel.onclick = () => perform(async () => { await api(`/api/kb-tasks/${encoded(task.id)}/cancel`, { method: 'POST' }); await refresh(); }); answer.append(cancel); }
         if (['failed', 'needs_attention'].includes(task.status)) { const retry = node('button', '复用检查点重试', 'secondary'); retry.type = 'button'; retry.onclick = () => perform(async () => { let acknowledged = false; if (task.calls.some(c => c.status === 'uncertain')) { acknowledged = confirm('有未确认的调用，可能已计费。再次执行可能产生额外费用，是否明确重试？'); if (!acknowledged) return; } await api(`/api/kb-tasks/${encoded(task.id)}/retry`, json('POST', { acknowledge_uncertain: acknowledged })); await refresh(); }); answer.append(retry); }
       }

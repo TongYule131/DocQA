@@ -161,6 +161,8 @@ def execute_tool(worker,job,payload,route,parent):
                 body={'jsonrpc':'2.0','method':method,'params':params}
                 if identifier is not None:body['id']=identifier
                 try:
+                    from app.resource_governance import mark_provider_sent,mark_provider_completed
+                    mark_provider_sent()
                     with client.stream('POST',tool['endpoint'],json=body,headers=headers) as response:
                         if response.status_code>=300:raise TaskStopped('tool_http_error','工具服务请求失败')
                         session=response.headers.get('mcp-session-id')
@@ -169,6 +171,7 @@ def execute_tool(worker,job,payload,route,parent):
                         for part in response.iter_bytes():
                             worker.check(job);data+=part
                             if len(data)>1024*1024:raise TaskStopped('tool_response_too_large','工具响应超过1MB上限')
+                        mark_provider_completed()
                         if identifier is None:return {},None
                         if 'text/event-stream' in response.headers.get('content-type',''):
                             messages=[]
@@ -183,8 +186,14 @@ def execute_tool(worker,job,payload,route,parent):
                         if decoded.get('id')!=identifier or 'error' in decoded or not isinstance(decoded.get('result'),dict):raise ValueError('tool_protocol_error')
                         return decoded['result'],None
                 except httpx.TimeoutException:raise TaskStopped('tool_call_uncertain','工具请求超时，结果不确定；不会自动重发','needs_attention') from None
+            def accounted_send():
+                from app.resource_governance import provider_guard
+                from app.deepseek import ModelError
+                identity='mcp|'+tool['id']+'|'+str(tool['revision'])+'|'+tool['endpoint']
+                with provider_guard(worker.settings,'mcp',ModelError,delivery_tracked=True,provider_identity=identity,timeout_seconds=30):
+                    return send()
             with worker.tasks.span(job,method,'MCP',parent):
-                return worker.tasks.call(job,'mcp_'+method,send,checkpoint=checkpoint)
+                return worker.tasks.call(job,'mcp_'+method,accounted_send,checkpoint=checkpoint)
         initialized=rpc('initialize',{'protocolVersion':tool['protocol_version'],'capabilities':{},'clientInfo':{'name':'DocQA','version':'1'}},1)
         if initialized.get('protocolVersion')!=tool['protocol_version']:raise TaskStopped('tool_protocol_unsupported','工具协议版本不兼容')
         rpc('notifications/initialized',{},None)

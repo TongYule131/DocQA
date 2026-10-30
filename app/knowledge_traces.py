@@ -2,6 +2,7 @@
 import math
 import json
 from app.repository import parse_iso
+from app.query_planning import describe_plan
 
 
 def milliseconds(start,end):
@@ -22,7 +23,8 @@ class KnowledgeTraces:
                     'requests_used':None,'error_code':row['error_code'],'stage':row['stage']})
             for table,kind in [('kb_tasks','knowledge'),('question_jobs','question')]:
                 for row in db.execute(f'SELECT j.*,u.username FROM {table} j LEFT JOIN product_users u ON u.id=j.owner_user_id ORDER BY j.created_at DESC LIMIT 500'):
-                    result.append({'id':row['id'],'name':('knowledge-index' if row['kind']=='index' else 'knowledge-chat') if table=='kb_tasks' else 'document-chat',
+                    generic=table=='kb_tasks' and row['kind']=='question' and row['result_json'] and json.loads(row['result_json']).get('response_kind')=='general'
+                    result.append({'id':row['id'],'name':'general-chat' if generic else ('knowledge-index' if row['kind']=='index' else 'knowledge-chat') if table=='kb_tasks' else 'document-chat',
                         'source':kind,'status':row['status'],'owner':row['username'] or '本地用户',
                         'created_at':row['created_at'],'started_at':row['started_at'],'finished_at':row['finished_at'],
                         'elapsed_ms':milliseconds(row['started_at'],row['finished_at']),'requests_used':row['requests_used'],
@@ -53,22 +55,28 @@ class KnowledgeTraces:
                 children=[i for i in tuple(job) if i];spans=[];calls=[]
             elif record['source']=='knowledge':
                 spans=[dict(r) for r in db.execute('SELECT * FROM kb_trace_spans WHERE task_id=? ORDER BY started_at,rowid',(identifier,))]
-                calls=[dict(r) for r in db.execute('SELECT sequence_no,role,status,error_code,started_at,finished_at,elapsed_ms FROM kb_task_calls WHERE task_id=? ORDER BY sequence_no',(identifier,))]
+                calls=[dict(r) for r in db.execute('SELECT sequence_no,role,status,error_code,started_at,finished_at,elapsed_ms,delivery_status,usage_json FROM kb_task_calls WHERE task_id=? ORDER BY sequence_no',(identifier,))]
             elif record['source']=='parse':
                 calls=[]
                 spans=[dict(id=r['id'],parent_id=None,name='解析尝试 '+str(r['attempt_no']),kind='PARSE',status=r['status'],started_at=r['started_at'],finished_at=r['finished_at'],elapsed_ms=milliseconds(r['started_at'],r['finished_at']),error_code=r['error_code']) for r in db.execute('SELECT * FROM parse_attempts WHERE task_id=? ORDER BY attempt_no',(identifier,))]
             else:
-                calls=[dict(r) for r in db.execute('SELECT sequence_no,role,status,error_code,started_at,settled_at AS finished_at,elapsed_ms FROM question_calls WHERE job_id=? ORDER BY sequence_no',(identifier,))]
-                spans=[dict(id='legacy-call-'+str(r['sequence_no']),parent_id=None,name='查询向量' if r['role']=='embedding' else '回答生成',kind=r['role'].upper(),**r) for r in calls]
+                # 旧单文档账本沿用 provider_usage_json；只在公开投影处统一名称，不改历史表或记录。
+                calls=[dict(r) for r in db.execute('SELECT sequence_no,role,status,error_code,started_at,settled_at AS finished_at,elapsed_ms,delivery_status,provider_usage_json AS usage_json FROM question_calls WHERE job_id=? ORDER BY sequence_no',(identifier,))]
+                spans=[dict(id='legacy-call-'+str(r['sequence_no']),parent_id=None,name='查询向量' if r['role']=='embedding' else '回答生成',kind=r['role'].upper(),
+                    **{k:v for k,v in r.items() if k not in ('usage_json','delivery_status')}) for r in calls]
         for child in children:
             detail=self.detail(child)
             if detail:
                 spans.extend({**s,'id':child+'/'+s['id'],'parent_id':child+'/'+s['parent_id'] if s.get('parent_id') else None} for s in detail['spans'])
                 calls.extend({**c,'task_id':child} for c in detail['calls'])
-        intent=None;query_plan=None;execution=None;diagnostics=[]
+        intent=None;query_plan=None;execution=None;diagnostics=[];agent=None
         if record['source']=='knowledge':
             with self.repository.connect() as db:
                 rows=db.execute("SELECT name,payload_json FROM kb_task_checkpoints WHERE task_id=? AND name LIKE 'diagnostic_%' ORDER BY created_at",(identifier,)).fetchall()
+                saved_agent=db.execute("SELECT payload_json FROM kb_task_checkpoints WHERE task_id=? AND name='retrieval_agent'",(identifier,)).fetchone()
+                if saved_agent:
+                    from app.retrieval_agent import public_summary
+                    agent=public_summary(json.loads(saved_agent[0]))
             for row in rows:
                 value=json.loads(row['payload_json']);attempt=row['name'].rsplit('_',1)[-1]
                 if row['name'].startswith('diagnostic_validation_'):
@@ -99,7 +107,6 @@ class KnowledgeTraces:
                 from app.intent_routing import public_decision
                 intent=public_decision(decision)
             if payload.get('query_plan'):
-                from app.query_planning import describe_plan
                 query_plan=describe_plan(payload['query_plan'])
             if record['source']=='knowledge':
                 with self.repository.connect() as db:
@@ -112,5 +119,11 @@ class KnowledgeTraces:
                     value=json.loads(resolved[0]);intent=public_decision(value['decision'])
                     query_plan=describe_plan(value['query_plan']);execution=value.get('execution',execution)
         for span in spans:span['offset_ms']=milliseconds(record['started_at'],span['started_at'])
-        return {**record,'spans':spans,'calls':calls,'children':children,'intent':intent,'query_plan':query_plan,'execution':execution,'diagnostics':diagnostics,'content_policy':'仅含运行元数据；不展示用户问题、提示词、文档正文或原始响应。',
+        for call in calls:
+            if 'usage_json' not in call:continue
+            try:metadata=json.loads(call.pop('usage_json') or '{}')
+            except (ValueError,TypeError):metadata={}
+            usage=metadata.get('usage') if isinstance(metadata,dict) else None
+            call['usage']={k:v for k,v in usage.items() if k in ('prompt_tokens','completion_tokens','total_tokens','cached_tokens','reasoning_tokens') and type(v) is int and v>=0} if isinstance(usage,dict) else None
+        return {**record,'spans':spans,'calls':calls,'children':children,'intent':intent,'query_plan':query_plan,'execution':execution,'diagnostics':diagnostics,'retrieval_agent':agent,'content_policy':'仅含运行元数据；不展示用户问题、提示词、文档正文或原始响应。',
                 'timing_note':'旧任务只展示实际记录的外调节点；未记录的阶段不补造耗时。'}

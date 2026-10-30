@@ -4,6 +4,7 @@ from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from functools import wraps
+from inspect import signature
 import sqlite3
 from uuid import uuid4
 
@@ -34,15 +35,28 @@ def record_provider_usage(metadata):
 
 def guarded_provider(provider, error_class):
     def decorate(method):
+        parameters = signature(method)
         @wraps(method)
         def invoke(self, *args, **kwargs):
             self._call_metadata.set(None)
+            try:
+                arguments = parameters.bind(self, *args, **kwargs).arguments
+            except TypeError as exc:
+                exc.not_sent = True
+                raise
             if not getattr(self.settings, provider + '_api_key').strip():
                 try:return method(self, *args, **kwargs)
                 except Exception as exc:
                     exc.not_sent=True
                     raise
-            with provider_guard(self.settings, provider, error_class, delivery_tracked=True):
+            from app.context_budget import generation_request, request_scope, BudgetError
+            try:
+                request=generation_request(self.settings,arguments['system_prompt'],arguments['user_prompt'],
+                                           stream=method.__name__=='generate_stream')
+            except BudgetError as exc:
+                error=error_class(429,str(exc));error.not_sent=True
+                raise error from None
+            with request_scope(request), provider_guard(self.settings, provider, error_class, delivery_tracked=True,budget_request=request):
                 try:return method(self, *args, **kwargs)
                 finally:record_provider_usage(getattr(self,'last_call_metadata',None))
         return invoke
@@ -57,7 +71,9 @@ def task_owner(method):
             with self.repository.connect() as db:
                 row=db.execute('SELECT owner_user_id FROM analysis_jobs WHERE id=?',(job.id,)).fetchone()
                 owner=row[0] if row else None
-        with owner_scope(owner):
+        from app.context_budget import task_scope,profile_for
+        profile=profile_for(args[0] if args else '',kwargs.get('checkpoint')) if getattr(self,'budget_source',None)=='knowledge' else 'analysis' if not isinstance(job,dict) else 'answer'
+        with owner_scope(owner),task_scope(getattr(self,'budget_source','question'),job['id'] if isinstance(job,dict) else job.id,profile):
             return method(self, job, *args, **kwargs)
     return invoke
 
@@ -114,7 +130,7 @@ def admit(db, repository, owner, *, submission_id=None, ingestion_id=None):
         raise HTTPException(429, '等待任务已达配额，请稍后再提交；未发起外部请求', headers={'Retry-After': '30'})
 
 
-def choose(db, repository, kind, identifier=None):
+def choose(db, repository, kind, identifier=None, *, ready=None):
     """跨问答／分析队列按用户轮换；过期任务交由各原有恢复器处理。"""
     settings = policy(repository)
     rows = expire_queued(db,settings,jobs(db))
@@ -125,6 +141,7 @@ def choose(db, repository, kind, identifier=None):
     last = dict(db.execute('SELECT owner_key,last_started_at FROM dispatch_fairness'))
     eligible = [r for r in rows if r['kind'] == kind and r['status'] == 'queued'
                 and not r['cancel_requested'] and counts.get(r['owner'], 0) < settings.active_user_limit]
+    if ready:eligible=[r for r in eligible if ready(db,r['id'])]
     eligible.sort(key=lambda r: (last.get(r['owner'], ''), r['created_at'], r['id']))
     if identifier:
         # 显式定向执行仍受同一并发配额约束，不绕过限流。
@@ -155,15 +172,15 @@ def _owner():
 
 
 @contextmanager
-def provider_guard(settings, provider, error_class, *, delivery_tracked=False):
+def provider_guard(settings, provider, error_class, *, delivery_tracked=False,budget_request=None,provider_identity=None,timeout_seconds=None):
     """围住适配器的一次 HTTP（流式亦同）。不包含 SDK 自动重试。"""
     path = settings.data_dir / 'docqa.db'
     if not path.exists():
         # 独立适配器可脱离应用使用；应用入口在准备数据库后才可收费。
         yield
         return
-    key = sha256((provider + '|' + getattr(settings, provider + '_base_url') + '|' +
-                  getattr(settings, provider + '_model')).encode()).hexdigest()
+    key = sha256((provider_identity or (provider + '|' + getattr(settings, provider + '_base_url') + '|' +
+                  getattr(settings, provider + '_model'))).encode()).hexdigest()
     identifier = 'guard-' + uuid4().hex
     def reject(code,message):
         error=error_class(code,message)
@@ -178,6 +195,8 @@ def provider_guard(settings, provider, error_class, *, delivery_tracked=False):
         db.execute('BEGIN IMMEDIATE')
         if not db.execute("SELECT 1 FROM sqlite_master WHERE name='provider_circuits'").fetchone():
             reject(503, '运行数据库不支持流量保护，请完成受控升级')
+        if 'meter_kind' not in {r[1] for r in db.execute('PRAGMA table_info(provider_guard_calls)')}:
+            reject(503,'运行库缺少统一计量结构，请完成受控升级')
         circuit = db.execute('SELECT * FROM provider_circuits WHERE provider_key=?', (key,)).fetchone()
         now = stamp()
         if circuit and ((circuit['open_until'] or '') > now or (circuit['probe_until'] or '') > now):
@@ -192,8 +211,13 @@ def provider_guard(settings, provider, error_class, *, delivery_tracked=False):
         active,own_active=db.execute("SELECT COUNT(*),COALESCE(SUM(owner_key=?),0) FROM provider_guard_calls WHERE status='intent' AND deadline>?",(owner,now)).fetchone()
         if active>=settings.active_global_limit or own_active>=settings.active_user_limit:
             reject(429, '外部请求并发已达配额，未发起外部请求')
-        deadline=stamp(getattr(settings,provider+'_timeout_seconds')+60)
-        db.execute("INSERT INTO provider_guard_calls(id,owner_key,provider_key,status,started_at,deadline,delivery_status) VALUES (?,?,?,?,?,?,?)", (identifier, owner, key, 'intent', now,deadline,'reserved'))
+        deadline=stamp((timeout_seconds if timeout_seconds is not None else getattr(settings,provider+'_timeout_seconds'))+60)
+        db.execute("INSERT INTO provider_guard_calls(id,owner_key,provider_key,status,started_at,deadline,delivery_status,meter_kind) VALUES (?,?,?,?,?,?,?,?)", (identifier, owner, key, 'intent', now,deadline,'reserved','tool_http' if provider=='mcp' else provider))
+        if budget_request:
+            from app.context_budget import reserve,BudgetError
+            try:reserve(db,identifier,settings,owner,budget_request,now)
+            except BudgetError as exc:reject(429,str(exc))
+            db.execute("UPDATE context_reservations SET state='uncertain' WHERE state='reserved' AND call_id IN (SELECT id FROM provider_guard_calls WHERE status='uncertain')")
         db.execute('INSERT OR IGNORE INTO provider_circuits(provider_key) VALUES (?)', (key,))
         generation = circuit['generation'] if circuit else 0
         if circuit and circuit['failures'] >= settings.circuit_failure_threshold:
@@ -238,6 +262,9 @@ def provider_guard(settings, provider, error_class, *, delivery_tracked=False):
                 import json
                 db.execute('UPDATE provider_guard_calls SET status=?,finished_at=?,delivery_status=?,usage_json=? WHERE id=?',
                     (status, stamp(), 'not_sent' if not permit['sent'] else 'uncertain' if status=='uncertain' else 'sent',json.dumps(permit.get('usage')) if permit.get('usage') else None, identifier))
+                if budget_request:
+                    from app.context_budget import settle
+                    settle(db,identifier,permit,status,stamp())
                 row = db.execute('SELECT * FROM provider_circuits WHERE provider_key=?', (key,)).fetchone()
                 # 状态代次只在打开／探测／关闭边界变化；同代并发失败仍可累计。
                 if row['generation'] == generation and (not row['probe_id'] or row['probe_id'] == identifier):
@@ -265,7 +292,10 @@ def install_governance_routes(app,access):
             rows=[r for r in jobs(db) if r['owner']==owner]
             calls=db.execute("SELECT COUNT(*) FROM provider_guard_calls WHERE owner_key=? AND started_at>=? AND status!='not_sent'",(owner,stamp()[:10])).fetchone()[0]
         settings=access.settings
+        from app.context_budget import status as budget_status
+        with access.repository.connect() as db:context_budget=budget_status(db,settings,owner=owner)
         return {'active':sum(r['status']=='running' for r in rows),'queued':sum(r['status']=='queued' for r in rows),
+                'context_budget':context_budget,'provider_calls_triggered':0,
                 'calls_today':calls,'daily_limit':settings.calls_user_daily_limit,
                 'active_limit':settings.active_user_limit,'queue_limit':settings.queue_user_limit,'day_boundary':'UTC'}
 
@@ -277,7 +307,7 @@ def install_governance_routes(app,access):
             circuits=[{'failures':r['failures'],'open_until':r['open_until'],'probe_until':r['probe_until']}
                       for r in db.execute('SELECT * FROM provider_circuits')]
             today=db.execute("SELECT COUNT(*) FROM provider_guard_calls WHERE started_at>=? AND status!='not_sent'",(stamp()[:10],)).fetchone()[0]
-            usage_rows=db.execute("SELECT usage_json,status,deadline FROM provider_guard_calls WHERE started_at>=? AND status!='not_sent'",(stamp()[:10],)).fetchall()
+            usage_rows=db.execute("SELECT usage_json,status,deadline FROM provider_guard_calls WHERE started_at>=? AND status!='not_sent' AND COALESCE(meter_kind,'legacy')!='tool_http'",(stamp()[:10],)).fetchall()
             stored=db.execute('SELECT COALESCE(SUM(byte_size),0) FROM document_storage_owners').fetchone()[0]
             reserved=db.execute('SELECT COALESCE(SUM(byte_size),0) FROM storage_reservations').fetchone()[0]
             from app.operations_metrics import project
@@ -312,7 +342,10 @@ def install_governance_routes(app,access):
         if session_audit['invalid_records']:alerts.append({'code':'resident_audit_invalid','severity':'attention','count':session_audit['invalid_records']})
         disk=shutil.disk_usage(access.settings.data_dir)
         if disk.free<access.settings.storage_free_min_mb*1024*1024:alerts.append({'code':'disk_low','severity':'error','count':disk.free})
+        from app.context_budget import status as budget_status
+        with access.repository.connect() as db:context_budget=budget_status(db,access.settings)
         return {'active':sum(r['status']=='running' for r in rows),'queued':sum(r['status']=='queued' for r in rows),
+                'context_budget':context_budget,
                 'calls_today':today,'circuits':circuits,'supervisor':supervisor,
                 'services':services,'alerts':alerts,'latency':latency,'last_backup':last_backup,'resident_session_evidence':session_evidence,'alert_delivery':'in_app_only',
                 'usage':{'known_total_tokens':known_tokens,'unknown_usage_calls':unknown,'verified_cost':None,'currency':None},

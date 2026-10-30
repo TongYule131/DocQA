@@ -88,6 +88,10 @@ class Settings:
     rag_min_score: float | None = None
     # 查询embedding和生成均计次；重试不重置，默认留2次明确重试余量。
     question_max_requests: int = 4
+    # 服务端JSON策略；未验证计数器时只报告估算，原字符硬限继续生效。
+    context_budget_policy: str = '{}'
+    # 首版只在统一知识问答启用；真实收益验证前正式默认关闭。
+    retrieval_agent_enabled: bool = False
     # 新任务可选本地混合策略；旧同步接口仍沿用原向量链路。
     question_retrieval_strategy: str = "hybrid-context"
     question_context_k: int = 32
@@ -187,6 +191,8 @@ class Settings:
             # 空值表示禁用分数阈值；只有显式配置才启用过滤。
             rag_min_score=_optional_float(values.get("DOCQA_RAG_MIN_SCORE")),
             question_max_requests=int(value("DOCQA_QUESTION_MAX_REQUESTS", "4")),
+            context_budget_policy=value('DOCQA_CONTEXT_BUDGET_POLICY','{}'),
+            retrieval_agent_enabled=value('DOCQA_RETRIEVAL_AGENT_ENABLED','0') == '1',
             question_retrieval_strategy=value("DOCQA_QUESTION_RETRIEVAL_STRATEGY", "hybrid-context"),
             question_context_k=int(value("DOCQA_QUESTION_CONTEXT_K", "32")),
             question_context_max_chars=int(value("DOCQA_QUESTION_CONTEXT_MAX_CHARS", "24000")),
@@ -221,6 +227,12 @@ class Settings:
         )
 
     def __post_init__(self):
+        from app.context_budget import policy as context_policy
+        context_policy(self)
+        if type(self.retrieval_agent_enabled) is not bool:
+            raise ValueError('retrieval_agent_enabled必须是布尔值')
+        if self.retrieval_agent_enabled and (self.query_planner_enabled or self.answer_semantic_review_enabled):
+            raise ValueError('检索Agent首版不能叠加独立查询规划或模型复核；须先冻结新的调用profile')
         if type(self.answer_semantic_review_enabled) is not bool:raise ValueError('answer_semantic_review_enabled必须是布尔值')
         from app.query_understanding import term_mapping
         term_mapping(self)

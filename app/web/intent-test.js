@@ -5,7 +5,7 @@ export function installIntentTest() {
   const section=node('div'); section.id='intent-test-view'; section.hidden=true;
   document.getElementById('intent-tree-view').before(section);
   const panel=node('section','','panel'),form=node('form');
-  panel.append(node('h2','测试查询计划与业务分流'),node('p','自动任务策略决定证据需求与装入预算；业务节点限定当前库内的交互、检索或已接入工具。此处只预览同一规划器，不执行检索、模型或工具。','muted'));
+  panel.append(node('h2','预览受控规则与查询计划'),node('p','这里只预览本地规则及证据需求，不执行检索、模型或工具。普通LLM／文档自动分流在会话worker执行，本页没有运行该模型，候选结果不代表最终动作。','muted'));
   const controls=node('div','','form-grid'),scope=node('select'),base=node('select');
   scope.id='test-scope';base.id='test-base';
   const option=(select,label,value)=>{const o=node('option',label);o.value=value;select.append(o);};

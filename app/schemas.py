@@ -669,6 +669,7 @@ class AnalysisJob(BaseModel):
     request_upper_bound: int = 0
     max_requests: int = 0
     requests_used: int = 0
+    context_budget: dict | None = None
     steps_total: int = 0
     steps_completed: int = 0
     result_id: str | None = None

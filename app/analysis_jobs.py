@@ -65,7 +65,8 @@ KIND_VERSIONS = {
 
 def analysis_model_signature(settings: Settings) -> str:
     """模型配置指纹（**不含密钥**）：用于判断同版本同配置能否复用已有成功结果。"""
-    payload = {
+    from app.context_budget import policy_hash
+    payload = {'context_budget_policy':policy_hash(settings),
         "base_url": settings.deepseek_base_url,
         "model": settings.deepseek_model,
         "thinking": settings.deepseek_thinking,
@@ -408,6 +409,8 @@ class AnalysisJobService:
         job = self.repository.get_analysis_job(job_id)
         if job is None:
             raise RagError(404, "analysis_job_not_found", "分析任务不存在")
+        from app.context_budget import status as budget_status
+        with self.repository.connect() as db:job.context_budget=budget_status(db,self.settings,task_key='analysis:'+job_id)
         return job
 
     def retry_job(self, job_id: str) -> AnalysisJob:

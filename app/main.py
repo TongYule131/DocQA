@@ -158,6 +158,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return response
         actor = access.session(request.cookies.get(access.cookie_name)) if access.team_mode else None
         token = actor_context.set(actor)
+        from app.context_budget import TASK
+        budget_token=TASK.set({'key':'http:'+request.state.request_id,'profile':'default'})
         try:
             path = request.url.path
             from app.account_security import restrict_password_change,guard_session_stream
@@ -179,6 +181,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except HTTPException as exc:
             response = JSONResponse(status_code=exc.status_code, content={'detail': exc.detail})
         finally:
+            TASK.reset(budget_token)
             actor_context.reset(token)
         response.headers["X-Request-ID"] = request.state.request_id
         if page_route or request.url.path.startswith(("/static/", "/api/")):
