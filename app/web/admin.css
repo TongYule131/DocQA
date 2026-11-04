@@ -15,3 +15,24 @@
 td .row button,td .row .button{font-size:12px;padding:7px 11px;color:#3f5e8f;border-color:#d7e2f1;background:#fff}
 td .row button:hover:enabled,td .row .button:hover{background:#f3f7fe;color:#245bb7}
 td .row button.danger{color:#a94442!important;border-color:#eed7d5}
+
+/* 用户管理：固定列宽，操作按钮与安全记录空态对齐。 */
+#users-view table{table-layout:fixed}
+#users-view table{min-width:0}
+#users-view th:nth-child(1){width:18%}
+#users-view th:nth-child(2){width:16%}
+#users-view th:nth-child(3){width:9%}
+#users-view th:nth-child(4){width:16%}
+#users-view th:nth-child(5){width:19%}
+#users-view th:nth-child(6){width:22%}
+#users-view td{overflow-wrap:anywhere}
+#users-view td .row{gap:6px;flex-wrap:wrap}
+#users-view td .row button{font-size:12px;padding:6px 10px;white-space:nowrap}
+#account-events-table{table-layout:fixed}
+#account-events-table th:nth-child(1){width:26%}
+#account-events-table th:nth-child(2){width:28%}
+#account-events-table th:nth-child(3){width:24%}
+#account-events-table th:nth-child(4){width:22%}
+#account-events-table td{vertical-align:middle}
+#account-events-table tr.empty-row td{text-align:center;color:#8a99af;padding:28px 0;font-size:12px}
+#archive-quick{flex:none;font-size:12px;padding:7px 12px;white-space:nowrap;align-self:flex-start}

@@ -112,7 +112,8 @@ async function loadUsers() {
   const events=await api('/api/admin/account-events');$('account-event-rows').replaceChildren();
   const labels={display_name_changed:'修改显示名称',password_changed:'用户修改密码',password_reset:'管理员重置初始密码'};
   for(const event of events){const row=node('tr');cell(row,event.target_username);cell(row,labels[event.action]||'账号操作');cell(row,event.actor_username);cell(row,date(event.created_at));$('account-event-rows').append(row);}
-  $('account-events-empty').hidden=events.length>0;
+  if(!events.length){const row=node('tr','','empty-row'),cellEmpty=node('td','暂无账号安全记录');cellEmpty.colSpan=4;row.append(cellEmpty);$('account-event-rows').append(row);}
+  $('account-events-empty').hidden=true;
 }
 function config(target, entries) {
   $(target).replaceChildren(...entries.map(([name, value]) => { const row = node('div'); row.append(node('dt', name), node('dd', String(value))); return row; }));

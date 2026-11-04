@@ -38,3 +38,4 @@
 .feedback-history p{font-size:12px;color:#7386a3;margin:8px 0 0}
 .closure-admin .feedback-empty{color:#8190a9;font-size:13px;text-align:center;padding:24px 0;margin:0}
 @media(max-width:1000px){.feedback-workspace,.feedback-workspace.has-detail{grid-template-columns:minmax(0,1fr)}.feedback-form-grid{grid-template-columns:1fr}}
+.feedback-export{justify-self:start;width:auto;font-size:12px;padding:8px 13px;min-height:34px}

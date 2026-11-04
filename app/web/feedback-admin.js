@@ -37,11 +37,11 @@ async function detail(id){
   card.append(head);panel.replaceChildren(card);
   if(row.shared_context){const disclosure=node('details','','shared-case');disclosure.append(node('summary','客户分享的本题快照'),node('pre',JSON.stringify(row.shared_context,null,2)),node('p',row.comment||''));card.append(disclosure);}
   else card.append(node('p','客户未分享本题正文。','feedback-muted'));
-  if(row.share_context)card.append(button('建立／导出本轮回归包',async()=>{
+  if(row.share_context){const exportButton=button('建立／导出本轮回归包',async()=>{
     const bundle=await api(`/api/admin/feedback/${encodeURIComponent(id)}/case`,json({}));
     const url=URL.createObjectURL(new Blob([JSON.stringify(bundle,null,2)],{type:'application/json'}));
     const a=node('a');a.href=url;a.download=bundle.id+'.json';a.click();URL.revokeObjectURL(url);await detail(id);
-  }));
+  });exportButton.className='secondary feedback-export';card.append(exportButton);}
   if(row.status==='fixed'||row.status==='verified'){
     const label=node('label','导入已通过的定向复验证据（原失败和独立负例分别导入）'),input=node('input');input.type='file';input.accept='.json,application/json';
     input.onchange=()=>run(async()=>{if(!input.files?.[0])return;const proof=JSON.parse(await input.files[0].text());await api(`/api/admin/feedback/${encodeURIComponent(id)}/evidence`,json(proof));await detail(id);});
