@@ -145,3 +145,8 @@ body:has(>.demo-banner) .kb-chat-sidebar{height:100%;min-height:0}
 .feedback-item button{justify-self:start;font-size:12px;padding:6px 10px;min-height:30px}
 .feedback-empty{color:#7e8ca4;font-size:13px;text-align:center;padding:24px 0;margin:0}
 @media(max-width:800px){.feedback-head{padding:18px 18px 0}.feedback-body{padding:14px 18px 4px}.feedback-actions{padding:12px 18px 18px}.feedback-list{padding:10px 18px 4px}}
+
+/* 字数计数：只在输入后出现，弱化到辅助信息层级。 */
+#input-count{font-size:11px;color:#93a3b9;font-variant-numeric:tabular-nums}
+#input-count:not(:empty){margin-right:10px}
+#input-count[data-near-limit="true"]{color:#b4534f}

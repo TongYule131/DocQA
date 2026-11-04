@@ -20,7 +20,7 @@ function closeSources(restoreFocus = true) {
 function paint(state) {
   if (previousDocument !== state.documentId) {
     previousDocument = state.documentId; closeSources(false); renderedResult = null;
-    $('question-input').value = ''; $('question-input').style.height = '84px'; $('input-count').textContent = '0 / 4000';
+    $('question-input').value = ''; $('question-input').style.height = '84px'; $('input-count').textContent = '';
     $('history-search').value = ''; $('answer-body').replaceChildren();
   }
   const doc = state.documents.find(item => item.id === state.documentId);
@@ -131,7 +131,7 @@ function openSource(citation, focus) {
 function closeMenu() { $('sidebar').classList.remove('mobile-open'); $('menu-toggle').setAttribute('aria-expanded', 'false'); }
 function inputChanged() {
   const input = $('question-input'); input.style.height = 'auto'; input.style.height = `${Math.min(Math.max(input.scrollHeight, 84), 210)}px`;
-  $('input-count').textContent = `${input.value.length} / 4000`; paint(controller.state);
+  $('input-count').textContent = input.value.length ? `${input.value.length} / 4000` : ''; paint(controller.state);
 }
 $('question-form').onsubmit = async event => {
   event.preventDefault();

@@ -59,7 +59,7 @@ function paint() {
     $('attachment-remove').disabled = s.mutating || Boolean(s.pending);
   }
   $('question-input').disabled = Boolean(blocked) || !s.configured || s.index?.status !== 'indexed';
-  $('send').disabled = $('question-input').disabled || !$('question-input').value.trim(); $('input-count').textContent = `${$('question-input').value.length} / 4000`;
+  $('send').disabled = $('question-input').disabled || !$('question-input').value.trim(); $('input-count').textContent = $('question-input').value.length ? `${$('question-input').value.length} / 4000` : '';
   $('new-conversation').disabled = s.mutating || Boolean(s.pending); $('refresh').disabled = s.mutating;
   $('confirm').hidden = !s.pending; $('confirm').disabled = s.mutating || s.loading;
   $('memory-toggle').disabled = !c; $('archive').disabled = !c || s.mutating || Boolean(s.pending); $('archive').textContent = c?.archived ? '恢复会话' : '归档';
