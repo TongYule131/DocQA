@@ -26,7 +26,7 @@ export async function installProfile(session) {
   const reset = document.createElement('button'); reset.type = 'button'; reset.className = 'secondary'; reset.textContent = '恢复默认';
   const save = document.createElement('button'); save.type = 'button'; save.className = 'primary'; save.textContent = '保存头像'; save.disabled = true;
   const fileName=document.createElement('span');fileName.className='profile-file-name';fileName.textContent='PNG / JPG / WebP，最大 2MB';
-  const heroActions=document.createElement('div');heroActions.className='profile-hero-actions';heroActions.append(fileLabel,reset,save,fileName);
+  const heroActions=document.createElement('div');heroActions.className='profile-hero-actions';heroActions.append(input,fileLabel,reset,save,fileName);
   const heroInfo=document.createElement('div');heroInfo.className='profile-hero-info';heroInfo.append(nameRow,account,heroActions);
   const hero=document.createElement('div');hero.className='profile-hero';hero.append(preview,heroInfo);
 
@@ -91,7 +91,7 @@ export async function installProfile(session) {
   };
   async function change(options) {
     ++loadToken;loading=false;busy = true; status.textContent = '正在保存…'; paint();
-    try { profile = await request('/api/auth/avatar', options); loaded = true; discard(); status.textContent = '头像已保存'; }
+    try { profile = await request('/api/auth/avatar', options); loaded = true; discard(); status.textContent = options.method === 'DELETE' ? '已恢复默认头像' : '头像已保存'; }
     catch (error) { status.textContent = error.message; }
     finally { busy = false; paint(); }
   }
