@@ -20,13 +20,24 @@ const next=button('下一页',async()=>{offset+=limit;await refresh();});
 filters.append(stateFilter,categoryFilter,previous,next);$('feedback-list').before(filters);
 const quality=node('section','','quality-summary');filters.before(quality);
 const operations=node('a','运行与用量');operations.href='/admin/operations';filters.append(operations);
+// 列表与详情改为左右主从布局；未选中时隐藏详情，避免出现空白卡片。
+const workspace=node('div','','feedback-workspace');
+$('feedback-list').before(workspace);workspace.append($('feedback-list'),$('feedback-detail'));$('feedback-detail').hidden=true;
+let selectedId=null;
+const dateText=value=>value?new Date(value).toLocaleString('zh-CN',{hour12:false}):'—';
+function closeDetail(){selectedId=null;$('feedback-detail').replaceChildren();$('feedback-detail').hidden=true;workspace.classList.remove('has-detail');for(const card of document.querySelectorAll('#feedback-list .feedback-card'))card.classList.toggle('selected',false);}
+function statusPill(status){return node('span',labels[status]||status,'status-pill feedback-status '+(status||'open'));}
 async function detail(id){
-  const row=await api('/api/admin/feedback/'+encodeURIComponent(id)),panel=$('feedback-detail');
-  panel.replaceChildren(node('h2','处理反馈'),node('p',`${categories[row.category]} · ${labels[row.status]} · 第${row.generation}轮处理`));
-  if(row.shared_context)panel.append(node('details','','shared-case'));
-  if(row.shared_context){const disclosure=panel.lastElementChild;disclosure.append(node('summary','客户分享的本题快照'),node('pre',JSON.stringify(row.shared_context,null,2)),node('p',row.comment||''));}
-  else panel.append(node('p','客户未分享本题正文。'));
-  if(row.share_context)panel.append(button('建立／导出本轮回归包',async()=>{
+  selectedId=id;const row=await api('/api/admin/feedback/'+encodeURIComponent(id)),panel=$('feedback-detail');
+  workspace.classList.add('has-detail');panel.hidden=false;
+  const card=node('div','','feedback-detail-card'),head=node('div','','feedback-detail-head'),heading=node('div');
+  heading.append(node('h2','处理反馈'),node('p',`${categories[row.category]} · 第${row.generation}轮处理 · 提交于 ${dateText(row.created_at)}`,'muted'));
+  const close=node('button','×','feedback-close-detail');close.type='button';close.setAttribute('aria-label','关闭反馈详情');close.onclick=closeDetail;
+  head.append(heading,statusPill(row.status),close);
+  card.append(head);panel.replaceChildren(card);
+  if(row.shared_context){const disclosure=node('details','','shared-case');disclosure.append(node('summary','客户分享的本题快照'),node('pre',JSON.stringify(row.shared_context,null,2)),node('p',row.comment||''));card.append(disclosure);}
+  else card.append(node('p','客户未分享本题正文。','feedback-muted'));
+  if(row.share_context)card.append(button('建立／导出本轮回归包',async()=>{
     const bundle=await api(`/api/admin/feedback/${encodeURIComponent(id)}/case`,json({}));
     const url=URL.createObjectURL(new Blob([JSON.stringify(bundle,null,2)],{type:'application/json'}));
     const a=node('a');a.href=url;a.download=bundle.id+'.json';a.click();URL.revokeObjectURL(url);await detail(id);
@@ -34,28 +45,36 @@ async function detail(id){
   if(row.status==='fixed'||row.status==='verified'){
     const label=node('label','导入已通过的定向复验证据（原失败和独立负例分别导入）'),input=node('input');input.type='file';input.accept='.json,application/json';
     input.onchange=()=>run(async()=>{if(!input.files?.[0])return;const proof=JSON.parse(await input.files[0].text());await api(`/api/admin/feedback/${encodeURIComponent(id)}/evidence`,json(proof));await detail(id);});
-    label.append(input);panel.append(label,node('p','使用随项目提供的 prepare_feedback_evidence.py 绑定已有JUnit、回归包、输入文件和当前代码；导入不会运行模型。','muted'));
+    label.append(input);card.append(label,node('p','使用随项目提供的 prepare_feedback_evidence.py 绑定已有JUnit、回归包、输入文件和当前代码；导入不会运行模型。','feedback-muted'));
   }
-  const form=node('form'),status=node('select'),cause=node('select'),fields={};
-  for(const s of states)option(status,labels[s],s);status.value=row.status==='closed'?'open':states[states.indexOf(row.status)+1];
+  const form=node('form','','feedback-form'),status=node('select'),cause=node('select'),fields={};
+  for(const s of states)option(status,labels[s],s);status.value=row.status;
   for(const [s,label] of Object.entries(causes))option(cause,label,s);cause.value=row.root_cause||'other';
-  for(const [text,control] of [['处理阶段',status],['根因类别',cause]]){const label=node('label',text);label.append(control);form.append(label);}
+  const rowGrid=node('div','','feedback-form-grid');
+  for(const [text,control] of [['处理阶段',status],['根因类别',cause]]){const label=node('label',text);label.append(control);rowGrid.append(label);}
+  form.append(rowGrid);
   for(const [key,title] of [['regression_case','当前回归案例'],['original_retest','原失败通过证据'],['negative_retest','独立负例通过证据']]){
-    const label=node('label',title),input=node('input');input.readOnly=true;input.value=row[key]||'';fields[key]=input;label.append(input);form.append(label);
+    const label=node('label',title),input=node('input');input.readOnly=true;input.value=row[key]||'';input.placeholder='尚未登记';fields[key]=input;label.append(input);form.append(label);
   }
-  const reply=node('textarea');reply.maxLength=1000;reply.value=row.client_reply||'';reply.setAttribute('aria-label','客户可见处理结果');form.append(node('p','向客户说明处理结果'),reply);
-  const submit=node('button','保存处理进度');submit.type='submit';form.append(submit);
+  const reply=node('textarea');reply.maxLength=1000;reply.value=row.client_reply||'';reply.rows=3;reply.placeholder='这段说明会展示给提交反馈的客户。';reply.setAttribute('aria-label','客户可见处理结果');form.append(node('label','向客户说明处理结果'),reply);
+  const actions=node('div','','feedback-form-actions'),submit=node('button','保存处理进度');submit.type='submit';actions.append(submit);form.append(actions);
   form.onsubmit=e=>{e.preventDefault();run(async()=>{await api('/api/admin/feedback/'+encodeURIComponent(id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({expected_revision:row.revision,status:status.value,root_cause:cause.value,client_reply:reply.value,
-    ...Object.fromEntries(Object.entries(fields).map(([k,v])=>[k,v.value||null]))})});await refresh();await detail(id);});};panel.append(form);
-  const history=node('details');history.append(node('summary','处理与分享历史'));
-  for(const event of row.history||[])history.append(node('p',`${event.created_at} · ${labels[event.status]||event.status} · ${event.action}`));panel.append(history);
+    ...Object.fromEntries(Object.entries(fields).map(([k,v])=>[k,v.value||null]))})});await refresh();await detail(id);});};card.append(form);
+  const history=node('details','','feedback-history');history.append(node('summary','处理与分享历史'));
+  for(const event of row.history||[])history.append(node('p',`${event.created_at} · ${labels[event.status]||event.status} · ${event.action}`));card.append(history);
+  card.scrollIntoView({block:'nearest',behavior:'smooth'});
 }
 async function refresh(){
   const params=new URLSearchParams({limit:String(limit),offset:String(offset)});if(stateFilter.value)params.set('status',stateFilter.value);if(categoryFilter.value)params.set('category',categoryFilter.value);
   const rows=await api('/api/admin/feedback?'+params);$('feedback-list').replaceChildren();
-  for(const row of rows)$('feedback-list').append(button(`${categories[row.category]} · ${labels[row.status]} · ${row.created_at}`,()=>detail(row.id)));
-  previous.disabled=offset===0;next.disabled=rows.length<limit;if(!rows.length)$('feedback-list').append(node('p','暂无符合条件的反馈'));
+  for(const row of rows){
+    const card=node('button','','feedback-card'+(row.id===selectedId?' selected':''));card.type='button';
+    const line=node('div','','feedback-card-head');line.append(node('span',categories[row.category]||row.category,'feedback-card-category'),statusPill(row.status));
+    card.append(line,node('span',dateText(row.created_at),'feedback-card-meta'),node('span','查看详情与处理记录','feedback-card-hint'));
+    card.onclick=()=>run(()=>detail(row.id));$('feedback-list').append(card);
+  }
+  previous.disabled=offset===0;next.disabled=rows.length<limit;if(!rows.length)$('feedback-list').append(node('p','暂无符合条件的反馈','feedback-empty'));
   const data=await api('/api/admin/quality');quality.replaceChildren(node('h2','质量概况'),node('p',`业务任务 ${data.business_tasks.total} · 已回答 ${data.business_tasks.answered} · 已登记工程复验证据 ${data.registered_engineering_evidence}`),
     node('p',data.human_semantic_review.note,'muted'),node('p',data.citation_engineering.note,'muted'));
 }
-$('refresh').onclick=()=>run(refresh);await window.docqaAuthReady;await run(refresh);
+$('refresh').onclick=()=>run(refresh);document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!$('feedback-detail').hidden)closeDetail();});await window.docqaAuthReady;await run(refresh);

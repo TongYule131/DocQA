@@ -1,1 +1,40 @@
 .closure-admin{max-width:1120px;margin:32px auto;padding:0 24px 48px}.closure-admin>nav{display:flex;gap:16px;flex-wrap:wrap;margin:12px 0 20px}.closure-admin>p{color:#61738e;line-height:1.7}.closure-admin #operations,.closure-admin #feedback-detail,.closure-admin .quality-summary,.closure-admin .feedback-filters{background:#fff;border:1px solid #dfe7f2;border-radius:14px;padding:24px;margin:20px 0}.closure-admin h2{margin-top:28px}.closure-admin h2:first-child{margin-top:0}.closure-admin p{line-height:1.7}.closure-admin .error,.closure-admin #error{color:#b42318}.closure-admin #feedback-list>button{display:block;width:100%;text-align:left;background:#fff;color:#23354f;border:1px solid #dfe7f2;margin:8px 0;padding:16px}.closure-admin pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto}.closure-admin .feedback-filters{display:flex;gap:12px;flex-wrap:wrap;align-items:center}.closure-admin .feedback-filters select{width:auto;min-width:150px}.semantic-controls .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.semantic-controls label.row{justify-content:flex-start;margin:16px 0}.semantic-controls input[type=checkbox]{width:18px;height:18px;margin:0;flex:none}.semantic-controls input[type=number]{max-width:120px}.semantic-controls .prepare-label{max-width:320px}.semantic-controls .calibration-label{margin-top:16px}@media(max-width:640px){.closure-admin{padding:0 16px;margin-top:20px}.closure-admin #operations,.closure-admin #feedback-detail{padding:18px}.closure-admin .feedback-filters>*{max-width:100%}}
+
+/* 反馈主从布局：列表卡片 + 右侧详情，关闭后不留下空白面板。 */
+.feedback-workspace{display:grid;grid-template-columns:minmax(260px,340px) minmax(0,1fr);gap:18px;align-items:start;margin:20px 0}
+.feedback-workspace:not(.has-detail){grid-template-columns:minmax(0,1fr)}
+.closure-admin #feedback-list{display:grid;gap:10px}
+.closure-admin #feedback-list .feedback-card{display:grid;gap:6px;width:100%;min-height:0;justify-content:stretch;justify-items:stretch;align-content:start;text-align:left;background:#fff;border:1px solid #e2eaf5;border-radius:12px;padding:14px 16px;margin:0;color:#23354f;transition:border-color .15s,box-shadow .15s,background .15s}
+.closure-admin #feedback-list .feedback-card:hover{border-color:#bcd3f2;background:#fbfdff}
+.closure-admin #feedback-list .feedback-card.selected{border-color:#93b7f5;box-shadow:0 0 0 3px #2563eb14;background:#fbfdff}
+.feedback-card-head{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.feedback-card-category{font-size:13px;font-weight:600;color:#23354f}
+.feedback-card-meta{font-size:11px;color:#8a99af}
+.feedback-card-hint{font-size:11px;color:#9aa9bd}
+.feedback-status{flex:none}
+.status-pill.feedback-status.open{color:#9a6a1f;background:#fdf4e3}
+.status-pill.feedback-status.reproduced{color:#3c70cf;background:#edf3ff}
+.status-pill.feedback-status.fixed,.status-pill.feedback-status.verified{color:#398774;background:#edf8f4}
+.status-pill.feedback-status.closed{color:#7d8ba0;background:#f1f4f8}
+.closure-admin #feedback-detail{background:transparent;border:0;padding:0;margin:0}
+.feedback-detail-card{background:#fff;border:1px solid #dfe7f2;border-radius:14px;padding:22px 24px;display:grid;gap:14px}
+.feedback-detail-head{display:flex;align-items:flex-start;gap:14px;padding-bottom:14px;border-bottom:1px solid #eef2f8}
+.feedback-detail-head>div:first-child{flex:1;min-width:0}
+.feedback-detail-head h2{margin:0;font-size:18px}
+.feedback-detail-head p{margin:6px 0 0;font-size:12px;color:#8190a9}
+.feedback-close-detail{flex:none;width:32px;height:32px;padding:0;border:1px solid transparent;background:transparent;color:#7185a1;font-size:22px;line-height:1;border-radius:8px;display:grid;place-items:center}
+.feedback-close-detail:hover{background:#f0f5fc;color:#35507a}
+.feedback-muted{font-size:12px;color:#8190a9;margin:0;line-height:1.7}
+.feedback-detail-card .shared-case{border:1px solid #e6edf8;border-radius:10px;padding:12px 14px;background:#fbfdff}
+.feedback-detail-card .shared-case summary{cursor:pointer;font-size:12px;color:#526b90}
+.feedback-detail-card .shared-case pre{margin:10px 0 0;font-size:12px;background:#f7f9fd}
+.feedback-form{display:grid;gap:14px;margin:0}
+.feedback-form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.feedback-detail-card .feedback-form label,.feedback-detail-card>label{display:grid;gap:7px;margin:0;font-size:12px;color:#5d7292}
+.feedback-detail-card .feedback-form input,.feedback-detail-card .feedback-form select,.feedback-detail-card .feedback-form textarea{width:100%;font-size:13px}
+.feedback-detail-card .feedback-form input[readonly]{background:#f7f9fd;color:#8190a9}
+.feedback-form-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:2px}
+.feedback-history summary{cursor:pointer;font-size:12px;color:#5d7292}
+.feedback-history p{font-size:12px;color:#7386a3;margin:8px 0 0}
+.closure-admin .feedback-empty{color:#8190a9;font-size:13px;text-align:center;padding:24px 0;margin:0}
+@media(max-width:1000px){.feedback-workspace,.feedback-workspace.has-detail{grid-template-columns:minmax(0,1fr)}.feedback-form-grid{grid-template-columns:1fr}}
