@@ -38,8 +38,8 @@ if (sidebar && nav) {
   const bottom=sidebar.querySelector('.sidebar-bottom');if(bottom)bottom.replaceChildren(link('返回对话','/app','chat'));
   window.docqaAuthReady?.then(async session=>{
     if(!session.user||!bottom)return;
-    bottom.append(link('账号安全','/account/password','settings'));
-    const personal=node('button','','admin-profile-button secondary');personal.type='button';personal.dataset.profileOpen='';personal.setAttribute('aria-label','个人设置');personal.append(icon('users'),node('span','个人设置','nav-label'));bottom.append(personal);
+    bottom.append(link('账号安全','/account/password','shield'));
+    const personal=node('button','','admin-profile-button secondary');personal.type='button';personal.dataset.profileOpen='';personal.setAttribute('aria-label','个人设置');personal.append(icon('user'),node('span','个人设置','nav-label'));bottom.append(personal);
     await installProfile(session);
   }).catch(()=>{});
   window.addEventListener('docqa:intent-view',event=>{
