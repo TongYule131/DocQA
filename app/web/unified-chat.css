@@ -114,3 +114,9 @@
 .history-select.selected{background:#fff;border-color:#bcd3f2;box-shadow:0 1px 3px #1735550d}
 .history-select input{width:15px;height:15px;flex:none;accent-color:#2563eb;margin:0}
 .history-select-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+
+/* 输入区呼吸感：去掉聚焦时的内层轮廓，增加上下内边距与提示间距。 */
+.kb-composer textarea{padding:12px 2px 6px;margin:8px 0 2px;border:0;background:transparent;outline:0;box-shadow:none;min-height:96px;line-height:1.8}
+.kb-composer textarea:focus{outline:0;box-shadow:none;border:0}
+#scope-empty-hint{margin:0 0 2px;line-height:1.7}
+#context-budget{margin:10px 0 10px}
