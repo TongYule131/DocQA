@@ -7,6 +7,8 @@ const json=(method,body)=>({method,headers:{'Content-Type':'application/json'},b
 export function feedbackButton(task,{api,run,notice}){
   const button=node('button','反馈','secondary');button.type='button';
   let dialog=null,key=null;
+  // 关闭、取消（Esc）与提交成功共用同一出口：关闭后必须移除节点，避免轮询反复打开时旧弹窗留在 body。
+  const dismiss=()=>{if(!dialog)return;dialog.close();dialog.remove();dialog=null;};
   button.onclick=()=>{
     if(dialog){dialog.showModal();return;}
     key=crypto.randomUUID();dialog=node('dialog');
@@ -14,10 +16,11 @@ export function feedbackButton(task,{api,run,notice}){
     category.setAttribute('aria-label','错误类型');for(const [value,name] of Object.entries(categories)){const option=node('option',name);option.value=value;category.append(option);}
     comment.maxLength=2000;comment.setAttribute('aria-label','反馈说明');comment.placeholder='说明问题发生在哪里（可选）';
     share.type='checkbox';label.append(share,node('span','自愿分享本题问题、回答、引用及必要版本／复现信息，不含其他会话。可在“我的反馈”撤回后续读取。'));
-    submit.type=close.type='button';close.onclick=()=>dialog.close();
+    submit.type=close.type='button';close.onclick=dismiss;
+    dialog.oncancel=event=>{if(submit.disabled){event.preventDefault();return;}dismiss();};
     submit.onclick=()=>run(async()=>{submit.disabled=true;error.textContent='';try{
       await api('/api/feedback',json('POST',{source:task.source,task_id:task.id,request_key:key,category:category.value,comment:comment.value,share_context:share.checked}));
-      dialog.close();dialog.remove();dialog=null;notice('反馈已保存，可在“我的反馈”查看处理进度。');
+      dismiss();notice('反馈已保存，可在“我的反馈”查看处理进度。');
     }catch(exc){error.textContent=exc.message||'提交尚未确认，请使用同一窗口重新确认。';throw exc;}finally{submit.disabled=false;}});
     dialog.append(title,category,comment,label,error,submit,close);document.body.append(dialog);dialog.showModal();
   };

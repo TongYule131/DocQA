@@ -26,9 +26,13 @@ const indexLabels = {
   failed: '索引失败', stale: '模型或原文已变更，请重建索引',
 };
 
+// 浏览器存储可能因隐私模式不可用；读取失败退回 null，写入失败只影响刷新后的选择恢复。
+function storedValue(key) { try { return sessionStorage.getItem(key); } catch { return null; } }
+function rememberValue(key, value) { try { sessionStorage.setItem(key, value); } catch { /* 页面内状态仍然有效。 */ } }
+
 // 页面状态保存在内存中；实际文档、任务与内容以服务端返回的数据为准。
 let selectedId = (window.location ? new URLSearchParams(window.location.search).get('document') : null)
-  || sessionStorage.getItem('docqa.selectedDocument');
+  || storedValue('docqa.selectedDocument');
 let documents = [];
 let busy = false;
 let modelConfigured = false;
@@ -92,16 +96,25 @@ let extractionSettingsRevision = 0; // 丢弃设置变更前的迟到规划响�
 
 async function api(path, options = {}) {
   // 统一 API 前缀与错误转换，让操作入口只处理成功数据或错误提示。
-  const response = await (window.docqaFetch || fetch)(`/api${path}`, options);
-  let data = null;
-  try { data = await response.json(); } catch (error) { data = null; }
-  if (!response.ok) {
-    const detail = data && typeof data.detail === 'string' ? data.detail : '请求失败，请稍后重试';
-    const error = new Error(detail);
-    error.status = response.status;
+  // 连接超时只结束网页等待，不代表服务端任务或计费被取消；长任务由调用方显式放宽 timeoutMs。
+  const { timeoutMs = 30000, signal, ...fetchOptions } = options;
+  const controller = signal ? null : new AbortController();
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const response = await (window.docqaFetch || fetch)(`/api${path}`, { ...fetchOptions, signal: signal || controller.signal });
+    let data = null;
+    try { data = await response.json(); } catch (error) { data = null; }
+    if (!response.ok) {
+      const detail = data && typeof data.detail === 'string' ? data.detail : '请求失败，请稍后重试';
+      const error = new Error(detail);
+      error.status = response.status;
+      throw error;
+    }
+    return data;
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error('等待超时，已停止本次请求；后台任务可能仍在执行，请刷新核对。');
     throw error;
-  }
-  return data;
+  } finally { if (timer !== null) clearTimeout(timer); }
 }
 
 function setMessage(text, kind = 'info') {
@@ -214,7 +227,7 @@ async function select(id, preserveAnswer = false) {
   questionMutationSeq += 1;
   questionViewSeq += 1;
   selectedId = id;
-  sessionStorage.setItem('docqa.selectedDocument', id);
+  rememberValue('docqa.selectedDocument', id);
   currentTaskId = null;
   activeVersionId = null;
   indexVersionId = null;
@@ -1361,7 +1374,7 @@ $('upload-form').onsubmit = (event) => {
   run(async () => {
     // 由浏览器生成 multipart 边界，不手动设置上传请求的 Content-Type。
     const data = new FormData($('upload-form'));
-    const result = await api('/documents', { method: 'POST', body: data });
+    const result = await api('/documents', { method: 'POST', body: data, timeoutMs: 120000 });
     selectedId = result.document.id;
     await refresh();
     $('upload-form').reset();
@@ -1399,7 +1412,7 @@ async function refreshIndex() {
 $('test-embedding').onclick = () => run(async () => {
   $('embedding-status').textContent = '正在测试向量连接…';
   try {
-    const result = await api('/embedding/test', { method: 'POST' });
+    const result = await api('/embedding/test', { method: 'POST', timeoutMs: 120000 });
     $('embedding-status').textContent = `${result.model} · 连接成功 · ${result.dimension} 维`;
   } catch (error) {
     $('embedding-status').textContent = '向量连接测试失败';
@@ -1426,7 +1439,7 @@ $('search-form').onsubmit = (event) => {
     $('search-results').replaceChildren();
     const data = await api(`/documents/${selectedId}/search`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: $('search-query').value.trim(), top_k: 5 }),
+      body: JSON.stringify({ query: $('search-query').value.trim(), top_k: 5 }), timeoutMs: 120000,
     });
     searchMeta = data;
     renderSearch(data);
@@ -1488,7 +1501,7 @@ function appendOriginalLinks(container, documentId, sources) {
 $('test-model').onclick = () => run(async () => {
   $('model-status').textContent = '正在连接 DeepSeek，请稍候…';
   try {
-    const result = await api('/model/test', { method: 'POST' });
+    const result = await api('/model/test', { method: 'POST', timeoutMs: 360000 });
     $('model-status').textContent = `${result.model} · 连接成功`;
     setMessage(`模型回复：${result.answer}`, 'ok');
   } catch (error) {
@@ -2424,7 +2437,7 @@ async function intelligence(action, body) {
   const slot = pendingAnalysisSlot(action, body);
   const result = await api(`/documents/${selectedId}/${action}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    ...(body ? { body: JSON.stringify(body) } : {}),
+    ...(body ? { body: JSON.stringify(body) } : {}), timeoutMs: 120000,
   });
   pendingAnalysisKeys.delete(slot);
   try { sessionStorage.removeItem(slot); } catch (_) { /* 只在明确收到响应后释放键。 */ }

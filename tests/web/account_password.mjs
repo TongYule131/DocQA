@@ -2,12 +2,13 @@
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFile} from 'node:fs/promises';
-const source=(await readFile(new URL('../../app/web/account-password.js',import.meta.url),'utf8')).replace(/^import[^\n]+\n/,'');
+const source=(await readFile(new URL('../../app/web/account-password.js',import.meta.url),'utf8')).replace(/^import .*;\r?\n/gm,'');
 async function boot(user,handler=async()=>({status:'password_changed'})) {
-  const elements=Object.fromEntries(['old-password','new-password','confirm-password'].map(id=>[id,{value:''}])),calls=[],navigations=[];
-  const document={getElementById(id){return elements[id]??=( {value:'',hidden:false,disabled:false,textContent:'',href:'',onsubmit:null});}};
+  const elements=Object.fromEntries(['old-password','new-password','confirm-password'].map(id=>[id,{value:'',dataset:{},focus(){}}])),calls=[],navigations=[];
+  const document={getElementById(id){return elements[id]??=( {value:'',hidden:false,disabled:false,textContent:'',href:'',onsubmit:null,dataset:{},focus(){}});}};
   const context={document,window:{docqaAuthReady:Promise.resolve({user})},location:{assign:path=>navigations.push(path)},
-    createApiClient:()=>async(path,options)=>{calls.push({path,options});return handler(path,options);}};
+    createApiClient:()=>async(path,options)=>{calls.push({path,options});return handler(path,options);},
+    installPasswordToggle:()=>null};
   await vm.runInNewContext('(async()=>{'+source+'})()',context);
   return {elements,calls,navigations,submit:()=>elements['password-form'].onsubmit({preventDefault(){}})};
 }

@@ -64,7 +64,7 @@
  .chat-nav-collapsed .sidebar{display:flex;width:64px;position:relative;inset:auto;box-shadow:none;padding:18px 8px 12px;flex-wrap:nowrap}
  .chat-nav-collapsed .menu-toggle{display:none}
  .kb-chat-shell{display:grid;grid-template-columns:64px minmax(0,1fr);height:100dvh}
- .kb-chat-sidebar{position:fixed;top:0;left:0;z-index:15;width:240px;height:100dvh;padding:22px 14px 14px;display:flex;flex-direction:column;align-items:stretch;flex-wrap:nowrap;gap:16px;border-right:1px solid #e3eaf5;background:#f5f8ff;box-shadow:10px 0 30px #20385c16}
+ .kb-chat-sidebar{position:fixed;top:0;left:0;z-index:var(--layer-sidebar, 15);width:240px;height:100dvh;padding:22px 14px 14px;display:flex;flex-direction:column;align-items:stretch;flex-wrap:nowrap;gap:16px;border-right:1px solid #e3eaf5;background:#f5f8ff;box-shadow:10px 0 30px #20385c16}
  .kb-chat-main{grid-column:2;height:100dvh}
  .kb-chat-sidebar>select{order:initial;width:100%}.kb-chat-sidebar>.kb-history{order:initial;flex:1;width:100%;max-height:none}
  .kb-chat-sidebar>.sidebar-bottom{margin-top:auto}.kb-chat-sidebar>.brand{font-size:20px;padding:0 32px 8px 0;margin:0}

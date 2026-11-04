@@ -48,7 +48,16 @@ window.docqaFetch = async (path, options = {}) => {
   }
   return response;
 };
+// 登录状态读取失败时统一降级：所有页面显示同一条提示，并提供明确的重试入口。
 window.docqaAuthReady.catch(() => {
-  const notice = document.getElementById('notice') || document.getElementById('message');
-  if (notice) { notice.hidden = false; notice.textContent = '无法读取登录状态，请刷新页面。'; }
+  if (document.getElementById('auth-degrade')) return;
+  const banner = document.createElement('div');
+  banner.id = 'auth-degrade'; banner.className = 'auth-degrade'; banner.setAttribute('role', 'alert');
+  const text = document.createElement('span');
+  text.textContent = '无法读取登录状态，页面可能缺少数据或权限信息。请检查网络后重试。';
+  const retry = document.createElement('button');
+  retry.type = 'button'; retry.textContent = '重新连接';
+  retry.onclick = () => { retry.disabled = true; retry.textContent = '正在重试…'; location.reload(); };
+  banner.append(text, retry);
+  document.body.prepend(banner);
 });

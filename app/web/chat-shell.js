@@ -22,6 +22,25 @@ if (sidebar) {
   }
   toggle.onclick = () => { collapsed = !collapsed; paint(); try { localStorage.setItem(key, String(collapsed)); } catch {} };
   paint();
+  // 移动端侧栏以浮层展开时加遮罩：点击主区即收起，桌面端不显示。
+  const backdrop = document.createElement('div');
+  backdrop.className = 'nav-backdrop'; backdrop.hidden = true; backdrop.setAttribute('aria-hidden', 'true');
+  document.body.append(backdrop);
+  const drawerOpen = () => window.innerWidth <= 800 && (sidebar.classList.contains('mobile-open')
+    || (sidebar.classList.contains('kb-chat-sidebar') && !document.body.classList.contains('chat-nav-collapsed')));
+  const syncBackdrop = () => { backdrop.hidden = !drawerOpen(); };
+  backdrop.onclick = () => {
+    sidebar.classList.remove('mobile-open');
+    document.getElementById('menu-toggle')?.setAttribute('aria-expanded', 'false');
+    collapsed = true; paint(); try { localStorage.setItem(key, 'true'); } catch {}
+  };
+  if (typeof MutationObserver === 'function') {
+    const observer = new MutationObserver(syncBackdrop);
+    observer.observe(sidebar, { attributes: true, attributeFilter: ['class'] });
+    observer.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+  }
+  window.addEventListener('resize', syncBackdrop);
+  syncBackdrop();
   const newChat = sidebar.querySelector('#new-conversation,#new-question,#new-chat');
   if (newChat) {
     const text = newChat.textContent.replace(/^＋\s*/, '');

@@ -147,7 +147,7 @@ footer{text-align:center;color:#8b9ab0;font-size:11px;padding:12px 0 32px}
 .citation pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%}
 :focus-visible{outline:2px solid #7ca5e8;outline-offset:3px}
 /* 窄屏适配：双栏改为单栏，缩小外边距和字号 */
-@media(max-width:760px){header{padding:0 20px}
+@media(max-width:800px){header{padding:0 20px}
 main{padding:28px 18px}
 .runtime-roles{grid-template-columns:1fr}
 .workspace{grid-template-columns:1fr}
@@ -168,7 +168,7 @@ body[data-workspace-view=admin][data-admin-panel=diagnostics] .workspace,body[da
 body[data-workspace-view=admin] .analysis,body[data-workspace-view=admin] #question-form,body[data-workspace-view=admin] .question-tasks,body[data-workspace-view=admin] .answer{display:none}
 body[data-workspace-view=tools] .workspace-navigation,body[data-workspace-view=tools] .runtime-panel,body[data-workspace-view=tools] .model-panel,body[data-workspace-view=tools] #upload-form,body[data-workspace-view=tools] .upload-help{display:none}
 body[data-workspace-view=tools] .detail>.panel-title .actions,body[data-workspace-view=tools] .detail>.actions,body[data-workspace-view=tools] #search-form,body[data-workspace-view=tools] #search-results,body[data-workspace-view=tools] #chunks,body[data-workspace-view=tools] #question-form,body[data-workspace-view=tools] .question-tasks,body[data-workspace-view=tools] .answer{display:none}
-@media(max-width:760px){header{height:auto;min-height:70px;flex-wrap:wrap;padding:15px 20px;gap:15px}header nav{gap:13px}.local-label{width:100%}.workspace-navigation{padding:12px 18px}.workspace-navigation button{padding:8px 10px}.intro h1{font-size:24px}}
+@media(max-width:800px){header{height:auto;min-height:70px;flex-wrap:wrap;padding:15px 20px;gap:15px}header nav{gap:13px}.local-label{width:100%}.workspace-navigation{padding:12px 18px}.workspace-navigation button{padding:8px 10px}.intro h1{font-size:24px}}
 
 /* 连接配置与诊断统一在管理员系统设置页。旧工具保留 DOM 以兼容控制器。 */
 body[data-workspace-view] .model-panel,body[data-workspace-view] .runtime-panel{display:none!important}

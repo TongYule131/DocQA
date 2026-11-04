@@ -3,18 +3,20 @@ import {node} from './answer-view.js';
 const api=createApiClient(),$=id=>document.getElementById(id);
 const mb=bytes=>(bytes/1024/1024).toFixed(1)+' MB';
 async function refresh(){try{
+  $('error').textContent='';
   const data=await api('/api/admin/operations'),panel=$('operations');panel.replaceChildren();
   panel.append(node('h2','队列与外部请求'),node('p',`执行中 ${data.active} · 排队 ${data.queued} · 本日已发送／不确定请求 ${data.calls_today}`),
     node('p',`全局同时执行 ${data.limits.active_global}，每用户 ${data.limits.active_user}；等待上限 ${data.limits.queue_global}／每用户 ${data.limits.queue_user}，等待超时 ${data.limits.queue_wait_seconds} 秒。`),
     node('h2','已报告用量'),node('p',`已知总token ${data.usage.known_total_tokens} · 用量未知请求 ${data.usage.unknown_usage_calls} · 可核实费用：未知`),
     node('h2','存储'),node('p',`原件 ${mb(data.storage.original_bytes)}／${mb(data.storage.global_limit_bytes)} · 尚未结算预留 ${mb(data.storage.reserved_bytes)} · 磁盘可用 ${mb(data.storage.disk_free_bytes)}`));
+  // 告警属于“需要处理”，必须紧跟该标题；上下文额度是独立小节，不能插在标题与告警之间。
   panel.append(node('h2','需要处理'));
-  if(data.context_budget){const budget=data.context_budget;panel.append(node('h2','统一上下文额度'),
-    node('p',`UTC今日已实报 ${budget.reported_tokens} token · 待核预留 ${budget.held_units} 计量单位 · 未知用量 ${budget.unknown_calls} 次 · 实报超出预留 ${budget.overrun_calls} 次。`),
-    node('p',`全局日额度 ${budget.daily_limit}，单任务默认 ${budget.task_limit}；预留含估算，未知费用不记为零。`));}
   const names={uncertain_calls:'存在不确定的在途请求，请核实费用，勿自动重发',pending_storage_reservations:'存在未完成的文件容量预留，请先核对原件',disk_low:'磁盘可用空间低于保留线',worker_not_ready:'执行者未就绪或进展已停滞',provider_circuit:'供应商处于熔断或半开探测',backup_unverified_or_old:'最近备份未知或超过7天，请核对独立备份'};
   if(!data.alerts.length)panel.append(node('p','未发现当前计数触发的告警。'));
   for(const alert of data.alerts)panel.append(node('p',names[alert.code]||'运行状态需要核对','error'));
+  if(data.context_budget){const budget=data.context_budget;panel.append(node('h2','统一上下文额度'),
+    node('p',`UTC今日已实报 ${budget.reported_tokens} token · 待核预留 ${budget.held_units} 计量单位 · 未知用量 ${budget.unknown_calls} 次 · 实报超出预留 ${budget.overrun_calls} 次。`),
+    node('p',`全局日额度 ${budget.daily_limit}，单任务默认 ${budget.task_limit}；预留含估算，未知费用不记为零。`));}
   const session=data.resident_session_evidence;
   const evidence=session?.different_logon_context_observed?'已观测到不同登录上下文；仍需核对实际注销与重新登录操作。':session?.startup_count?'已记录本版驻留启动，尚无跨登录证据。':'尚无本版驻留启动记录。';
   panel.append(node('h2','登录恢复证据'),node('p',evidence),node('p','记录不会主动注销、重启电脑或发起模型请求；真实跨登录恢复仍需实际操作验收。','muted'));

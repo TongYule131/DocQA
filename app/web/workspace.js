@@ -133,7 +133,13 @@ function inputChanged() {
   const input = $('question-input'); input.style.height = 'auto'; input.style.height = `${Math.min(Math.max(input.scrollHeight, 84), 210)}px`;
   $('input-count').textContent = `${input.value.length} / 4000`; paint(controller.state);
 }
-$('question-form').onsubmit = event => { event.preventDefault(); controller.submit($('question-input').value); };
+$('question-form').onsubmit = async event => {
+  event.preventDefault();
+  const previousJob = controller.state.job?.id;
+  await controller.submit($('question-input').value);
+  // 只有本次确实被接受（产生新任务且无未确认提交）才清空，避免 Enter 原样重发。
+  if (controller.state.job?.id !== previousJob && !controller.state.pending?.uncertain) { $('question-input').value = ''; inputChanged(); }
+};
 $('question-input').addEventListener('input', inputChanged);
 $('question-input').addEventListener('keydown', event => {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {

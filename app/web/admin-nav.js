@@ -15,6 +15,12 @@ if (sidebar && nav) {
   }
   let collapsed=window.innerWidth<=800;try {const saved=localStorage.getItem(collapseKey);if(saved!==null)collapsed=saved==='true';}catch{}
   collapse(collapsed);toggle.onclick=()=>collapse(!document.body.classList.contains('admin-nav-collapsed'));
+  // 移动端展开侧栏时加遮罩：点击主区收起，避免浮层挡住内容又无法关闭。
+  const backdrop=document.createElement('div');backdrop.className='nav-backdrop';backdrop.hidden=true;backdrop.setAttribute('aria-hidden','true');document.body.append(backdrop);
+  const syncBackdrop=()=>{backdrop.hidden=!(window.innerWidth<=800&&!document.body.classList.contains('admin-nav-collapsed'));};
+  backdrop.onclick=()=>collapse(true);
+  if(typeof MutationObserver==='function')new MutationObserver(syncBackdrop).observe(document.body,{attributes:true,attributeFilter:['class']});
+  window.addEventListener('resize',syncBackdrop);syncBackdrop();
   nav.replaceChildren();
   function link(label,href,name,active=false) {
     const a=node('a');a.href=href;a.title=label;a.setAttribute('aria-label',label);a.append(icon(name),node('span',label,'nav-label'));

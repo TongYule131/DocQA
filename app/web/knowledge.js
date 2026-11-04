@@ -5,6 +5,8 @@ const $ = id => document.getElementById(id), api = createApiClient();
 let bases = [], documents = [], users = [], detail = null, baseId = null, busy = false, limit = 20, configured = false;
 let indexJobs = [], ingestionJobs = [];
 let timer = null, revision = 0, uploadRecord = null, pollFailures = 0;
+// 索引状态按“文档 + 解析版本 + 任务状态”缓存：轮询不再为每张卡片重复请求。
+const indexInfoCache = new Map();
 const uploadStorageKey = 'docqa.pendingUpload';
 function readUpload() { try { return JSON.parse(sessionStorage.getItem(uploadStorageKey) || 'null'); } catch { return null; } }
 const active = document => ['queued', 'running'].includes(document.task_status);
@@ -18,15 +20,17 @@ function disable() {
 }
 async function action(work) {
   if (busy) return;
-  busy = true; disable(); tell('');
+  busy = true; indexInfoCache.clear(); disable(); tell('');
   try { await work(); }
   catch (error) { tell((error.name === 'AbortError' || error instanceof TypeError ? '连接中断或等待超时。操作可能仍在执行，请先刷新核对，未自动重试。' : error.message) + (error.supportId ? `（支持编号：${error.supportId}）` : ''), 'error'); }
   finally { busy = false; disable(); }
 }
 function stopPoll() { if (timer !== null) clearTimeout(timer); timer = null; }
+function scopedDocuments() { return detail ? detail.documents || [] : documents; }
 function schedulePoll() {
   stopPoll();
-  if (!document.hidden && pollFailures < 5 && (documents.some(active) || indexJobs.some(j => ['queued','running'].includes(j.status)) || ingestionJobs.some(j=>['queued','running'].includes(j.status)))) timer = setTimeout(async () => {
+  // 轮询只看当前知识库（收件箱时看全部），避免其他库的进行中任务持续触发刷新。
+  if (!document.hidden && pollFailures < 5 && (scopedDocuments().some(active) || indexJobs.some(j => ['queued','running'].includes(j.status)) || ingestionJobs.some(j=>['queued','running'].includes(j.status)))) timer = setTimeout(async () => {
     if (busy) { schedulePoll(); return; }
     try { await refresh(); pollFailures = 0; }
     catch { ++pollFailures; tell('暂时无法读取处理进度，请刷新核对。没有重新提交解析。', 'error'); schedulePoll(); }
@@ -71,11 +75,23 @@ function render() {
     if (!users.filter(u => u.role === 'customer' && u.active).length) members.append(node('p', '先到后台“用户管理”创建客户，再在此分配访问权限。', 'muted'));
     for (const user of users.filter(u => u.role === 'customer' && u.active)) {
       const row = node('label', '', 'account-row'), checkbox = node('input'); checkbox.type = 'checkbox'; checkbox.checked = detail.members.includes(user.id);
-      checkbox.onchange = () => action(async () => { await api(`/api/knowledge-bases/${encoded(baseId)}/members/${encoded(user.id)}`, json('PUT', { enabled: checkbox.checked })); await refresh(); tell('访问权限已更新。'); });
+      checkbox.onchange = () => action(async () => {
+        const desired = checkbox.checked;
+        try { await api(`/api/knowledge-bases/${encoded(baseId)}/members/${encoded(user.id)}`, json('PUT', { enabled: desired })); }
+        // 失败时回滚勾选，避免界面与服务端授权状态不一致；未自动重试。
+        catch (error) { checkbox.checked = !desired; throw error; }
+        await refresh(); tell('访问权限已更新。');
+      });
       row.append(checkbox, node('span', `${user.display_name}（${user.username}）`)); members.append(row);
     }
   }
   disable();
+}
+// 同一文档 + 解析版本 + 索引任务状态只读取一次索引信息；失败也不自动重试，用户操作时由 action() 清空缓存。
+function indexInfoFor(document, job) {
+  const key = `${document.id}:${document.active_parse_version_id || ''}:${job?.status || ''}`;
+  if (!indexInfoCache.has(key)) indexInfoCache.set(key, api(`/api/documents/${encoded(document.id)}/index`));
+  return indexInfoCache.get(key);
 }
 function renderDocument(document) {
   const card = node('article', '', 'document-card'), head = node('div', '', 'row spread');
@@ -132,7 +148,7 @@ function renderDocument(document) {
   card.append(controls); $('documents').append(card);
   // 索引状态独立读取；即使服务端仍在构建，也绝不自动重发收费 POST。
   const seq = revision;
-  api(`/api/documents/${encoded(document.id)}/index`).then(info => {
+  indexInfoFor(document, job).then(info => {
     if (revision !== seq || !card.isConnected) return;
     const ready = info.status === 'indexed' && info.matches_active_version;
     build.textContent = isIndexActive ? '索引已排队 / 处理中' : job && ['failed','needs_attention'].includes(job.status) ? '复用检查点重试索引' : ready ? '索引已就绪' : info.status === 'indexing' ? '正在建立索引' : '建立问答索引';

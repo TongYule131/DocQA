@@ -82,7 +82,6 @@ function selectIntentView(view) {
   document.querySelector('#intents-page .filter-bar').hidden = view === 'test';
   $('intent-tree-view').hidden = view !== 'tree'; $('intent-list-view').hidden = view !== 'list';
   if (testbench) testbench.section.hidden = view !== 'test';
-  $('tree-tab').setAttribute('aria-selected', String(view === 'tree')); $('list-tab').setAttribute('aria-selected', String(view === 'list'));
   const url = new URL(location.href); url.searchParams.set('view', view); history.replaceState(null, '', url);
   const title = { tree:'意图树配置', list:'意图列表', test:'意图测试台' }[view];
   document.querySelector('#intents-page h1').textContent=title; document.title=title+' · DocQA'; $('breadcrumb').textContent=title;
@@ -106,7 +105,6 @@ function openIntent(i = null, parent = null) {
   $('node-examples').value = i?.examples.join('\n') || ''; $('node-response').value = i?.response_text || ''; $('node-topk').value = i?.top_k || ''; $('node-order').value = i?.sort_order || 0; $('node-enabled').checked = i?.enabled ?? true; $('intent-dialog').showModal();
 }
 $('intent-create').onclick = () => openIntent(); $('intent-refresh').onclick = () => run(loadIntents);
-$('tree-tab').onclick = treeTab; $('list-tab').onclick = () => selectIntentView('list');
 for (const id of ['intent-search', 'intent-level', 'intent-kind', 'intent-enabled', 'intent-parent']) $(id).addEventListener('input', () => { intentPage = 1; renderIntents(); });
 $('intent-clear').onclick = () => { for (const id of ['intent-search', 'intent-level', 'intent-kind', 'intent-enabled', 'intent-parent']) $(id).value = ''; intentPage = 1; renderIntents(); };
 $('intent-prev').onclick = () => { intentPage--; renderIntents(); }; $('intent-next').onclick = () => { intentPage++; renderIntents(); };
@@ -208,6 +206,10 @@ async function pollChunkJob() {
   clearTimeout(timer); if (['queued', 'running'].includes(job.status) && !document.hidden) timer = setTimeout(() => run(pollChunkJob), 2000);
 }
 window.addEventListener('pagehide', () => clearTimeout(timer));
+// 页面重新可见时恢复索引任务轮询，与 knowledge.js 一致；切走期间不查询，回来后不需要手动刷新。
+document.addEventListener?.('visibilitychange', () => {
+  if (!document.hidden && chunkJob) pollChunkJob().catch(() => tell('暂时无法读取索引进度，请刷新核对。', 'error'));
+});
 try {
   await window.docqaAuthReady;
   if (moduleName === 'intents') { await loadIntents(); selectIntentView(new URLSearchParams(location.search).get('view')); }

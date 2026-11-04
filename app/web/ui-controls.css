@@ -1,5 +1,8 @@
 /* 公共控件尺度；导航、表格和编辑器保留各自语义，不依赖字符图标的字体基线。 */
-:root{--control-height:36px;--control-radius:9px;--icon-size:18px}
+/* 样式表加载顺序固定为：基线 product/workspace/style → 模块 conversation/knowledge-modules → ui-refinements → chat-layout → 页面专属 → 本文件（最后，覆盖公共控件）。 */
+/* 断点只保留 800px 一档手机断点；CSS 变量不能用于 @media 条件，故以本注释统一约定，不再新增 760/480 等并列档位。 */
+/* 层叠约定：1 表头固定列 < 14 移动端遮罩 < 15 侧栏/抽屉 < 30 下拉菜单 < 40 浮层面板；dialog 走浏览器顶层，不参与此序列。 */
+:root{--control-height:36px;--control-radius:9px;--icon-size:18px;--layer-sticky:1;--layer-backdrop:14;--layer-sidebar:15;--layer-menu:30;--layer-popover:40}
 [hidden]{display:none!important}
 button,.button{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:var(--control-height);line-height:20px;white-space:nowrap;vertical-align:middle;flex-shrink:0}
 button:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid #9bbcf8;outline-offset:3px}
@@ -21,7 +24,7 @@ button:disabled{cursor:not-allowed}
 .product-heading>button,.admin-heading>button{flex:none}
 .admin-content,.admin-main,.table-panel,.panel{min-width:0}
 .table-scroll{max-width:100%;overflow:auto;overscroll-behavior-x:contain}
-.table-scroll table:not(.trace-grid) th:last-child,.table-scroll table:not(.trace-grid) td:last-child{position:sticky;right:0;background:#fff;box-shadow:-7px 0 10px -10px #475569;z-index:1}
+.table-scroll table:not(.trace-grid) th:last-child,.table-scroll table:not(.trace-grid) td:last-child{position:sticky;right:0;background:#fff;box-shadow:-7px 0 10px -10px #475569;z-index:var(--layer-sticky, 1)}
 .table-scroll td:last-child .row{gap:6px;min-width:0;max-width:200px;flex-wrap:wrap}
 .table-scroll td:last-child button,.table-scroll td:last-child .button{padding:6px 10px;min-height:34px;font-size:12px}
 .admin-main.closure-admin{max-width:none;margin:0}
@@ -33,7 +36,7 @@ button:disabled{cursor:not-allowed}
 #scope-filter[open] #scope-caption::after{transform:rotate(225deg);margin:4px 3px 0}
 #scope-filter:not([open]) .document-options{display:none}
 #scope-filter[open] .document-options{display:grid}
-.document-options{position:absolute;bottom:calc(100% + 10px);left:0;right:auto;width:min(440px,100%);max-width:none;max-height:min(420px,60dvh);padding:12px;gap:8px;grid-template-rows:auto auto minmax(0,1fr) auto;overflow:hidden;z-index:40;border:1px solid #dce5f2;border-radius:12px;box-shadow:0 12px 40px #21345126;background:#fff}
+.document-options{position:absolute;bottom:calc(100% + 10px);left:0;right:auto;width:min(440px,100%);max-width:none;max-height:min(420px,60dvh);padding:12px;gap:8px;grid-template-rows:auto auto minmax(0,1fr) auto;overflow:hidden;z-index:var(--layer-popover, 40);border:1px solid #dce5f2;border-radius:12px;box-shadow:0 12px 40px #21345126;background:#fff}
 .scope-actions{display:flex;align-items:center;gap:8px}
 .scope-actions button{flex:1;padding:6px 10px;min-height:34px}
 .document-options input[type=search]{width:100%;min-width:0;min-height:36px;padding:7px 10px;margin:0}
@@ -91,6 +94,12 @@ button[data-logout],.workspace-menu-items [data-logout]{color:#a12c26;border:1px
 body:has(>.demo-banner):has(>.kb-chat-shell){display:flex;flex-direction:column;height:100dvh;overflow:hidden}
 body:has(>.demo-banner)>.kb-chat-shell{height:auto;min-height:0;flex:1}
 body:has(>.demo-banner) .kb-chat-sidebar{height:100%;min-height:0}
+/* 移动端侧栏以浮层展开时的遮罩：点击主区即收起；桌面端不显示。 */
+.nav-backdrop{position:fixed;inset:0;z-index:var(--layer-backdrop, 14);background:#14263d40;border:0;padding:0;min-height:0}
+@media(min-width:801px){.nav-backdrop{display:none}}
+/* 登录状态读取失败时的统一降级条：说明原因并给出重试入口。 */
+.auth-degrade{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:10px;padding:9px 16px;background:#fbeaea;color:#8d3733;font-size:12px;line-height:1.6;flex:none}
+.auth-degrade button{min-height:32px;padding:5px 12px;font-size:12px;background:#fff;color:#8d3733;border:1px solid #e6b5b1}
 @media(max-width:800px){
   button,.button{min-height:40px}
   .product-main{margin:20px auto;padding:0 14px}.layout{grid-template-columns:minmax(0,1fr)}

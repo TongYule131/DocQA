@@ -30,11 +30,15 @@ function streamOptions(source){return {source,changed:()=>renderTurns(),finished
 const streams={knowledge:createAnswerStream(streamOptions('knowledge')),question:createAnswerStream(streamOptions('question'))};
 function notice(text){$('chat-notice').textContent=text;}
 function remember(){sessionStorage.setItem(storagePrefix+'.selected',current?.id||'');}
-function controls(){const blocked=busy||Boolean(client?.pending)||current?.turns.some(active)||current?.submissions.some(s=>s.status==='waiting');$('kb-send').disabled=Boolean(blocked||!client||current?.archived);$('new-chat').disabled=busy||Boolean(client?.pending);$('kb-picker').disabled=busy||Boolean(client?.pending);$('confirm-pending').hidden=!client?.pending;$('confirm-pending').disabled=busy;$('kb-memory').disabled=Boolean(blocked);$('upload-open').disabled=busy||Boolean(client?.pending);for(const id of ['rename-chat','save-notes','clear-memory','archive-chat'])$(id).disabled=busy||!current||Boolean(client?.pending);$('kb-memory').setAttribute('aria-checked',String(current?Boolean(current.memory_enabled):draftMemory));
+function controls(){const blocked=blockedNow();$('new-chat').disabled=busy||Boolean(client?.pending);$('kb-picker').disabled=busy||Boolean(client?.pending);$('confirm-pending').hidden=!client?.pending;$('confirm-pending').disabled=busy;$('kb-memory').disabled=Boolean(blocked);$('upload-open').disabled=busy||Boolean(client?.pending);for(const id of ['rename-chat','save-notes','clear-memory','archive-chat'])$(id).disabled=busy||!current||Boolean(client?.pending);$('kb-memory').setAttribute('aria-checked',String(current?Boolean(current.memory_enabled):draftMemory));
+  syncSend();
   $('entity-memory-tools').disabled=busy||Boolean(client?.pending)||!current;
   // render可能发生在busy期间；请求结束时必须连同“全部资料”重新计算禁用状态。
   for(const control of document.querySelectorAll('#document-options input, #document-options button'))control.disabled=Boolean(blocked||!baseId||current?.archived||(control.dataset.selectAll==='true'&&!readyDocuments().length));
 }
+// 发送按钮与三页对齐：空输入、忙碌、未确认提交、归档会话都不能再次发送。
+function blockedNow(){return busy||Boolean(client?.pending)||current?.turns.some(active)||current?.submissions.some(s=>s.status==='waiting');}
+function syncSend(){$('kb-send').disabled=Boolean(blockedNow()||!client||current?.archived||!$('kb-input').value.trim());}
 function poll(){clearTimeout(timer);if(!document.hidden&&failures<5&&(current?.turns.some(active)||current?.submissions.some(s=>s.status==='waiting')||jobs.some(j=>active(j))))timer=setTimeout(()=>run(refresh),Math.min(1800*(failures+1),10000));}
 async function run(work){if(busy)return;busy=true;controls();try{await work();failures=0;}catch(error){failures++;if([401,403,404,410].includes(error.status)){current=null;jobs=[];renderTurns();}notice(error.status?error.message:'连接中断，请先刷新核对原记录，没有自动重发。');}finally{busy=false;controls();poll();}}
 function base(){return bases.find(b=>b.id===baseId);}
@@ -76,7 +80,11 @@ function source(citation){const content=$('kb-source-content');content.replaceCh
 function button(label,action){const b=node('button',label,'secondary');b.type='button';b.onclick=()=>run(action);return b;}
 function renderTurns(){
   for(const [kind,stream] of Object.entries(streams))stream.watch(current?.turns.filter(t=>t.source===kind));
-  const signature=JSON.stringify([current?.id,current?.turns,current?.submissions,streams.knowledge.revision,streams.question.revision]);if(signature===rendered)return;rendered=signature;
+  // 只序列化影响渲染的关键字段，避免长会话每次轮询对全部正文做 JSON.stringify。
+  const signature=JSON.stringify([current?.id,streams.knowledge.revision,streams.question.revision,
+    current?.turns.map(t=>[t.id,t.source,t.question,t.status,t.stage,t.error_message,t.result?.id,t.cancel_requested,t.export_url,
+      Boolean(t.clarification),t.retrieval_agent?.steps?.length,t.retrieval_agent?.stop_reason]),
+    current?.submissions.map(s=>[s.id,s.status,s.error_message])]);if(signature===rendered)return;rendered=signature;
   const scroll=$('kb-scroll'),bottom=scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight<160,container=$('kb-turns');container.replaceChildren();
   for(const task of current?.turns||[]){const turn=node('section','','kb-chat-turn');turn.append(node('p',task.question,'kb-user-message'));const answer=node('article','','kb-assistant');answer.append(node('strong','DocQA'));
     const displaying=streams[task.source].presenting?.(task)||false;
@@ -132,7 +140,7 @@ $('kb-picker').onchange=()=>run(async()=>{baseId=$('kb-picker').value||null;curr
 $('chat-refresh').onclick=()=>run(async()=>{failures=0;await refresh();});$('history-search').oninput=render;$('archived').onchange=()=>run(refresh);
 $('kb-form').onsubmit=e=>{e.preventDefault();run(async()=>{const question=$('kb-input').value.trim();if(!question)return;client.prepare({conversationId:current?.id,baseId,documentIds:documentIds===null?[]:selectedDocuments(),resourceMode:documentIds===null?'all':selectedDocuments().length?'selected':'none',question,memoryEnabled:current?Boolean(current.memory_enabled):draftMemory});const id=await client.confirm();streams.knowledge.track?.(client.lastTaskId);current=await api('/api/chat/conversations/'+encoded(id));remember();$('kb-input').value='';$('input-count').textContent='0 / 4000';notice('');await refresh();});};
 $('confirm-pending').onclick=()=>run(async()=>{const id=await client.confirm();streams.knowledge.track?.(client.lastTaskId);if(id){current=await api('/api/chat/conversations/'+encoded(id));remember();$('kb-input').value='';}await refresh();});
-$('kb-input').oninput=()=>{$('input-count').textContent=`${$('kb-input').value.length} / 4000`;$('kb-input').style.height='auto';$('kb-input').style.height=Math.min(220,$('kb-input').scrollHeight)+'px';};$('kb-input').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();if(!$('kb-send').disabled)$('kb-form').requestSubmit();}};
+$('kb-input').oninput=()=>{$('input-count').textContent=`${$('kb-input').value.length} / 4000`;$('kb-input').style.height='auto';$('kb-input').style.height=Math.min(220,$('kb-input').scrollHeight)+'px';syncSend();};$('kb-input').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&e.keyCode!==229){e.preventDefault();if(!$('kb-send').disabled)$('kb-form').requestSubmit();}};
 $('kb-memory').onclick=()=>run(async()=>{if(current)await patch({memory_enabled:!current.memory_enabled});else{draftMemory=!draftMemory;controls();}});$('save-notes').onclick=()=>run(()=>patch({memory_notes:$('memory-notes').value}));$('clear-memory').onclick=()=>run(()=>patch({clear_memory:true}));$('rename-chat').onclick=()=>run(()=>patch({title:$('chat-name').value.trim()}));$('archive-chat').onclick=()=>run(()=>patch({archived:!current.archived}));$('close-source').onclick=()=>$('kb-source').close();
 function uploadPolicy(){const b=bases.find(b=>b.id===$('upload-base').value);$('upload-policy').textContent=b?b.activation_policy==='review'?'处理完成后等待管理员审核生效。':'处理完成后自动加入可用资料。':'建立私有临时库，仅你可见，到期后不可检索。';const r=$('replace-document');r.replaceChildren(new Option('作为新资料加入',''));for(const d of b?.documents.filter(d=>d.ready)||[])r.append(new Option(d.filename,d.id));}
 $('upload-open').onclick=()=>{const picker=$('upload-base');picker.replaceChildren();for(const b of bases.filter(b=>b.writable))picker.append(new Option(b.name,b.id));picker.append(new Option('新建私有会话临时库','temporary'));picker.value=uploadRecord?.target|| (base()?.writable?baseId:'temporary');uploadPolicy();$('upload-error').textContent=uploadRecord?'上次上传未确认，请重新选择同一批文件以复用请求键。':'';$('upload-dialog').showModal();};$('upload-base').onchange=uploadPolicy;$('upload-close').onclick=()=>$('upload-dialog').close();

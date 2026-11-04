@@ -29,6 +29,8 @@ function cell(row, text, className) { const item = node('td', text, className); 
 function pill(text, kind) { return node('span', text, `status-pill ${kind}`); }
 function button(text, onClick, className = '') { const item = node('button', text, className); item.type = 'button'; item.onclick = () => run(() => onClick(item), item); return item; }
 function openBase(base = null) {
+  // 概览未就绪时取不到默认向量模型；给出提示而不是抛出 TypeError 让弹窗打不开。
+  if (!overview) { tell('正在读取知识库信息，请稍候再试。', 'error'); return; }
   editingBase = base; $('base-form').reset(); $('base-error').textContent = '';
   $('base-name').value = base?.name || ''; $('base-description').value = base?.description || '';
   $('base-collection').value = base?.collection_name || '';
@@ -71,7 +73,12 @@ function renderBases() {
   $('base-count').textContent = `共 ${filtered.length} 个知识库`;
   $('page-label').textContent = `${page} / ${pages}`; $('prev').disabled = page <= 1; $('next').disabled = page >= pages;
 }
-async function loadBases() { overview = await api('/api/admin/overview'); renderBases(); }
+async function loadBases() {
+  // 概览返回前禁用新建/空态入口，避免点击时还没有默认向量模型。
+  $('new-base').disabled = $('empty-create').disabled = true;
+  try { overview = await api('/api/admin/overview'); renderBases(); }
+  finally { $('new-base').disabled = $('empty-create').disabled = false; }
+}
 function openUser(user = null) {
   resettingUser = user; $('user-form').reset(); $('user-error').textContent = '';
   $('user-create-fields').hidden = Boolean(user);

@@ -75,7 +75,9 @@ assert.equal(ids.get('scope-caption').textContent,'全部可用资料（2 份）
 inputs()[0].checked=false;inputs()[0].onchange();
 assert.deepEqual(inputs().map(el=>el.checked),[false,true,false]);
 assert.equal(ids.get('scope-caption').textContent,'仅使用：第二份.txt');
-assert.equal(ids.get('kb-send').disabled,false);
+const type=text=>{ids.get('kb-input').value=text;ids.get('kb-input').oninput();};
+type('');assert.equal(ids.get('kb-send').disabled,true,'空输入不能发送');
+type('继续提问');assert.equal(ids.get('kb-send').disabled,false);
 inputs()[1].checked=false;inputs()[1].onchange();
 assert.equal(ids.get('scope-caption').textContent,'未选择资料');
 assert.equal(ids.get('kb-send').disabled,false,'全不选仍允许普通聊天');
@@ -102,7 +104,7 @@ await ids.get('chat-refresh').onclick();
 assert(inputs().every(el=>!el.checked));
 assert.equal(ids.get('scope-caption').textContent,'暂无可用资料');
 assert.equal(allButton().disabled,true);
-assert.equal(ids.get('kb-send').disabled,false,'无可用资料也能普通聊天');
+type('无可用资料也能聊天');assert.equal(ids.get('kb-send').disabled,false,'无可用资料也能普通聊天');
 inputs()[2].checked=true;inputs()[2].onchange();
 assert.equal(ids.get('kb-send').disabled,false,'显式选择准备中的资料仍可提交等待问题');
 base.documents[0].ready=true;base.documents[1].ready=true;
@@ -148,6 +150,7 @@ async function bootPicker(saved=new Map(),user='fresh'){
 }
 let picker=await bootPicker();
 assert(picker.boxes().every(el=>!el.checked),'首次新会话不默认授权全部资料');
+picker.elements.get('kb-input').value='普通聊天';picker.elements.get('kb-input').oninput();
 assert.equal(picker.elements.get('kb-send').disabled,false,'空范围不阻止普通聊天');
 await picker.buttons().find(el=>el.attributes['aria-label']==='仅使用 第一份.txt').onclick();
 assert.deepEqual(picker.boxes().map(el=>el.checked),[true,false,false],'仅此份一键清除其他勾选');
@@ -160,6 +163,7 @@ assert.deepEqual(picker.boxes().map(el=>el.checked),[true,false,false],'重新�
 await picker.buttons().find(el=>el.dataset.selectNone==='true').onclick();
 picker=await bootPicker(picker.saved);
 assert(picker.boxes().every(el=>!el.checked),'全不选也持久保留，不重新变为全库');
+picker.elements.get('kb-input').value='普通聊天';picker.elements.get('kb-input').oninput();
 assert.equal(picker.elements.get('kb-send').disabled,false,'空范围不阻止普通聊天');
 await picker.buttons().find(el=>el.attributes['aria-label']==='仅使用 第二份.txt').onclick();
 const shared=picker.saved;
@@ -168,6 +172,7 @@ assert(other.boxes().every(el=>!el.checked),'其他账号不继承资料偏好')
 console.log('PASS document picker: fresh empty, one-click exclusive selection, search, explicit none persistence and account isolation');
 quotaUnavailable=true;const withoutQuota=await bootPicker();
 assert.equal(withoutQuota.elements.get('context-budget').textContent,'');
+withoutQuota.elements.get('kb-input').value='普通聊天';withoutQuota.elements.get('kb-input').oninput();
 assert.equal(withoutQuota.elements.get('kb-send').disabled,false,'用量读取失败不阻塞对话，准入由服务端执行');
 quotaUnavailable=false;
 detail.turns=[{id:'budget-only',source:'knowledge',question:'合成预算问题',status:'succeeded',
