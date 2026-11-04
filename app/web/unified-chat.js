@@ -7,6 +7,18 @@ import {clarificationForm} from './clarification-ui.js';
 
 const api=createApiClient(),$=id=>document.getElementById(id),json=(method,body)=>({method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
 const active=t=>['queued','running'].includes(t.status),labels={queued:'等待处理',running:'正在准备',parsing:'解析文档',indexing:'建立问答索引',review:'等待管理员审核',ready:'资料可用',failed:'准备失败',needs_attention:'需要确认',cancelled:'已停止',uploaded:'已保存原件',retrieving:'查找原文',agent_deciding:'核对证据缺口',agent_reading:'按缺口补查原文',planning:'选择证据与组织回答',waiting_materials:'等待所选资料就绪',generating:'生成回答',validating:'核对引用'};
+// 侧栏与页头使用概括后的短标题，完整问题保留在展开面板与悬停提示中。
+function conciseTitle(value){
+  let text=String(value||'').replace(/\s+/g,' ').trim();
+  text=text.replace(/^(?:(?:请|麻烦|帮我|帮忙|我想知道|想问一下|想请教一下|请问|请教一下)[，,、:：\s]*)+/,'');
+  text=text.replace(/^(?:文档(?:中|里)?(?:指出|显示|说明|提到|写道)?|根据(?:该|这份|上述)?文档|按照(?:该|这份)?文档)[，,、:：\s]*/,'');
+  const quoted=[...text.matchAll(/[“"]([^”"]{2,40})[”"]/g)].map(m=>m[1]);
+  let title=quoted.length?(quoted[0].length>=12?quoted[0]:quoted.slice(0,2).join('、')):text.split(/[。；;！!？?]/)[0];
+  if(!title)title=text;
+  title=title.replace(/^[，,、；;：:\s]+/,'');
+  if(title.length>22)title=title.slice(0,22).replace(/[，,、；;\s]+$/,'')+'…';
+  return title||'新会话';
+}
 // null表示全部可用资料；[]表示用户取消了全部勾选，两者不能共用空数组。
 let bases=[],historyItems=[],current=null,baseId=null,documentIds=[],jobs=[],busy=false,failures=0,timer=null,storagePrefix='',client=null,draftMemory=true,uploadRecord=null,rendered='',documentQuery='';
 let ownQuota=null;
@@ -105,8 +117,10 @@ function render(){
   const picker=$('kb-picker');picker.replaceChildren(new Option('普通对话（不指定知识库）',''));for(const b of bases){const o=node('option',b.name+(b.kind==='temporary'?' · 私有临时':''));o.value=b.id;picker.append(o);}picker.value=baseId||'';
   const title=current?.title||'知识对话',titleDetails=$('chat-title-details');
   if(titleDetails.dataset.conversation!==(current?.id||'')){titleDetails.open=false;titleDetails.dataset.conversation=current?.id||'';}
-  $('chat-title').textContent=title;$('chat-title-full').textContent=title;$('chat-scope').textContent=base()?`${base().name}${base().active_snapshot_id?' · 可用版本 v'+base().revision:' · 资料准备中'}`:'普通对话 · 文档问题可另选资料';
-  const history=$('kb-history'),search=$('history-search').value.toLowerCase();history.replaceChildren();for(const c of historyItems.filter(c=>c.title.toLowerCase().includes(search))){const b=node('button',c.title,c.id===current?.id?'active':'');b.title=c.title;b.onclick=()=>run(async()=>{if(client.pending)throw new Error('请先确认上次提交');current=await api('/api/chat/conversations/'+encoded(c.id));baseId=current.base_id;restoreDocuments(current.document_ids);remember();render();});history.append(b);}
+  // 首轮完整问题用于展开核对；标题本身只有存储的前 60 字，不能当作完整问题。
+  const fullQuestion=current?.turns?.[0]?.question||current?.title||'知识对话';
+  $('chat-title').textContent=conciseTitle(title);$('chat-title-full').textContent=fullQuestion;$('chat-scope').textContent=base()?`${base().name}${base().active_snapshot_id?' · 可用版本 v'+base().revision:' · 资料准备中'}`:'普通对话 · 文档问题可另选资料';
+  const history=$('kb-history'),search=$('history-search').value.toLowerCase();history.replaceChildren();for(const c of historyItems.filter(c=>c.title.toLowerCase().includes(search))){const b=node('button',conciseTitle(c.title),c.id===current?.id?'active':'');b.title=c.title;b.onclick=()=>run(async()=>{if(client.pending)throw new Error('请先确认上次提交');current=await api('/api/chat/conversations/'+encoded(c.id));baseId=current.base_id;restoreDocuments(current.document_ids);remember();render();});history.append(b);}
   renderDocumentOptions();
   scopeCaption();
   const tools=$('entity-memory-tools');

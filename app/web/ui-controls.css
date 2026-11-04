@@ -113,3 +113,35 @@ body:has(>.demo-banner) .kb-chat-sidebar{height:100%;min-height:0}
   .document-options{max-height:55dvh;padding:10px}.document-option-row{align-items:flex-start}.document-option-row label{align-items:flex-start}.document-option-row input[type=checkbox]{margin-top:2px}
   .scope-actions button,.document-option-row .scope-only{min-height:38px}
 }
+
+/* 回答反馈与我的反馈：统一卡片式弹窗，替代浏览器默认方框与裸控件。 */
+.feedback-dialog{width:min(540px,calc(100vw - 28px));padding:0;border:1px solid #e2eaf5;border-radius:18px;box-shadow:0 24px 70px #1735552e;color:#23354f;background:#fff;overflow:hidden}
+.feedback-dialog::backdrop{background:#16283f4d;backdrop-filter:blur(2px)}
+.feedback-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;padding:22px 24px 0}
+.feedback-title{font-size:18px;font-weight:600;margin:0;color:#1f2d43}
+.feedback-sub{font-size:12px;color:#7e8ca4;line-height:1.6;margin:6px 0 0}
+.feedback-close{width:34px;height:34px;border:0;background:transparent;color:#7185a1;font-size:22px;line-height:1;border-radius:9px;display:grid;place-items:center;padding:0;min-height:0}
+.feedback-close:hover{background:#f0f5fc;color:#35507a}
+.feedback-body{padding:18px 24px 4px;display:grid;gap:16px}
+.feedback-field{display:grid;gap:8px}
+.feedback-label{font-size:12px;color:#5d7292;font-weight:500;margin:0;display:block}
+.feedback-categories{display:flex;flex-wrap:wrap;gap:8px}
+.feedback-chip{min-height:32px;padding:6px 13px;border:1px solid #dbe5f4;background:#fff;color:#4b6285;border-radius:999px;font-size:12px;font-weight:400}
+.feedback-chip:hover{background:#f5f9ff;border-color:#c3d6f2}
+.feedback-chip[aria-pressed=true]{background:#edf4ff;border-color:#9dbcff;color:#1d4ed8;font-weight:600}
+.feedback-dialog textarea{min-height:92px;resize:vertical;font-size:13px;line-height:1.7}
+.feedback-share{display:flex;gap:10px;align-items:flex-start;background:#f7f9fd;border:1px solid #e6edf8;border-radius:12px;padding:12px 14px;font-size:12px;line-height:1.7;color:#5d7292;cursor:pointer;margin:0}
+.feedback-share input{width:auto;flex:none;margin:3px 0 0;accent-color:#2563eb}
+.feedback-error{color:#b4534f;font-size:12px;line-height:1.6;margin:0;min-height:0}
+.feedback-error:empty{display:none}
+.feedback-actions{display:flex;justify-content:flex-end;gap:10px;padding:14px 24px 22px}
+.feedback-actions button{min-width:88px}
+.feedback-list{max-height:52dvh;overflow:auto;padding:12px 24px 4px;display:grid;gap:10px}
+.feedback-item{border:1px solid #e6edf8;border-radius:12px;padding:12px 14px;display:grid;gap:6px;background:#fbfdff}
+.feedback-item p{margin:0;font-size:12px;line-height:1.7}
+.feedback-item-meta{color:#7386a3;font-size:11px}
+.feedback-item-comment{color:#2f476b;font-size:13px}
+.feedback-item-reply{color:#3f6b5f;background:#f1f8f5;border-radius:8px;padding:8px 10px}
+.feedback-item button{justify-self:start;font-size:12px;padding:6px 10px;min-height:30px}
+.feedback-empty{color:#7e8ca4;font-size:13px;text-align:center;padding:24px 0;margin:0}
+@media(max-width:800px){.feedback-head{padding:18px 18px 0}.feedback-body{padding:14px 18px 4px}.feedback-actions{padding:12px 18px 18px}.feedback-list{padding:10px 18px 4px}}

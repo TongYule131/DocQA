@@ -11,9 +11,11 @@
 .chat-title-details>summary{display:flex;align-items:center;gap:10px;list-style:none;min-width:0;color:#23354f;line-height:24px;padding:3px 0;cursor:pointer}
 .chat-title-details>summary::-webkit-details-marker{display:none}
 .chat-title-details #chat-title{display:block;flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:15px;font-weight:600}
+.chat-title-details[open] #chat-title{white-space:normal;overflow:visible;text-overflow:clip;line-height:1.5}
 .title-chevron{width:7px;height:7px;flex:none;border-right:1.5px solid #8194af;border-bottom:1.5px solid #8194af;transform:rotate(45deg);margin:0 4px 4px;transition:transform .15s}
 .chat-title-details[open] .title-chevron{transform:rotate(225deg);margin-top:5px}
-.kb-chat-header .chat-title-full{max-height:min(32dvh,260px);overflow:auto;overflow-wrap:anywhere;white-space:pre-wrap;line-height:1.8;font-size:13px;margin:10px 0 0;padding:12px 14px;background:#f6f9ff;border-radius:9px;color:#405778}
+/* 展开后显示首轮完整问题：卡片式容器、可滚动，避免被页头高度裁掉。 */
+.kb-chat-header .chat-title-full{max-height:min(36dvh,300px);overflow:auto;overflow-wrap:anywhere;white-space:pre-wrap;line-height:1.8;font-size:13px;margin:10px 0 0;padding:12px 14px;background:#f7f9fd;border:1px solid #e6edf8;border-radius:12px;color:#3d5577;box-shadow:0 1px 3px #1735550a}
 .kb-chat-header .chat-settings{flex:none;white-space:nowrap;align-self:flex-start}
 .chat-settings>summary{line-height:24px;padding:3px 6px;white-space:nowrap}
 .composer-context #scope-filter{min-width:0;flex:1}
