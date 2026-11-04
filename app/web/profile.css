@@ -42,9 +42,18 @@
 .admin-profile-button{display:flex;align-items:center;gap:10px;width:100%;margin-top:8px}
 @media(max-width:800px){
  .account-security-card{width:calc(100% - 24px);margin:24px auto;padding:20px}
+}
+@media(max-width:520px){
  .profile-dialog{width:calc(100vw - 20px)}
  .profile-heading,.profile-hero,.profile-section,.profile-status,.profile-security{margin-left:18px;margin-right:18px;padding-left:0;padding-right:0}
  .profile-hero{padding:14px;gap:14px;align-items:center}
  .profile-preview{width:56px;height:56px;font-size:22px}
  .profile-hero-actions{gap:6px;margin-top:10px}
 }
+
+/* 统一按钮与输入框高度：label 与 button 使用同一盒模型，名称行两端对齐。 */
+.profile-hero-actions{align-items:center}
+.profile-hero-actions button,.profile-hero-actions .profile-file-label{display:inline-flex;align-items:center;justify-content:center;height:32px;min-height:32px;padding:0 12px;margin:0;line-height:1;font-size:12px;box-sizing:border-box}
+.profile-inline{align-items:stretch}
+.profile-inline input{height:40px;min-height:40px;padding:0 12px;line-height:38px}
+.profile-inline button{height:40px;min-height:40px;padding:0 18px;line-height:1;box-sizing:border-box}
