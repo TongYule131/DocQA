@@ -10,3 +10,8 @@
 .setup-banner{padding:17px;align-items:flex-start;flex-direction:column;gap:12px}.setup-banner p{line-height:1.7}}
 
 @media(min-width:801px) and (max-width:1200px){#knowledge-view th:nth-child(5),#knowledge-view td:nth-child(5),#knowledge-view th:nth-child(6),#knowledge-view td:nth-child(6){display:none}#knowledge-view th,#knowledge-view td{padding-left:15px;padding-right:15px}#knowledge-view td .button{padding:6px 10px;font-size:11px}}
+
+/* 表格行内操作按钮：提高文字与描边对比度，11px 在浅蓝上不可读。 */
+td .row button,td .row .button{font-size:12px;padding:7px 11px;color:#3f5e8f;border-color:#d7e2f1;background:#fff}
+td .row button:hover:enabled,td .row .button:hover{background:#f3f7fe;color:#245bb7}
+td .row button.danger{color:#a94442!important;border-color:#eed7d5}

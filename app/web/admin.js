@@ -55,7 +55,7 @@ function renderBases() {
   }
   for (const base of filtered.slice((page - 1) * 10, page * 10)) {
     const row = node('tr'), name = cell(row, ''), link = node('a', base.name, 'base-name');
-    link.href = `/knowledge?base=${encoded(base.id)}`; name.append(node('span', `${base.collection_name || ''} · ${base.embedding_model || overview.embedding_model}`, 'base-sub')); name.append(link, node('span', base.description || `${base.member_count} 位获授权客户`, 'base-sub'));
+    link.href = `/knowledge?base=${encoded(base.id)}`; name.append(link, node('span', `${base.collection_name || ''} · ${base.embedding_model || overview.embedding_model}`, 'base-sub'), node('span', base.description || `${base.member_count} 位获授权客户`, 'base-sub'));
     cell(row, String(base.document_count)); cell(row, base.owner_name);
     cell(row, '').append(pill(base.active_snapshot_id ? `已发布 v${base.revision}` : '草稿', base.active_snapshot_id ? 'published' : ''));
     cell(row, date(base.created_at)); cell(row, date(base.updated_at));
