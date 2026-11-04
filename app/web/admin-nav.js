@@ -27,6 +27,7 @@ if (sidebar && nav) {
     if(active){a.classList.add('active');a.setAttribute('aria-current','page');}return a;
   }
   nav.append(link('知识库管理','/admin','book',(path==='/admin'||path==='/knowledge'||path==='/admin/chunks')));
+  nav.append(link('运行与用量','/admin/operations','gauge',path==='/admin/operations'));
   const group=node('div','','admin-nav-group'),trigger=node('button','','admin-nav-trigger'),children=node('div','','admin-subnav');
   trigger.type='button';trigger.title='意图管理';trigger.setAttribute('aria-label','意图管理');trigger.setAttribute('aria-controls','intent-navigation');children.id='intent-navigation';
   trigger.append(icon('layers'),node('span','意图管理','nav-label'),icon('chevron'));

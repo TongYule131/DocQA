@@ -18,18 +18,27 @@ export async function installProfile(session) {
   header.append(heading, close);
   const preview = document.createElement('span'); preview.className = 'account-avatar profile-preview';
   const user = document.createElement('p'); user.className = 'profile-name'; user.textContent = name;
+  const account=document.createElement('p');account.className='profile-account';account.textContent=`登录账号：${session.user?.username||''}`;
+  const hero=document.createElement('div');hero.className='profile-hero';const heroInfo=document.createElement('div');heroInfo.className='profile-hero-info';heroInfo.append(user,account);hero.append(preview,heroInfo);
   const nameLabel=document.createElement('label');nameLabel.htmlFor='profile-display-name';nameLabel.textContent='显示名称';
   const nameInput=document.createElement('input');nameInput.id='profile-display-name';nameInput.maxLength=80;nameInput.value=name;nameInput.autocomplete='nickname';
-  const nameSave=document.createElement('button');nameSave.type='button';nameSave.className='secondary';nameSave.textContent='保存显示名称';
-  const account=document.createElement('p');account.className='profile-hint';account.textContent=`登录账号：${session.user?.username||''}`;
-  const security=document.createElement('a');security.className='profile-security button secondary';security.href='/account/password';security.textContent='账号安全 · 修改密码';
-  const hint = document.createElement('p'); hint.className = 'profile-hint'; hint.textContent = 'PNG、JPG、WebP，最大2MB。保存时居中裁剪为方形。';
-  const input = document.createElement('input'); input.type = 'file'; input.id = 'avatar-file'; input.accept = 'image/png,image/jpeg,image/webp'; input.setAttribute('aria-label', '选择头像图片');
+  const nameSave=document.createElement('button');nameSave.type='button';nameSave.className='secondary';nameSave.textContent='保存';
+  const nameRow=document.createElement('div');nameRow.className='profile-inline';nameRow.append(nameInput,nameSave);
+  const nameSection=document.createElement('section');nameSection.className='profile-section';nameSection.append(nameLabel,nameRow);
+  const avatarHeading=document.createElement('h3');avatarHeading.textContent='头像';
+  const hint = document.createElement('p'); hint.className = 'profile-hint'; hint.textContent = '支持 PNG、JPG、WebP，最大 2MB；保存时居中裁剪为方形。';
+  const input = document.createElement('input'); input.type = 'file'; input.id = 'avatar-file'; input.accept = 'image/png,image/jpeg,image/webp'; input.setAttribute('aria-label', '选择头像图片'); input.className='profile-file-input';
+  const fileLabel=document.createElement('label');fileLabel.className='profile-file-label secondary';fileLabel.htmlFor='avatar-file';fileLabel.textContent='选择图片';
+  const fileName=document.createElement('span');fileName.className='profile-file-name';fileName.textContent='未选择文件';
+  const fileRow=document.createElement('div');fileRow.className='profile-file-row';fileRow.append(input,fileLabel,fileName);
+  const avatarSection=document.createElement('section');avatarSection.className='profile-section';avatarSection.append(avatarHeading,hint,fileRow);
   const status = document.createElement('p'); status.className = 'profile-status'; status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
   const actions = document.createElement('div'); actions.className = 'profile-actions';
   const reset = document.createElement('button'); reset.type = 'button'; reset.className = 'secondary'; reset.textContent = '恢复默认头像';
   const save = document.createElement('button'); save.type = 'button'; save.className = 'primary'; save.textContent = '保存头像'; save.disabled = true;
-  actions.append(reset, save); dialog.append(header, preview, user, account,nameLabel,nameInput,nameSave,hint, input, status, actions,security); document.body.append(dialog);
+  actions.append(reset, save);
+  const security=document.createElement('a');security.className='profile-security';security.href='/account/password';security.textContent='账号安全 · 修改密码';const arrow=document.createElement('span');arrow.textContent='→';arrow.setAttribute('aria-hidden','true');security.append(arrow);
+  dialog.append(header, hero, nameSection, avatarSection, status, actions, security); document.body.append(dialog);
   function avatar(element, url) {
     element.replaceChildren();
     if (url) {
@@ -46,7 +55,7 @@ export async function installProfile(session) {
     save.disabled = busy || loading || !selected; reset.disabled = busy || loading || !profile.avatar_url; input.disabled = busy || loading; close.disabled = busy;
     nameInput.disabled=busy||loading;nameSave.disabled=busy||loading||!nameInput.value.trim()||nameInput.value.trim()===name;
   }
-  function discard(clearInput = true) { if (previewUrl) URL.revokeObjectURL(previewUrl); previewUrl = null; selected = null; if (clearInput) input.value = ''; }
+  function discard(clearInput = true) { if (previewUrl) URL.revokeObjectURL(previewUrl); previewUrl = null; selected = null; if (clearInput){ input.value = ''; fileName.textContent = '未选择文件'; } }
   paint();
   if (!session.user) { dialog.remove(); return; }
   let loaded = false;
@@ -66,7 +75,7 @@ export async function installProfile(session) {
   dialog.addEventListener('cancel', event => { if (busy) event.preventDefault(); });
   dialog.addEventListener('close', () => { ++loadToken;loading=false;discard(); paint(); });
   input.onchange = () => {
-    const file = input.files?.[0]; discard(false); status.textContent = '';
+    const file = input.files?.[0]; discard(false); status.textContent = '';fileName.textContent = file ? file.name : '未选择文件';
     if (!file) { paint(); return; }
     if (file.size > 2 * 1024 * 1024 || !['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
       status.textContent = '请选择2MB以内的PNG、JPG或WebP图片'; paint(); return;

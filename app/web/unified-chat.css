@@ -102,3 +102,15 @@
 .settings-check{display:flex;align-items:center;gap:8px;margin:0 0 8px;font-size:12px;color:#5d7292;cursor:pointer}
 .settings-check input{width:15px;height:15px;flex:none;accent-color:#2563eb}
 .settings-refresh{width:auto;justify-self:start;font-size:12px;padding:6px 10px;min-height:32px}
+
+/* 会话多选删除：默认隐藏复选，点“选择”后进入批量模式。 */
+.history-manage{margin-left:auto;width:auto;min-height:24px;padding:2px 9px;font-size:11px;font-weight:400;color:#7e8ca4;background:transparent;border:1px solid #dfe7f2;border-radius:999px}
+.history-manage:hover{background:#f5f9ff;border-color:#c3d6f2;color:#3f5e8f}
+.history-bulk{display:flex;align-items:center;justify-content:space-between;gap:8px;background:#f2f7ff;border:1px solid #dbe7f8;border-radius:10px;padding:6px 8px;font-size:11px;color:#4b6285}
+.history-bulk .row{gap:6px}
+.history-bulk button{width:auto;min-height:26px;padding:3px 9px;font-size:11px}
+.history-select{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:9px;font-size:12.5px;line-height:1.5;color:#344564;cursor:pointer;border:1px solid transparent;background:transparent}
+.history-select:hover{background:#eef4fe}
+.history-select.selected{background:#fff;border-color:#bcd3f2;box-shadow:0 1px 3px #1735550d}
+.history-select input{width:15px;height:15px;flex:none;accent-color:#2563eb;margin:0}
+.history-select-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}

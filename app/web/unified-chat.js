@@ -21,6 +21,7 @@ function conciseTitle(value){
 }
 // null表示全部可用资料；[]表示用户取消了全部勾选，两者不能共用空数组。
 let bases=[],historyItems=[],current=null,baseId=null,documentIds=[],jobs=[],busy=false,failures=0,timer=null,storagePrefix='',client=null,draftMemory=true,uploadRecord=null,rendered='',documentQuery='';
+let managing=false;const selected=new Set();
 let ownQuota=null;
 let quotaRequest=0;
 async function refreshQuota(){const sequence=++quotaRequest;try{const value=await api('/api/chat/quota');if(sequence!==quotaRequest)return;ownQuota=value;renderBudget();}catch{if(sequence===quotaRequest){ownQuota=null;renderBudget();}}}
@@ -41,6 +42,7 @@ function streamOptions(source){return {source,changed:()=>renderTurns(),finished
   painted:follow=>{if(follow){const s=$('kb-scroll');s.scrollTop=s.scrollHeight;}}};}
 const streams={knowledge:createAnswerStream(streamOptions('knowledge')),question:createAnswerStream(streamOptions('question'))};
 function notice(text){$('chat-notice').textContent=text;}
+function updateBulk(){const bulk=$('history-bulk');if(!bulk)return;bulk.hidden=!managing;$('history-manage').textContent=managing?'完成':'选择';$('bulk-count').textContent=`已选 ${selected.size}`;$('bulk-delete').disabled=!selected.size;}
 function remember(){sessionStorage.setItem(storagePrefix+'.selected',current?.id||'');}
 function controls(){const blocked=blockedNow();$('new-chat').disabled=busy||Boolean(client?.pending);$('kb-picker').disabled=busy||Boolean(client?.pending);$('confirm-pending').hidden=!client?.pending;$('confirm-pending').disabled=busy;$('kb-memory').disabled=Boolean(blocked);$('upload-open').disabled=busy||Boolean(client?.pending);for(const id of ['rename-chat','save-notes','clear-memory','archive-chat'])$(id).disabled=busy||!current||Boolean(client?.pending);$('kb-memory').setAttribute('aria-checked',String(current?Boolean(current.memory_enabled):draftMemory));$('archive-quick').hidden=!current;$('archive-quick').textContent=current?.archived?'恢复会话':'归档会话';$('archive-quick').disabled=busy||!current||Boolean(client?.pending);
   syncSend();
@@ -120,7 +122,18 @@ function render(){
   // 首轮完整问题用于展开核对；标题本身只有存储的前 60 字，不能当作完整问题。
   const fullQuestion=current?.turns?.[0]?.question||current?.title||'知识对话';
   $('chat-title').textContent=conciseTitle(title);$('chat-title-full').textContent=fullQuestion;$('chat-scope').textContent=base()?`${base().name}${base().active_snapshot_id?' · 可用版本 v'+base().revision:' · 资料准备中'}`:'普通对话 · 文档问题可另选资料';
-  const history=$('kb-history'),search=$('history-search').value.toLowerCase();history.replaceChildren();for(const c of historyItems.filter(c=>c.title.toLowerCase().includes(search))){const b=node('button',conciseTitle(c.title),c.id===current?.id?'active':'');b.title=c.title;b.onclick=()=>run(async()=>{if(client.pending)throw new Error('请先确认上次提交');current=await api('/api/chat/conversations/'+encoded(c.id));baseId=current.base_id;restoreDocuments(current.document_ids);remember();render();});history.append(b);}
+  const history=$('kb-history'),search=$('history-search').value.toLowerCase();history.replaceChildren();
+  for(const c of historyItems.filter(c=>c.title.toLowerCase().includes(search))){
+    if(managing){
+      const row=node('label','','history-select'+(selected.has(c.id)?' selected':''));row.title=c.title;
+      const check=node('input');check.type='checkbox';check.checked=selected.has(c.id);check.setAttribute('aria-label','选择会话 '+c.title);
+      check.onchange=()=>{if(check.checked)selected.add(c.id);else selected.delete(c.id);row.classList.toggle('selected',check.checked);updateBulk();};
+      row.append(check,node('span',conciseTitle(c.title),'history-select-title'));history.append(row);
+    }else{
+      const b=node('button',conciseTitle(c.title),c.id===current?.id?'active':'');b.title=c.title;b.onclick=()=>run(async()=>{if(client.pending)throw new Error('请先确认上次提交');current=await api('/api/chat/conversations/'+encoded(c.id));baseId=current.base_id;restoreDocuments(current.document_ids);remember();render();});history.append(b);
+    }
+  }
+  updateBulk();
   renderDocumentOptions();
   scopeCaption();
   const tools=$('entity-memory-tools');
@@ -154,6 +167,17 @@ async function toggleArchive(){const archived=!current.archived;await patch({arc
 $('new-chat').onclick=()=>run(async()=>{current=null;restoreDraftScope();jobs=[];remember();rendered='';await refresh();notice('');});
 $('kb-picker').onchange=()=>run(async()=>{baseId=$('kb-picker').value||null;current=null;restoreDraftScope();remember();await refresh();});
 $('chat-refresh').onclick=()=>run(async()=>{failures=0;await refresh();});$('history-search').oninput=render;$('archived').onchange=()=>run(refresh);
+$('history-manage').onclick=()=>{managing=!managing;selected.clear();render();};
+$('bulk-cancel').onclick=()=>{managing=false;selected.clear();render();};
+$('bulk-delete').onclick=()=>run(async()=>{
+  if(!selected.size)return;
+  if(!confirm(`删除选中的 ${selected.size} 个会话？删除后不可恢复。`))return;
+  const targets=historyItems.filter(c=>selected.has(c.id)),failed=[];
+  for(const c of targets){try{await api('/api/chat/conversations/'+encoded(c.id),json('PATCH',{expected_revision:c.revision??0,deleted:true}));}catch(error){failed.push(error.message||c.title);}}
+  if(current&&selected.has(current.id))current=null;
+  managing=false;selected.clear();await refresh();
+  notice(failed.length?`有 ${failed.length} 个会话删除失败：${failed[0]}`:'选中的会话已删除。');
+});
 $('kb-form').onsubmit=e=>{e.preventDefault();run(async()=>{const question=$('kb-input').value.trim();if(!question)return;client.prepare({conversationId:current?.id,baseId,documentIds:documentIds===null?[]:selectedDocuments(),resourceMode:documentIds===null?'all':selectedDocuments().length?'selected':'none',question,memoryEnabled:current?Boolean(current.memory_enabled):draftMemory});const id=await client.confirm();streams.knowledge.track?.(client.lastTaskId);current=await api('/api/chat/conversations/'+encoded(id));remember();$('kb-input').value='';$('input-count').textContent='0 / 4000';notice('');await refresh();});};
 $('confirm-pending').onclick=()=>run(async()=>{const id=await client.confirm();streams.knowledge.track?.(client.lastTaskId);if(id){current=await api('/api/chat/conversations/'+encoded(id));remember();$('kb-input').value='';}await refresh();});
 $('kb-input').oninput=()=>{$('input-count').textContent=`${$('kb-input').value.length} / 4000`;$('kb-input').style.height='auto';$('kb-input').style.height=Math.min(220,$('kb-input').scrollHeight)+'px';syncSend();};$('kb-input').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&e.keyCode!==229){e.preventDefault();if(!$('kb-send').disabled)$('kb-form').requestSubmit();}};

@@ -1,1 +1,10 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>运行与用量 · DocQA</title><link rel="stylesheet" href="/static/product.css"><link rel="stylesheet" href="/static/closure-admin.css"><script src="/static/auth-bridge.js" defer></script><script type="module" src="/static/operations-admin.js"></script><link rel="stylesheet" href="/static/ui-controls.css"></head><body><main class="closure-admin"><h1>运行与用量</h1><nav><a href="/admin">管理工作台</a><a href="/admin/feedback">反馈与质量</a></nav><p>用量按UTC日统计。未知用量和费用保留未知；本页不会发起模型请求。</p><button id="refresh">刷新</button><p id="error" role="status"></p><section id="operations"></section></main></body></html>
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>运行与用量 · DocQA</title>
+<link rel="stylesheet" href="/static/product.css"><link rel="stylesheet" href="/static/admin.css"><link rel="stylesheet" href="/static/closure-admin.css"><link rel="stylesheet" href="/static/ui-refinements.css">
+<script src="/static/auth-bridge.js" defer></script><script type="module" src="/static/operations-admin.js"></script><script type="module" src="/static/admin-nav.js"></script><link rel="stylesheet" href="/static/ui-controls.css"></head>
+<body><div class="admin-shell"><aside class="admin-sidebar"><a class="brand" href="/admin"><span>D</span>DocQA</a><p class="nav-caption">团队工作空间</p><nav aria-label="后台导航"><a href="/admin">知识库管理</a><a href="/admin/operations">运行与用量</a></nav><div class="sidebar-bottom"><a href="/app">返回对话</a></div></aside>
+<div class="admin-content"><header class="admin-header"><div><span class="header-mark"></span>管理控制台</div><div class="row"><span class="local-label">正在读取身份…</span><button class="secondary" data-logout hidden>退出登录</button></div></header>
+<main class="admin-main ops-admin"><p class="breadcrumb">工作空间 / 运行与用量</p>
+<div class="admin-heading"><div><h1>运行与用量</h1><p>按 UTC 日统计；未知用量与费用保持未知，本页不会发起模型请求。</p></div><div class="row ops-heading-actions"><span id="updated" class="muted"></span><button id="refresh" class="secondary" type="button">刷新</button></div></div>
+<p id="error" role="status" aria-live="polite"></p>
+<section id="operations" class="ops-dashboard"></section></main></div></div></body></html>

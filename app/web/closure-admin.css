@@ -39,3 +39,46 @@
 .closure-admin .feedback-empty{color:#8190a9;font-size:13px;text-align:center;padding:24px 0;margin:0}
 @media(max-width:1000px){.feedback-workspace,.feedback-workspace.has-detail{grid-template-columns:minmax(0,1fr)}.feedback-form-grid{grid-template-columns:1fr}}
 .feedback-export{justify-self:start;width:auto;font-size:12px;padding:8px 13px;min-height:34px}
+
+/* 运行与用量仪表盘：KPI 卡片 + 容量/额度条形 + 服务与告警分栏。 */
+.ops-admin{max-width:1280px}
+.ops-heading-actions{margin-left:auto;gap:12px;align-items:center}
+.ops-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin-bottom:18px}
+.ops-kpi{background:#fff;border:1px solid #e4ebf5;border-radius:14px;padding:18px 20px;display:grid;gap:6px;box-shadow:0 2px 3px #172a4c03}
+.ops-kpi-label{font-size:12px;color:#8a99af}
+.ops-kpi-value{font-size:28px;font-weight:600;color:#1f2d43;line-height:1.15}
+.ops-kpi-note{font-size:11px;color:#93a3b9}
+.ops-kpi.tone-blue{border-top:3px solid #2563eb}
+.ops-kpi.tone-amber{border-top:3px solid #e0a03a}
+.ops-kpi.tone-purple{border-top:3px solid #7c6cf0}
+.ops-kpi.tone-green{border-top:3px solid #2fb37c}
+.ops-grid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:16px}
+.ops-card{background:#fff;border:1px solid #e4ebf5;border-radius:14px;padding:20px 22px;display:grid;gap:10px;align-content:start;box-shadow:0 2px 3px #172a4c03}
+.ops-card.span-2{grid-column:span 2}
+.ops-card-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:2px}
+.ops-card h2{font-size:14px;font-weight:600;margin:0;color:#23354f}
+.ops-card-note{font-size:11px;color:#93a3b9}
+.ops-meter{height:8px;border-radius:99px;background:#eef2f8;overflow:hidden}
+.ops-meter-fill{display:block;height:100%;border-radius:99px;background:#2563eb;min-width:2px}
+.ops-meter-fill.purple{background:#7c6cf0}
+.ops-meter-fill.amber{background:#e0a03a}
+.ops-meter-fill.green{background:#2fb37c}
+.ops-kv{display:flex;justify-content:space-between;gap:12px;font-size:12px;color:#7386a3;padding:3px 0}
+.ops-kv strong{color:#2f476b;font-weight:500;text-align:right;overflow-wrap:anywhere}
+.ops-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.ops-metric{background:#f8fafd;border:1px solid #edf1f7;border-radius:10px;padding:12px;display:grid;gap:4px;min-width:0}
+.ops-metric span:first-child{font-size:11px;color:#8a99af}
+.ops-metric strong{font-size:18px;color:#1f2d43;font-weight:600}
+.ops-metric-note{font-size:10.5px;color:#93a3b9;overflow-wrap:anywhere}
+.ops-service{display:flex;align-items:center;gap:8px;font-size:12px;color:#4b6285;padding:7px 0;border-bottom:1px solid #f1f5fa}
+.ops-service:last-of-type{border-bottom:0}
+.ops-dot{width:8px;height:8px;border-radius:50%;background:#cbd5e1;flex:none}
+.ops-dot.ok{background:#2fb37c}
+.ops-dot.warn{background:#e0a03a}
+.ops-service-name{flex:1;min-width:0}
+.ops-service-state{font-size:11px;color:#7e8ca4}
+.ops-alert{display:flex;gap:8px;margin:0;padding:9px 11px;background:#fff8f0;border:1px solid #f3e2cb;border-radius:9px;color:#8a5a20;font-size:12px;line-height:1.6}
+.ops-empty{font-size:12px;color:#8a99af;margin:0;padding:8px 0}
+.ops-footnote{font-size:11px;color:#93a3b9;margin:4px 0 0;line-height:1.7}
+@media(max-width:1100px){.ops-grid{grid-template-columns:minmax(0,1fr)}.ops-card.span-2{grid-column:auto}.ops-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:800px){.ops-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.ops-heading-actions{width:100%;justify-content:flex-end}}
