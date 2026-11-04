@@ -18,27 +18,30 @@ export async function installProfile(session) {
   header.append(heading, close);
   const preview = document.createElement('span'); preview.className = 'account-avatar profile-preview';
   const user = document.createElement('p'); user.className = 'profile-name'; user.textContent = name;
-  const account=document.createElement('p');account.className='profile-account';account.textContent=`登录账号：${session.user?.username||''}`;
-  const hero=document.createElement('div');hero.className='profile-hero';const heroInfo=document.createElement('div');heroInfo.className='profile-hero-info';heroInfo.append(user,account);hero.append(preview,heroInfo);
+  const roleBadge=document.createElement('span');roleBadge.className='profile-role';roleBadge.textContent=session.user?.role==='admin'?'管理员':'客户';
+  const nameRow=document.createElement('div');nameRow.className='profile-name-row';nameRow.append(user,roleBadge);
+  const account=document.createElement('p');account.className='profile-account';account.textContent='@'+(session.user?.username||'');
+  const input = document.createElement('input'); input.type = 'file'; input.id = 'avatar-file'; input.accept = 'image/png,image/jpeg,image/webp'; input.setAttribute('aria-label', '选择头像图片'); input.className='profile-file-input';
+  const fileLabel=document.createElement('label');fileLabel.className='profile-file-label secondary';fileLabel.htmlFor='avatar-file';fileLabel.textContent='更换头像';
+  const reset = document.createElement('button'); reset.type = 'button'; reset.className = 'secondary'; reset.textContent = '恢复默认';
+  const save = document.createElement('button'); save.type = 'button'; save.className = 'primary'; save.textContent = '保存头像'; save.disabled = true;
+  const fileName=document.createElement('span');fileName.className='profile-file-name';fileName.textContent='PNG / JPG / WebP，最大 2MB';
+  const heroActions=document.createElement('div');heroActions.className='profile-hero-actions';heroActions.append(fileLabel,reset,save,fileName);
+  const heroInfo=document.createElement('div');heroInfo.className='profile-hero-info';heroInfo.append(nameRow,account,heroActions);
+  const hero=document.createElement('div');hero.className='profile-hero';hero.append(preview,heroInfo);
+
   const nameLabel=document.createElement('label');nameLabel.htmlFor='profile-display-name';nameLabel.textContent='显示名称';
   const nameInput=document.createElement('input');nameInput.id='profile-display-name';nameInput.maxLength=80;nameInput.value=name;nameInput.autocomplete='nickname';
   const nameSave=document.createElement('button');nameSave.type='button';nameSave.className='secondary';nameSave.textContent='保存';
-  const nameRow=document.createElement('div');nameRow.className='profile-inline';nameRow.append(nameInput,nameSave);
-  const nameSection=document.createElement('section');nameSection.className='profile-section';nameSection.append(nameLabel,nameRow);
-  const avatarHeading=document.createElement('h3');avatarHeading.textContent='头像';
-  const hint = document.createElement('p'); hint.className = 'profile-hint'; hint.textContent = '支持 PNG、JPG、WebP，最大 2MB；保存时居中裁剪为方形。';
-  const input = document.createElement('input'); input.type = 'file'; input.id = 'avatar-file'; input.accept = 'image/png,image/jpeg,image/webp'; input.setAttribute('aria-label', '选择头像图片'); input.className='profile-file-input';
-  const fileLabel=document.createElement('label');fileLabel.className='profile-file-label secondary';fileLabel.htmlFor='avatar-file';fileLabel.textContent='选择图片';
-  const fileName=document.createElement('span');fileName.className='profile-file-name';fileName.textContent='未选择文件';
-  const fileRow=document.createElement('div');fileRow.className='profile-file-row';fileRow.append(input,fileLabel,fileName);
-  const avatarSection=document.createElement('section');avatarSection.className='profile-section';avatarSection.append(avatarHeading,hint,fileRow);
+  const nameRowField=document.createElement('div');nameRowField.className='profile-inline';nameRowField.append(nameInput,nameSave);
+  const nameSection=document.createElement('section');nameSection.className='profile-section';nameSection.append(nameLabel,nameRowField);
+
   const status = document.createElement('p'); status.className = 'profile-status'; status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
-  const actions = document.createElement('div'); actions.className = 'profile-actions';
-  const reset = document.createElement('button'); reset.type = 'button'; reset.className = 'secondary'; reset.textContent = '恢复默认头像';
-  const save = document.createElement('button'); save.type = 'button'; save.className = 'primary'; save.textContent = '保存头像'; save.disabled = true;
-  actions.append(reset, save);
-  const security=document.createElement('a');security.className='profile-security';security.href='/account/password';security.textContent='账号安全 · 修改密码';const arrow=document.createElement('span');arrow.textContent='→';arrow.setAttribute('aria-hidden','true');security.append(arrow);
-  dialog.append(header, hero, nameSection, avatarSection, status, actions, security); document.body.append(dialog);
+  const security=document.createElement('a');security.className='profile-security';security.href='/account/password';
+  const securityLabel=document.createElement('span');securityLabel.className='profile-security-label';securityLabel.textContent='账号与安全';
+  const securityAction=document.createElement('span');securityAction.className='profile-security-action';securityAction.textContent='修改密码 →';
+  security.append(securityLabel,securityAction);
+  dialog.append(header, hero, nameSection, status, security); document.body.append(dialog);
   function avatar(element, url) {
     element.replaceChildren();
     if (url) {
@@ -47,15 +50,19 @@ export async function installProfile(session) {
     } else element.textContent = name === '工作空间' ? 'D' : Array.from(name)[0];
   }
   function paint() {
-    name=profile.display_name||name;user.textContent=name;
+    name=profile.display_name||name;user.textContent=name;roleBadge.hidden=name===roleBadge.textContent;
     for(const label of document.querySelectorAll('.account-name'))label.textContent=name;
     if(session.user){session.user.display_name=name;for(const label of document.querySelectorAll('.local-label, .sidebar-footer p'))label.textContent=`${name} · ${session.user.role==='admin'?'管理员':'客户'}`;}
     for (const element of document.querySelectorAll('.account-avatar:not(.profile-preview)')) avatar(element, profile.avatar_url);
     avatar(preview, previewUrl || profile.avatar_url);
-    save.disabled = busy || loading || !selected; reset.disabled = busy || loading || !profile.avatar_url; input.disabled = busy || loading; close.disabled = busy;
-    nameInput.disabled=busy||loading;nameSave.disabled=busy||loading||!nameInput.value.trim()||nameInput.value.trim()===name;
+    save.disabled = busy || loading || !selected; save.hidden=!selected; reset.disabled = busy || loading || !profile.avatar_url; input.disabled = busy || loading; close.disabled = busy;
+    fileLabel.classList.toggle('is-disabled',busy||loading);
+    nameInput.disabled=busy||loading;
+    const nameChanged=Boolean(nameInput.value.trim())&&nameInput.value.trim()!==name;
+    nameSave.disabled=busy||loading||!nameChanged;
+    nameSave.className=nameChanged?'primary':'secondary';
   }
-  function discard(clearInput = true) { if (previewUrl) URL.revokeObjectURL(previewUrl); previewUrl = null; selected = null; if (clearInput){ input.value = ''; fileName.textContent = '未选择文件'; } }
+  function discard(clearInput = true) { if (previewUrl) URL.revokeObjectURL(previewUrl); previewUrl = null; selected = null; if (clearInput){ input.value = ''; fileName.textContent = 'PNG / JPG / WebP，最大 2MB'; } }
   paint();
   if (!session.user) { dialog.remove(); return; }
   let loaded = false;
@@ -75,7 +82,7 @@ export async function installProfile(session) {
   dialog.addEventListener('cancel', event => { if (busy) event.preventDefault(); });
   dialog.addEventListener('close', () => { ++loadToken;loading=false;discard(); paint(); });
   input.onchange = () => {
-    const file = input.files?.[0]; discard(false); status.textContent = '';fileName.textContent = file ? file.name : '未选择文件';
+    const file = input.files?.[0]; discard(false); status.textContent = '';fileName.textContent = file ? file.name : 'PNG / JPG / WebP，最大 2MB';
     if (!file) { paint(); return; }
     if (file.size > 2 * 1024 * 1024 || !['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
       status.textContent = '请选择2MB以内的PNG、JPG或WebP图片'; paint(); return;

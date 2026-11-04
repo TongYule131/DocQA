@@ -76,7 +76,7 @@ button[data-logout],.workspace-menu-items [data-logout]{color:#a12c26;border:1px
 .profile-dialog .profile-hint{color:#52647b;line-height:1.65;margin:12px 0 8px}
 .profile-dialog .profile-status:empty{min-height:0;height:0;overflow:hidden;margin:0}
 .profile-dialog .profile-actions{gap:10px;margin-top:12px}
-.profile-dialog .profile-security{display:flex;min-height:40px;align-items:center;justify-content:center;margin-top:16px;padding:9px 12px;border:1px solid #b8c9df;border-radius:9px;background:#f7faff;color:#254d80;line-height:20px}
+.profile-dialog .profile-security{display:flex;min-height:40px;align-items:center;justify-content:space-between;margin:20px 26px 22px;padding:16px 0 0;border:0;border-top:1px solid #eef2f8;border-radius:0;background:transparent;color:#4b6285;line-height:20px}
 .profile-dialog .secondary:disabled,.account-security-card button:disabled{opacity:1;background:#eef2f7;color:#65758b;border-color:#d6dfe9}
 .account-security-card h1{margin:20px 0 8px;line-height:1.35}
 .account-security-card #security-user{margin:12px 0;color:#52647b}
