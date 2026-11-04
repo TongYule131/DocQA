@@ -31,3 +31,30 @@
 /* 主区与侧栏使用外层剩余高度，顶部提示条换行后也不能挤出发送和账号入口。 */
 .kb-chat-main,.kb-chat-sidebar{height:100%;min-height:0}
 #context-budget{margin:8px 0;line-height:1.6;color:#62748c;overflow-wrap:anywhere}
+
+/* ---- 视觉精修（问答页样板，令牌见 product.css；仅排版与层次，不改布局骨架） ---- */
+/* 正文与消息字阶：阅读文本升到 14px，行高保持 1.85。 */
+.kb-user-message{font-size:14px;line-height:1.75}
+.kb-assistant{font-size:14px}
+/* 用户气泡：更明确的右侧归属与品牌色底。 */
+.kb-user-message{margin:0 0 20px 18%;background:var(--brand-soft);border:1px solid var(--brand-line);border-radius:var(--radius-card);padding:12px 16px;color:var(--ink)}
+/* 回答卡片：白卡 + 一级阴影，与灰色页面拉开层次；来源徽章沿用 chat-layout 定义。 */
+.kb-assistant{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-card);box-shadow:var(--shadow-card);padding:14px 20px}
+.kb-assistant>strong{color:var(--muted);font-size:12px;font-weight:600}
+.kb-assistant .row{margin-top:8px}
+.kb-chat-turn{margin:0 0 32px}
+/* 历史会话：选中态改为白卡描边，过渡统一 150ms。 */
+.kb-history button{border:1px solid transparent;border-radius:10px;transition:background .15s,color .15s,border-color .15s}
+.kb-history button:hover{background:#eaf0fa}
+.kb-history button.active{background:var(--surface);color:#1d4ed8;border-color:var(--brand-line);box-shadow:var(--shadow-card)}
+/* 输入区：聚焦时品牌色描边 + 柔和外环。 */
+.kb-composer{transition:border-color .15s,box-shadow .15s}
+.kb-composer:focus-within{border-color:#9dbcf3;box-shadow:0 0 0 3px #2563eb14,0 5px 24px #183f7810}
+/* 欢迎区与标题字重收敛到 600 档。 */
+.kb-welcome h1{font-weight:600;letter-spacing:-.3px}
+/* 滚动区域细化滚动条，选中文字使用品牌色。 */
+.kb-chat-scroll,.kb-history{scrollbar-width:thin;scrollbar-color:#c3d2e8 transparent}
+.kb-chat-scroll::-webkit-scrollbar,.kb-history::-webkit-scrollbar{width:8px}
+.kb-chat-scroll::-webkit-scrollbar-thumb,.kb-history::-webkit-scrollbar-thumb{background:#c3d2e8;border-radius:8px}
+::selection{background:#d4e3ff}
+@media(max-width:800px){.kb-user-message{margin-left:8%}.kb-assistant{padding:12px 14px}}
