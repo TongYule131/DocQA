@@ -60,3 +60,49 @@
 .kb-chat-scroll::-webkit-scrollbar-thumb,.kb-history::-webkit-scrollbar-thumb{background:#c3d2e8;border-radius:8px}
 ::selection{background:#d4e3ff}
 @media(max-width:800px){.kb-user-message{margin-left:8%}.kb-assistant{padding:12px 14px}}
+
+/* ---- 侧栏与页头再压缩：会话列表留白、悬浮滚动条、归档小按钮、设置紧凑面板 ---- */
+.kb-chat-sidebar>.kb-history{gap:4px;padding-right:6px;scrollbar-width:thin;scrollbar-color:transparent transparent}
+.kb-chat-sidebar>.kb-history:hover{scrollbar-color:#c3d2e8 transparent}
+.kb-chat-sidebar>.kb-history::-webkit-scrollbar{width:6px}
+.kb-chat-sidebar>.kb-history::-webkit-scrollbar-track{background:transparent}
+.kb-chat-sidebar>.kb-history::-webkit-scrollbar-thumb{background:transparent;border-radius:6px}
+.kb-chat-sidebar>.kb-history:hover::-webkit-scrollbar-thumb{background:#c3d2e8}
+.kb-history button{min-height:38px;padding:9px 11px;border-radius:9px;font-size:12.5px;line-height:1.5}
+.history-title{align-items:center;margin-bottom:2px}
+.history-tools{display:flex;align-items:center;gap:6px;margin-left:auto}
+.history-title .icon-button{width:26px;height:26px}
+.archive-filter{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border:1px solid #dfe7f2;border-radius:999px;background:#fff;font-size:11px;line-height:18px;color:#7e8ca4;cursor:pointer;transition:background .15s,border-color .15s,color .15s}
+.archive-filter:hover{background:#f5f9ff;border-color:#c3d6f2;color:#3f5e8f}
+.archive-filter input{position:absolute;opacity:0;width:0;height:0;margin:0;pointer-events:none}
+.archive-filter:has(input:checked){background:#edf4ff;border-color:#bcd3f2;color:#1d4ed8}
+.archive-filter:has(input:focus-visible){outline:3px solid #9bbcf8;outline-offset:2px}
+
+.chat-head-row{display:flex;align-items:flex-start;gap:10px;min-width:0}
+.chat-title-details{flex:1;min-width:0}
+.chat-head-actions{display:flex;align-items:center;gap:6px;flex:none}
+#archive-quick,.chat-head-actions .chat-settings>summary{font-size:12px;padding:6px 10px;min-height:32px;border:1px solid #e2eaf5;border-radius:9px;background:#fff;color:#4b6285;line-height:18px;font-weight:400}
+#archive-quick:hover,.chat-head-actions .chat-settings>summary:hover{background:#f5f9ff;border-color:#c3d6f2;color:#245bb7}
+.chat-title-details #chat-title{flex:0 1 auto;max-width:100%}
+.chat-title-details>summary{gap:8px}
+
+.chat-settings-content{width:min(320px,calc(100vw - 24px));padding:16px;display:grid;gap:14px;border-radius:14px}
+.chat-settings-content label{margin:0 0 6px;font-size:12px;color:#5d7292;display:block}
+.settings-block{display:grid;min-width:0}
+.settings-inline{display:flex;gap:8px;min-width:0}
+.settings-inline input{flex:1;min-width:0;font-size:13px;padding:8px 10px}
+.settings-inline button{flex:none;width:auto;font-size:12px;padding:6px 12px;min-height:34px}
+.chat-settings-content textarea{font-size:12px;padding:8px 10px;min-height:64px}
+.settings-actions{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+.settings-actions button{width:auto;font-size:12px;padding:6px 10px;min-height:32px}
+.settings-footer{border-top:1px solid #eef2f8;padding-top:10px;display:flex;justify-content:flex-end}
+.settings-footer button{background:transparent;border:0;color:#7185a1;font-size:12px;padding:4px 2px;min-height:0;border-radius:6px}
+.settings-footer button:hover{color:#a94442;background:transparent}
+#entity-memory-tools{display:grid;gap:8px}
+#entity-memory-tools>button{width:auto;justify-self:start;font-size:12px;padding:6px 10px;min-height:32px}
+@media(max-width:800px){
+ .chat-head-row{flex-wrap:wrap}
+ .chat-title-details{flex:1 1 100%}
+ .chat-head-actions{width:100%;justify-content:flex-end}
+ .chat-settings-content{width:min(320px,calc(100vw - 28px))}
+}
